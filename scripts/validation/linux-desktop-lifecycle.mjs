@@ -17,6 +17,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = dirname(dirname(here));
 const execute = promisify(execFile);
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+const pathPresent = async (path) => {
+  try { await lstat(path); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+};
 const option = (key) => { const index = process.argv.indexOf(key); return index < 0 ? undefined : process.argv[index + 1]; };
 const sha256 = (path) => new Promise((done, fail) => {
   const hash = createHash('sha256'); createReadStream(path).on('error', fail).on('data', (chunk) => hash.update(chunk)).on('end', () => done(hash.digest('hex')));
@@ -73,20 +77,15 @@ const existingExecutable = async (name) => {
 };
 
 
-const SERVICE_CLOSE = `import os, signal, sys
-pid, started, exe = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-fd = os.pidfd_open(pid, 0)
-fields = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
-assert int(fields[19]) == started and os.readlink(f"/proc/{pid}/exe") == exe and os.stat(f"/proc/{pid}").st_uid == os.getuid()
-assert b"--keyboard-service" in open(f"/proc/{pid}/cmdline", "rb").read()
-signal.pidfd_send_signal(fd, signal.SIGTERM)
-`;
-
 async function main() {
   assert.equal(process.platform, 'linux', 'Run on the actual Linux native App host');
   assert(process.getuid() > 0, 'Run as the ordinary native App user');
   const mode = option('--mode'); assert(Object.hasOwn(MODES, mode ?? ''), `--mode must be one of ${Object.keys(MODES).join(', ')}`);
   const app = option('--app'); assert(app && isAbsolute(app) && await realpath(app) === app, '--app must be the canonical frozen nomifun-desktop');
+  assert.equal(process.env.XDG_RUNTIME_DIR, `/run/user/${process.getuid()}`, 'Preserve the native user runtime required by the isolated X11 launcher');
+  const keyboardRuntime = join(process.env.XDG_RUNTIME_DIR, 'NomiFun/keyboard-service');
+  const keyboardDesktop = join(keyboardRuntime, 'desktop.json');
+  const legacyKeyboardOwner = join(keyboardRuntime, 'owner.json');
   const ownerTool = option('--owner-tool'); assert(ownerTool && isAbsolute(ownerTool), '--owner-tool must name the built global_os_fixture_owner example');
   const evidenceRoot = option('--evidence'); assert(evidenceRoot && isAbsolute(evidenceRoot), '--evidence must be an absolute new directory');
   await mkdir(evidenceRoot, { recursive: false, mode: 0o700 });
@@ -104,7 +103,6 @@ async function main() {
   const optionalJson = async (path) => { try { return JSON.parse(await readFile(path, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } };
   const jsonRequired = async (path) => { const value = await optionalJson(path); assert(value, `${path} must exist`); return value; };
   let launcher, launcherExit, sentinel, jwt, sidecar, sidecarExit;
-  let services = [];
   const launcherLines = []; const sidecarErrors = [];
   try {
     evidence.owner_prepare = JSON.parse((await execute(ownerTool, ['--prepare-empty-fixture', data])).stdout.trim());
@@ -177,14 +175,10 @@ async function main() {
     }
     for (const kind of ['pipe', 'pty', 'mcp']) assert(native[kind], `The sidecar must publish the original ${kind} process`);
     const all = await Promise.all(descendants(table, hostPid).map(withIdentity));
-    const servicePids = new Set((await Promise.all(all.map(async (row) =>
-      row.exe === app && (await readFile(`/proc/${row.pid}/cmdline`, 'utf8').catch(() => '')).includes('--keyboard-service') ? row.pid : null))).filter(Boolean));
     const agentPids = new Set(Object.values(native).flatMap((item) => item.chain.map((row) => row.pid)));
     const groups = new Set(Object.values(native).map((item) => item.pid));
     const tree = all.map((row) => ({ ...row, class: agentPids.has(row.pid) ? 'agent' : row.comm.startsWith('WebKit') ? 'webkit'
-      : servicePids.has(row.pid) ? 'service'
       : row.exe === app && row.ppid === hostPid && (groups.has(row.pgrp) || row.pgrp === hostPid) ? 'watchdog' : 'other' }));
-    services = tree.filter((row) => row.class === 'service');
     const watchdogs = tree.filter((row) => row.class === 'watchdog');
     assert.equal(watchdogs.length, 3, 'Each original Session process must have exactly one forked process-runtime watchdog');
     for (const kind of ['pipe', 'mcp']) {
@@ -204,6 +198,10 @@ async function main() {
     const sentinelRow = await withIdentity(await procStat(sentinelProof.pid)); assert.equal(sentinelRow.exe, bun);
     Object.assign(evidence, { stage: 'ready', native, tree, sentinel: sentinelRow,
       host_ready: { fds: await descriptorCount(hostPid), threads: (await procStat(hostPid)).threads }, model_requests_ready: evidence.model_requests.length });
+    const keyboardDesktopPid = (await jsonRequired(keyboardDesktop)).pid;
+    assert.equal(keyboardDesktopPid, hostPid, 'The keyboard desktop endpoint must belong to the exact GUI host');
+    assert(!(await pathPresent(legacyKeyboardOwner)), 'The GUI must not publish a standalone keyboard owner descriptor');
+    evidence.keyboard = { desktop_pid: keyboardDesktopPid, legacy_owner_descriptor_absent: true };
     await journal();
 
     const launchCounts = async () => Object.fromEntries(await Promise.all(['pipe', 'pty', 'mcp'].map(async (kind) =>
@@ -226,9 +224,9 @@ async function main() {
       evidence.observations ??= {}; evidence.observations[label] = { report, extra };
       return report;
     };
-    const quitAll = async (label, signal, remaining) => {
+    const quitApp = async (label, signal, remaining) => {
       const report = await observe(label, { host: hostEntry(signal), deadline_ms: 90_000,
-        watch: [...remaining.map((row) => watchRow(row, `${row.class}:${row.comm}:${row.pid}`, row.class === 'service' ? 'alive' : 'exit')), watchRow(sentinelRow, 'sentinel', 'alive')] });
+        watch: [...remaining.map((row) => watchRow(row, `${row.class}:${row.comm}:${row.pid}`, 'exit')), watchRow(sentinelRow, 'sentinel', 'alive')] });
       assert(report.pass, `${label}: an app-owned process did not exit or the tree-external sentinel did not survive`);
     };
 
@@ -237,7 +235,6 @@ async function main() {
         ...owned('mcp').map((row) => watchRow(row, `mcp:${row.comm}:${row.pid}`, 'exit')),
         ...owned('pipe').map((row) => watchRow(row, `pipe:${row.comm}:${row.pid}`, 'exit')),
         ...owned('pty').map((row) => watchRow(row, `pty:${row.comm}:${row.pid}`, 'alive')),
-        ...tree.filter((row) => row.class === 'service').map((row) => watchRow(row, `service:${row.comm}:${row.pid}`, 'alive')),
         watchRow(sentinelRow, 'sentinel', 'alive')] }, async () => {
         await writeFile(join(root, 'stop-agent.request'), JSON.stringify({ token, host_pid: hostPid, session_id: session, operation_id: operation }), { flag: 'wx' });
         return await until(async () => {
@@ -256,9 +253,9 @@ async function main() {
       });
       assert(stopReport.pass, 'Stop must retire only its exact owners while the original sibling processes remain');
       const stopped = new Set([...owned('mcp'), ...owned('pipe')].map((row) => row.pid));
-      await quitAll('quit-after-stop', 'SIGTERM', tree.filter((row) => !stopped.has(row.pid)));
+      await quitApp('quit-after-stop', 'SIGTERM', tree.filter((row) => !stopped.has(row.pid)));
     } else {
-      await quitAll(mode, MODES[mode], tree);
+      await quitApp(mode, MODES[mode], tree);
     }
     evidence.stage = 'host-exited'; await journal();
     const infraPids = new Set();
@@ -285,7 +282,7 @@ async function main() {
         seen.add(child.pid); orphans.push(child); queue.push(child.pid);
       }
     }
-    const unexpected = orphans.filter((row) => row.pid !== sentinel.pid && row.state !== 'Z' && !servicePids.has(row.pid));
+    const unexpected = orphans.filter((row) => row.pid !== sentinel.pid && row.state !== 'Z');
     evidence.orphan_scan = { launcher_pid: launcher.pid, infra_pids: [...infraPids].sort((left, right) => left - right),
       orphans: await Promise.all(unexpected.map(async (row) => ({ ...row, original: await stillOriginal(row) }))) };
     assert.equal(unexpected.length, 0, `Orphans must not survive the original App host: ${JSON.stringify(unexpected.map((row) => [row.pid, row.comm]))}`);
@@ -295,11 +292,19 @@ async function main() {
     const expectedCode = mode === 'parent-death' ? -9 : 0;
     assert.equal(final?.app_exit_code, expectedCode, `The App exit code must be ${expectedCode} for ${mode}`);
     assert.equal(evidence.launcher.cleanup.status, 'complete', 'The private launcher must reap its own X11/bus infrastructure');
-    evidence.after_exit = { remaining_original: (await Promise.all(tree.filter((row) => row.class !== 'service').map(async (row) => (await stillOriginal(row)) ? row.pid : null))).filter(Boolean),
-      service_survivors: (await Promise.all(tree.filter((row) => row.class === 'service').map(async (row) => (await stillOriginal(row)) ? row.pid : null))).filter(Boolean),
+    evidence.after_exit = { remaining_original: (await Promise.all(tree.map(async (row) => (await stillOriginal(row)) ? row.pid : null))).filter(Boolean),
       sentinel_alive: await stillOriginal(sentinelRow), model_requests: evidence.model_requests.length, launches: await launchCounts(),
       database_bytes: (await stat(join(data, 'nomifun-backend.db'))).size };
     assert.deepEqual(evidence.after_exit.remaining_original, [], 'No original app-owned process may survive the host');
+    const keyboardAfterExit = await optionalJson(keyboardDesktop);
+    evidence.keyboard.after_exit = { desktop_descriptor_removed: keyboardAfterExit === undefined,
+      legacy_owner_descriptor_absent: !(await pathPresent(legacyKeyboardOwner)) };
+    assert(evidence.keyboard.after_exit.legacy_owner_descriptor_absent, 'Keyboard shutdown must never create a standalone owner');
+    if (mode === 'parent-death') {
+      assert(!keyboardAfterExit || keyboardAfterExit.pid === hostPid, 'Any stale crash descriptor must still identify the exact exited host');
+    } else {
+      assert.equal(keyboardAfterExit, undefined, 'Graceful GUI shutdown must remove its own desktop descriptor');
+    }
     assert(evidence.after_exit.sentinel_alive, 'The tree-external same-image sentinel must survive');
     evidence.passed = true; evidence.stage = 'passed';
   } catch (error) {
@@ -323,12 +328,6 @@ async function main() {
       const ended = await Promise.race([gone.then(() => true), delay(30_000).then(() => false)]);
       if (ended) evidence.sentinel_closed_by_its_own_owner = true;
       else evidence.sentinel_close_timeout = { exit: sentinel.exitCode, signal: sentinel.signalCode };
-    }
-    for (const row of services) {
-      if (!(await stillOriginal(row))) continue;
-      const closed = await execute('python3', ['-c', SERVICE_CLOSE, String(row.pid), String(row.start_time), app]).then(() => true, () => false);
-      const gone = closed && await until(async () => !(await stillOriginal(row)), 'the run-owned keyboard service', 10_000).then(() => true, () => false);
-      (evidence.services_closed ??= []).push({ pid: row.pid, signalled: closed, exited: gone });
     }
     for (const secret of ['owner-jwt', 'credential.json', 'agent-resources-owner.jwt']) {
       await rm(join(root, secret), { force: true });

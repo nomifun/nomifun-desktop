@@ -8,7 +8,8 @@ pub struct ModelSelection {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+// Ignore retired settings keys while preserving the remaining user configuration.
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub enabled: bool,
     pub k2_enabled: bool,
@@ -26,7 +27,6 @@ pub struct Settings {
     pub always_on_top: bool,
     #[serde(default = "default_subtitle_font_size")]
     pub subtitle_font_size: u16,
-    pub launch_at_login: bool,
 }
 fn default_subtitle_font_size() -> u16 {
     14
@@ -43,7 +43,7 @@ impl Default for Settings {
         Self { enabled:true,k2_enabled:true,k3_enabled:true,k4_enabled:true,
         asr_model:None,asr_mode:AsrMode::Streaming,text_model:None,language:"zh".into(),audio_device_id:None,dictionary:vec![],
         beautify_instruction:"整理标点、语法、口头重复和段落，保留原意、事实、人名、数字、日期、代码和专有词。只输出整理后的完整正文。".into(),
-        always_on_top:true,subtitle_font_size:default_subtitle_font_size(),launch_at_login:true }
+        always_on_top:true,subtitle_font_size:default_subtitle_font_size() }
     }
 }
 impl Settings {
@@ -1050,6 +1050,20 @@ mod tests {
         assert_eq!(d.original_text, d.text);
         assert_eq!(d.revision, 3);
     }
+    #[test]
+    fn retiring_login_preference_preserves_existing_model_references() {
+        let mut settings = Settings::default();
+        settings.asr_model = Some(ModelSelection { provider_id: "user-provider".into(), model: "user-asr".into() });
+        settings.text_model = Some(ModelSelection { provider_id: "text-provider".into(), model: "user-text".into() });
+        let mut persisted = serde_json::to_value(&settings).unwrap();
+        persisted["launchAtLogin"] = serde_json::json!(true);
+        let loaded: Settings = serde_json::from_value(persisted).unwrap();
+        let saved = serde_json::to_value(loaded).unwrap();
+        assert!(saved.get("launchAtLogin").is_none());
+        assert_eq!(saved["asrModel"], serde_json::json!({"providerId":"user-provider", "model":"user-asr"}));
+        assert_eq!(saved["textModel"], serde_json::json!({"providerId":"text-provider", "model":"user-text"}));
+    }
+
     #[test]
     fn existing_settings_default_to_14px_without_replacing_other_values() {
         let mut settings = Settings::default();

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-native-keyboard-validation = []
+native-keyboard-validation = ["nomifun-keyboard/maintenance-validation"]
 
 [[example]]
 name = "keyboard_native_validation"

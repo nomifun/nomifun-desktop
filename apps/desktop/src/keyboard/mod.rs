@@ -15,11 +15,10 @@ use nomifun_keyboard::{
     document::{
         AsrMode, Document, Effect, Identity, Intent, ModelSelection, Phase, Settings, TextSelection,
     },
-    service::{self, Control, DeviceStatus, Event},
+    service::{Commands, Control, DeviceStatus, Event, Transport},
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    net::TcpStream,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -77,8 +76,26 @@ pub(crate) struct KeyboardRuntime {
     stop_flag: Arc<AtomicBool>,
     update_admission: Arc<UpdateAdmission>,
     root: PathBuf,
-    #[cfg(not(windows))]
-    production: bool,
+    transport: Arc<Mutex<Option<OwnedTransport>>>,
+}
+/// Both joins belong to the GUI runtime. The event bridge never reconnects or
+/// starts another process, and shutdown holds this owner until both are gone.
+struct OwnedTransport {
+    transport: Transport,
+    bridge: Option<std::thread::JoinHandle<()>>,
+}
+impl OwnedTransport {
+    fn shutdown(&mut self) -> Result<(), String> {
+        let result = self.transport.shutdown().map_err(|error| error.to_string());
+        let bridge = self.bridge.take().map(|thread| thread.join());
+        if bridge.is_some_and(|result| result.is_err()) {
+            return Err("键盘事件线程异常退出".into());
+        }
+        result
+    }
+}
+impl Drop for OwnedTransport {
+    fn drop(&mut self) { let _ = self.shutdown(); }
 }
 /// Keeps a launcher admitted until its authenticated GUI lifetime endpoint is
 /// published. Maintenance can then quiesce that GUI without racing its startup.
@@ -99,11 +116,9 @@ enum Message {
     },
     #[cfg(feature = "native-keyboard-validation")]
     ValidationHoldStop(bool, oneshot::Sender<Result<(), String>>),
-    Connected(Arc<Mutex<TcpStream>>),
+    Connected(Commands),
     Disconnected(String),
     Device(Event),
-    ExternalShutdown,
-    QuitAllComplete(Result<(), String>),
     Suspend(bool),
     Tick,
     Action {
@@ -173,7 +188,7 @@ struct Actor {
     snapshot: Arc<Mutex<KeyboardState>>,
     tx: mpsc::Sender<Message>,
     urgent: mpsc::UnboundedSender<Message>,
-    writer: Option<Arc<Mutex<TcpStream>>>,
+    commands: Option<Commands>,
     stop_flag: Arc<AtomicBool>,
     suspended: bool,
     suspension: Suspension,
@@ -210,9 +225,9 @@ struct Actor {
     hardware_operation: bool,
     pending_origin: Option<bool>,
     shutdown_replies: Vec<oneshot::Sender<Result<(), String>>>,
-    quit_all_pending: bool,
     display_sent: Option<String>,
-    manage_login: bool,
+    #[cfg(feature = "native-keyboard-validation")]
+    production: bool,
     #[cfg(feature = "native-keyboard-validation")]
     synthetic_input: bool,
     #[cfg(feature = "native-keyboard-validation")]
@@ -231,6 +246,7 @@ pub(crate) fn start(
     server: Arc<nomifun_app::DesktopServer>,
     root: PathBuf,
 ) -> anyhow::Result<()> {
+    platform::retire_legacy_service()?;
     let stop_app = app.clone();
     let exit_app = app.clone();
     let desktop_owner = nomifun_keyboard::desktop_control::register(
@@ -281,9 +297,6 @@ fn start_core(
         (Saved::default(), None)
     };
     let mut saved = saved;
-    if !production {
-        saved.settings.launch_at_login = false;
-    }
     if error.is_some() {
         saved.settings.enabled = false;
     }
@@ -306,13 +319,6 @@ fn start_core(
         edit_session_id: None,
     };
     state.document.error = error;
-    if let Err(e) = if production {
-        platform::login_registration(saved.settings.launch_at_login)
-    } else {
-        Ok(())
-    } {
-        state.document.error = Some(format!("登录启动登记未生效：{e}"));
-    }
     let snapshot = Arc::new(Mutex::new(state.clone()));
     let (tx, rx) = mpsc::channel(64);
     // Native stop/lifecycle messages must neither compete with streaming deltas
@@ -321,6 +327,7 @@ fn start_core(
     let (urgent, urgent_rx) = mpsc::unbounded_channel();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let update_admission = Arc::new(UpdateAdmission::default());
+    let transport = Arc::new(Mutex::new(None));
     app.manage(KeyboardRuntime {
         tx: tx.clone(),
         urgent: urgent.clone(),
@@ -329,11 +336,12 @@ fn start_core(
         stop_flag: stop_flag.clone(),
         update_admission: update_admission.clone(),
         root: root.clone(),
-        #[cfg(not(windows))]
-        production,
+        transport: transport.clone(),
     });
     #[cfg(feature = "native-keyboard-validation")]
     let synthetic_input = !production && root.join(".synthetic-audio-fixture").exists();
+    #[cfg(feature = "native-keyboard-validation")]
+    let transport_root = root.join("keyboard-transport");
     let actor = Actor {
         app: app.clone(),
         models,
@@ -343,7 +351,7 @@ fn start_core(
         snapshot,
         tx: tx.clone(),
         urgent: urgent.clone(),
-        writer: None,
+        commands: None,
         stop_flag: stop_flag.clone(),
         suspended: true,
         suspension: Suspension::initial(),
@@ -380,9 +388,9 @@ fn start_core(
         hardware_operation: false,
         pending_origin: None,
         shutdown_replies: Vec::new(),
-        quit_all_pending: false,
         display_sent: None,
-        manage_login: production,
+        #[cfg(feature = "native-keyboard-validation")]
+        production,
         #[cfg(feature = "native-keyboard-validation")]
         synthetic_input,
         #[cfg(feature = "native-keyboard-validation")]
@@ -415,10 +423,28 @@ fn start_core(
             }
         }
     });
-    if production {
-        std::thread::Builder::new()
-            .name("nomifun-keyboard-ipc".into())
-            .spawn(move || ipc_client(tx, urgent, stop_flag, update_admission))?;
+    let serial = if production {
+        Some(Transport::start()?)
+    } else {
+        #[cfg(feature = "native-keyboard-validation")]
+        {
+            std::fs::create_dir_all(&transport_root)?;
+            Some(Transport::start_validation(transport_root)?)
+        }
+        #[cfg(not(feature = "native-keyboard-validation"))]
+        None
+    };
+    if let Some((serial, events)) = serial {
+        let commands = serial.commands();
+        // Worker initialization precedes caller-supplied actions in the actor
+        // FIFO. Waiting is bounded and cannot depend on any GUI/native action.
+        // On failure the local serial owner is dropped and joined here.
+        initialize_transport_events(&events, commands.clone(), &tx)
+            .map_err(anyhow::Error::msg)?;
+        let bridge = std::thread::Builder::new()
+            .name("nomifun-keyboard-events".into())
+            .spawn(move || transport_events(events, commands, tx, urgent))?;
+        *transport.lock().unwrap() = Some(OwnedTransport { transport: serial, bridge: Some(bridge) });
     }
     Ok(())
 }
@@ -532,6 +558,26 @@ pub(crate) async fn validation_hold_capture_stop(
 pub(crate) fn validation_update_paused(app: &tauri::AppHandle) -> bool {
     app.state::<KeyboardRuntime>().update_admission.paused()
 }
+/// Reads the last command actually consumed by the isolated serial worker.
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) fn validation_transport_control(app: &tauri::AppHandle) -> Result<Option<Control>, String> {
+    let runtime = app.state::<KeyboardRuntime>();
+    let owner = runtime.transport.lock().map_err(|_| "transport owner poisoned")?;
+    Ok(owner.as_ref().and_then(|owner| owner.transport.validation_last_control()))
+}
+/// Observes the real fixture's joinable owner and OS lock without USB access.
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) fn validation_transport_owner(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let runtime = app.state::<KeyboardRuntime>();
+    let owner = runtime.transport.lock().map_err(|_| "transport owner poisoned")?;
+    let directory = runtime.root.join("keyboard-transport");
+    let worker = owner.as_ref().and_then(|owner| owner.transport.validation_owner());
+    let lock_held = Transport::validation_lock_held(&directory).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "processId": std::process::id(), "worker": worker, "lockHeld": lock_held,
+        "endpointPublished": directory.join("owner.json").exists(),
+    }))
+}
 #[cfg(feature = "native-keyboard-validation")]
 async fn validation_hardware_mode(
     app: &tauri::AppHandle,
@@ -551,89 +597,37 @@ async fn validation_hardware_mode(
         .map_err(|_| "actor stopped")?;
     serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|e| e.to_string())
 }
-fn ipc_client(
+fn initialize_transport_events(
+    events: &std::sync::mpsc::Receiver<Event>,
+    commands: Commands,
+    tx: &mpsc::Sender<Message>,
+) -> Result<(), String> {
+    let initial = events.recv_timeout(Duration::from_secs(1))
+        .map_err(|error| format!("键盘串口初始化未确认：{error}"))?;
+    if !matches!(initial, Event::Status(_)) {
+        return Err("键盘串口首个事件不是连接状态".into());
+    }
+    tx.try_send(Message::Connected(commands)).map_err(|_| "键盘初始化队列已关闭或满")?;
+    tx.try_send(Message::Device(initial)).map_err(|_| "键盘初始化队列已关闭或满")?;
+    Ok(())
+}
+fn transport_events(
+    events: std::sync::mpsc::Receiver<Event>,
+    commands: Commands,
     tx: mpsc::Sender<Message>,
     urgent: mpsc::UnboundedSender<Message>,
-    stop_flag: Arc<AtomicBool>,
-    update_admission: Arc<UpdateAdmission>,
 ) {
-    while !stop_flag.load(Ordering::Acquire) {
-        if update_admission.paused() {
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-        let connected_generation = update_admission.generation();
-        let mut client = match service::Client::connect() {
-            Ok(client) => client,
-            Err(_) => {
-                let _ = service::spawn();
-                std::thread::sleep(Duration::from_millis(500));
-                match service::Client::connect() {
-                    Ok(client) => client,
-                    Err(e) => {
-                        let _ = urgent.send(Message::Disconnected(e.to_string()));
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    }
-                }
-            }
-        };
-        let writer = match client.writer() {
-            Ok(writer) => Arc::new(Mutex::new(writer)),
-            Err(_) => continue,
-        };
-        let live = Arc::new(AtomicBool::new(true));
-        let heartbeat_live = live.clone();
-        let heartbeat_writer = writer.clone();
-        let heartbeat = std::thread::spawn(move || {
-            while heartbeat_live.load(Ordering::Acquire) {
-                if let Ok(mut w) = heartbeat_writer.lock() {
-                    if service::write_control(&mut w, Control::Heartbeat).is_err() {
-                        break;
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        });
-        if tx
-            .blocking_send(Message::Connected(writer.clone()))
-            .is_err()
-        {
+    let mut error = "键盘串口线程已停止".to_owned();
+    while let Ok(event) = events.recv() {
+        if matches!(&event, Event::Failure(_)) {
+            if urgent.send(Message::Device(event)).is_err() { break; }
+        } else if tx.try_send(Message::Device(event)).is_err() {
+            let _ = commands.control(Control::Policy { voice_key: "none".into() });
+            error = "设备事件队列溢出，键盘输入已撤销".into();
             break;
         }
-        let error = loop {
-            match client.next() {
-                Ok(event) => {
-                    if matches!(&event,Event::Failure(message)if message=="device_service_stopping")
-                    {
-                        if !update_admission.owns_connection_stop(connected_generation)
-                            && !stop_flag.swap(true, Ordering::AcqRel)
-                        {
-                            let _ = urgent.send(Message::ExternalShutdown);
-                        }
-                    }
-                    if matches!(&event, Event::Failure(_)) {
-                        let _ = urgent.send(Message::Device(event));
-                        continue;
-                    }
-                    if tx.try_send(Message::Device(event)).is_err() {
-                        let _ = service::write_control(
-                            &mut writer.lock().unwrap(),
-                            Control::Policy {
-                                voice_key: "none".into(),
-                            },
-                        );
-                        break "设备事件队列溢出".into();
-                    }
-                }
-                Err(e) => break e.to_string(),
-            }
-        };
-        live.store(false, Ordering::Release);
-        let _ = heartbeat.join();
-        let _ = urgent.send(Message::Disconnected(error));
-        std::thread::sleep(Duration::from_secs(1));
     }
+    let _ = urgent.send(Message::Disconnected(error));
 }
 async fn next_message(
     data: &mut mpsc::Receiver<Message>,
@@ -649,6 +643,31 @@ async fn next_message(
 mod priority_tests {
     use super::*;
 
+    #[cfg(feature = "native-keyboard-validation")]
+    #[test]
+    fn transport_initialization_enters_actor_fifo_before_later_actions() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut owner, events) = Transport::start_validation(root.path().into()).unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        initialize_transport_events(&events, owner.commands(), &tx).unwrap();
+        tx.try_send(Message::Tick).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Message::Connected(_))));
+        assert!(matches!(rx.try_recv(), Ok(Message::Device(Event::Status(_)))));
+        assert!(matches!(rx.try_recv(), Ok(Message::Tick)));
+        owner.shutdown().unwrap();
+        assert!(!Transport::validation_lock_held(root.path()).unwrap());
+    }
+    #[cfg(feature = "native-keyboard-validation")]
+    #[test]
+    fn failed_initial_publication_still_joins_and_releases_the_local_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let (owner, events) = Transport::start_validation(root.path().into()).unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Message::Tick).unwrap();
+        assert!(initialize_transport_events(&events, owner.commands(), &tx).is_err());
+        drop(owner);
+        assert!(!Transport::validation_lock_held(root.path()).unwrap());
+    }
     #[tokio::test]
     async fn stop_and_resume_survive_a_full_streaming_queue_in_order() {
         let (data_tx, mut data) = mpsc::channel(64);
@@ -659,7 +678,7 @@ mod priority_tests {
         let (control_tx, mut control) = mpsc::unbounded_channel();
         control_tx.send(Message::Suspend(true)).unwrap();
         control_tx.send(Message::Suspend(false)).unwrap();
-        control_tx.send(Message::ExternalShutdown).unwrap();
+        control_tx.send(Message::Disconnected("stopped".into())).unwrap();
         assert!(matches!(
             next_message(&mut data, &mut control).await,
             Some(Message::Suspend(true))
@@ -670,7 +689,7 @@ mod priority_tests {
         ));
         assert!(matches!(
             next_message(&mut data, &mut control).await,
-            Some(Message::ExternalShutdown)
+            Some(Message::Disconnected(_))
         ));
         assert_eq!(data.len(), 64);
     }
@@ -699,7 +718,7 @@ impl Actor {
             match message {
                 #[cfg(feature = "native-keyboard-validation")]
                 Message::ValidationButtonClick(button, reply) => {
-                    let result = if self.manage_login || !self.synthetic_input {
+                    let result = if self.production || !self.synthetic_input {
                         Err("synthetic isolated actor required".into())
                     } else if !matches!(button.as_str(), "k2" | "k3") {
                         Err("only K2/K3 fixture clicks are allowed".into())
@@ -718,7 +737,7 @@ impl Actor {
                     reset_asr,
                     reply,
                 } => {
-                    let result = if self.manage_login || !self.synthetic_input {
+                    let result = if self.production || !self.synthetic_input {
                         Err("synthetic isolated actor required".into())
                     } else {
                         if let Some(pressed) = pressed {
@@ -745,7 +764,7 @@ impl Actor {
                 }
                 #[cfg(feature = "native-keyboard-validation")]
                 Message::ValidationHoldStop(hold, reply) => {
-                    let result = if self.manage_login || !self.synthetic_input {
+                    let result = if self.production || !self.synthetic_input {
                         Err("synthetic isolated actor required".into())
                     } else {
                         self.synthetic_stop_hold.store(hold, Ordering::Release);
@@ -755,16 +774,18 @@ impl Actor {
                 }
                 Message::Shutdown(reply) => {
                     self.suspended = true;
-                    self.key_hold.release();
+                    self.rearm_hardware();
+                    self.apply_policy();
                     self.state.service.ready = false;
                     self.state.service.detail =
-                        Some("主程序正在结束录音，登录设备服务保留 K1 启动入口".into());
+                        Some("正在结束系统录音并关闭键盘连接".into());
                     self.abort(false);
                     self.shutdown_replies.push(reply);
                 }
                 Message::PrepareUpdate(reply) => {
                     self.suspended = self.suspension.update(true);
                     self.rearm_hardware();
+                    self.apply_policy();
                     self.state.service.detail = Some("正在暂停语音键盘以准备更新".into());
                     self.abort(false);
                     self.shutdown_replies.push(reply);
@@ -784,10 +805,10 @@ impl Actor {
                         let _ = reply.send(());
                     }
                 }
-                Message::Connected(writer) => {
+                Message::Connected(commands) => {
                     self.rearm_hardware();
                     self.display_sent = None;
-                    self.writer = Some(writer);
+                    self.commands = Some(commands);
                     self.policy_sent = false;
                     self.state.service = ServiceState {
                         running: true,
@@ -799,30 +820,14 @@ impl Actor {
                 Message::Disconnected(error) => {
                     self.rearm_hardware();
                     self.display_sent = None;
-                    self.writer = None;
+                    self.commands = None;
                     self.policy_sent = false;
                     self.state.service.running = false;
                     self.state.service.ready = false;
                     self.state.device = DeviceStatus::default();
                     self.abort(false);
-                    self.state.document.error = Some(error);
-                }
-                Message::ExternalShutdown => {
-                    self.stop_flag.store(true, Ordering::Release);
-                    self.suspended = true;
-                    self.abort(false);
-                    self.app.exit(0);
-                }
-                Message::QuitAllComplete(result) => {
-                    self.quit_all_pending = false;
-                    match result {
-                        Ok(()) => self.app.exit(0),
-                        Err(error) => {
-                            self.state.document.notice = None;
-                            self.state.document.error = Some(format!(
-                                "退出全部服务未完成：{error}。请重试或重启 NomiFun。"
-                            ));
-                        }
+                    if !self.stop_flag.load(Ordering::Acquire) {
+                        self.state.document.error = Some(error);
                     }
                 }
                 Message::Suspend(paused) => {
@@ -1103,9 +1108,6 @@ impl Actor {
                 } else {
                     Ok(())
                 };
-                if !self.shutdown_replies.is_empty() && result.is_ok() && self.writer.is_some() {
-                    let _ = self.control(Control::DesktopStopped);
-                }
                 for reply in self.shutdown_replies.drain(..) {
                     let _ = reply.send(result.clone());
                 }
@@ -1250,15 +1252,17 @@ impl Actor {
         let _ = self.app.emit("keyboard://state", &self.state);
     }
     fn control(&self, control: Control) -> Result<(), String> {
-        let writer = self.writer.as_ref().ok_or("设备服务未连接")?;
-        let mut writer = writer.lock().map_err(|_| "设备IPC锁错误")?;
-        service::write_control(&mut writer, control).map_err(|e| e.to_string())
+        self.commands.as_ref().ok_or("键盘连接未就绪")?
+            .control(control).map_err(|error| error.to_string())
     }
     fn apply_policy(&mut self) {
-        if !self.policy_sent && self.writer.is_some() {
-            match self.control(Control::Rearm {
-                generation: self.activation_generation,
-            }) {
+        if !self.policy_sent && self.commands.is_some() {
+            let control = if self.suspended || self.stop_flag.load(Ordering::Acquire) {
+                Control::Policy { voice_key: "none".into() }
+            } else {
+                Control::Rearm { generation: self.activation_generation }
+            };
+            match self.control(control) {
                 Ok(()) => {
                     self.policy_sent = true;
                     self.state.device.policy_state = "pending".into();
@@ -2400,28 +2404,6 @@ impl Actor {
                     self.begin_capture(false);
                 }
             }
-            "quit_all" => {
-                if self.quit_all_pending {
-                    return Ok(());
-                }
-                self.quit_all_pending = true;
-                self.stop_flag.store(true, Ordering::Release);
-                self.abort(false);
-                self.state.document.notice = Some("正在停止系统录音并等待设备服务退出确认".into());
-                let app = self.app.clone();
-                let urgent = self.urgent.clone();
-                tauri::async_runtime::spawn(async move {
-                    let result = async {
-                        shutdown_main(&app).await?;
-                        tauri::async_runtime::spawn_blocking(|| platform::stop_owner(false))
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .map_err(|e| e.to_string())
-                    }
-                    .await;
-                    let _ = urgent.send(Message::QuitAllComplete(result));
-                });
-            }
             _ => return Err("未知字幕板操作".into()),
         }
         Ok(())
@@ -2435,9 +2417,6 @@ impl Actor {
             .collect();
         settings.validate()?;
         let old = self.saved.settings.clone();
-        if self.manage_login && old.launch_at_login != settings.launch_at_login {
-            platform::login_registration(settings.launch_at_login).map_err(|e| e.to_string())?;
-        }
         let audio_changed = old.asr_mode != settings.asr_mode
             || old.asr_model != settings.asr_model
             || old.audio_device_id != settings.audio_device_id
@@ -2735,6 +2714,15 @@ pub(crate) async fn shutdown_main(app: &tauri::AppHandle) -> Result<(), String> 
             .await
             .map_err(|_| "等待系统麦克风停止超时")?
             .map_err(|_| "字幕停止确认通道关闭")??;
+        // Native capture proof precedes serial teardown. Joining happens off
+        // the async executor and remains serialized across concurrent exits.
+        let owner = runtime.transport.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut owner = owner.lock().map_err(|_| "键盘所有权锁异常".to_owned())?;
+            let result = owner.as_mut().map_or(Ok(()), OwnedTransport::shutdown);
+            owner.take();
+            result
+        }).await.map_err(|error| error.to_string())??;
     }
     Ok(())
 }
@@ -2745,7 +2733,7 @@ async fn pause_for_maintenance(app: &tauri::AppHandle) -> Result<Option<UpdatePa
     let (pause, stopped) =
         UpdatePause::begin(runtime.urgent.clone(), runtime.update_admission.clone())?;
     // This guard exists before the first await, so a cancelled command future
-    // cannot leave the actor or reconnect loop permanently suspended.
+    // cannot leave the actor permanently suspended.
     let result = async {
         tokio::time::timeout(Duration::from_secs(10), stopped)
             .await
@@ -2769,29 +2757,17 @@ async fn pause_for_maintenance(app: &tauri::AppHandle) -> Result<Option<UpdatePa
 /// it must not recursively stop its own external endpoint or the device owner.
 pub(crate) async fn prepare_external_maintenance(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(pause) = pause_for_maintenance(app).await? {
+        // Preflight already proved native stop. shutdown_main repeats that
+        // proof before it closes and joins the GUI-owned serial transport.
+        shutdown_main(app).await?;
         pause.commit();
     }
     Ok(())
 }
 pub(crate) async fn prepare_update(app: &tauri::AppHandle) -> Result<Option<UpdatePause>, String> {
-    let pause = pause_for_maintenance(app).await?;
-    // Windows' package-owned maintenance process performs the final owner
-    // teardown and keeps it excluded throughout file replacement. Preserve
-    // the native package handoff on the other desktop platforms.
-    #[cfg(not(windows))]
-    if app.try_state::<KeyboardRuntime>().is_some_and(|runtime| runtime.production) {
-        let result = tauri::async_runtime::spawn_blocking(|| platform::stop_owner(false))
-            .await.map_err(|e| e.to_string()).and_then(|result| result.map_err(|e| e.to_string()));
-        if let Err(error) = result {
-            if let Some(pause) = pause {
-                if let Err(recovery) = pause.cancel().await {
-                    return Err(format!("{error}；键盘恢复未确认：{recovery}"));
-                }
-            }
-            return Err(error);
-        }
-    }
-    Ok(pause)
+    // Until package handoff commits, this is a reversible actor pause. The
+    // same transport remains owned so cancellation can send a fresh Rearm.
+    pause_for_maintenance(app).await
 }
 #[cfg(feature = "native-keyboard-validation")]
 pub(crate) async fn validation_edit(
@@ -2880,9 +2856,9 @@ pub(crate) async fn validation_document_operation(
 pub(crate) fn early_entry() -> Option<std::process::ExitCode> {
     let arg = std::env::args_os().nth(1)?;
     let result = match arg.to_str()? {
-        "--keyboard-service" => service::run(),
-        "--keyboard-stop" => platform::stop_service(false),
-        "--keyboard-unregister" => platform::stop_service(true),
+        "--app-maintenance-stop" | "--keyboard-stop" => platform::stop_application(false),
+        "--app-maintenance-unregister" | "--keyboard-unregister" => platform::stop_application(true),
+        "--keyboard-service" => Err(anyhow::anyhow!("standalone keyboard service is retired")),
         _ => return None,
     };
     Some(match result {

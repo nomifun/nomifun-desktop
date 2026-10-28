@@ -25,7 +25,6 @@ use std::{
     sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}},
     time::Duration,
 };
-use tauri::Manager;
 
 #[derive(Clone, Default)]
 struct Fixture {
@@ -371,7 +370,6 @@ async fn fixtures(platform_asr: bool, database_path: &std::path::Path)
         },
         asr_model: Some(refs[if platform_asr { 2 } else { 0 }].clone()),
         text_model: Some(refs[1].clone()),
-        launch_at_login: false,
         ..Default::default()
     };
     Ok((service, settings, fixture))
@@ -665,12 +663,28 @@ async fn caret_and_close(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
     close(app).await?;
     Ok(json!({"utf16_caret_insertion":true,"close_discards_draft":true,"old_revision_close_allowed_same_document":true,"stale_close_rejected_new_document":true,"closed_late_final_isolated":true}))
 }
+async fn wait_transport_control(app: &tauri::AppHandle, rearm: bool) -> Result<u64> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        match keyboard::validation_transport_control(app).map_err(anyhow::Error::msg)? {
+            Some(nomifun_keyboard::service::Control::Rearm { generation }) if rearm => return Ok(generation),
+            Some(nomifun_keyboard::service::Control::Policy { voice_key }) if !rearm && voice_key == "none" => return Ok(0),
+            _ => {}
+        }
+        ensure!(tokio::time::Instant::now() < deadline,
+            "actor admission command did not reach the existing serial worker before the next tick/status");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
 async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Value> {
     action(app, "open").await?;
     edit(app, "更新前已定稿。", None).await?;
     let settings = keyboard::validation_snapshot(app)["settings"].clone();
     let mut expected = "更新前已定稿。".to_owned();
     let mut cases = Vec::new();
+    let transport_owner = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(transport_owner["worker"].is_string() && transport_owner["lockHeld"] == true
+        && transport_owner["endpointPublished"] == false, "isolated in-process serial owner is missing or published IPC");
 
     let original_settings: Settings = serde_json::from_value(settings.clone())?;
     for enabled in [false, true] {
@@ -690,6 +704,7 @@ async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
     for scenario in ["cancel_after_ready", "cancel_during_native_stop", "native_stop_timeout", "external_native_stop_timeout"] {
         let final_requests = count(&fixture.final_requests);
         let uploads = count(&fixture.uploads);
+        let previous_rearm = wait_transport_control(app, true).await?;
         let delayed_stop = scenario != "cancel_after_ready";
         keyboard::validation_hold_capture_stop(app, delayed_stop).await.map_err(anyhow::Error::msg)?;
         hardware(app, None).await?;
@@ -700,6 +715,7 @@ async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
                 .context("synthetic actor did not provide update guard")?;
             settled(app, &expected).await?;
             ensure!(keyboard::validation_update_paused(app), "ready preflight did not retain update admission");
+            wait_transport_control(app, false).await?;
             // Keep the old physical key down during maintenance. Neither it nor
             // another press can revive the capture cancelled by this update.
             hardware(app, Some(true)).await?;
@@ -710,6 +726,7 @@ async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
             let pending = tauri::async_runtime::spawn(async move { keyboard::prepare_update(&copy).await });
             wait_state(app, |state| state["audioState"]["state"] == "stopping").await?;
             ensure!(keyboard::validation_update_paused(app), "preflight did not hold admission while native stop was pending");
+            wait_transport_control(app, false).await?;
             pending.abort();
             ensure!(pending.await.is_err(), "cancelled preflight unexpectedly completed");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -720,17 +737,23 @@ async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
             ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "stopping",
                 "cancel claimed native capture released before its proof");
         } else {
-            let failed = if scenario == "external_native_stop_timeout" {
-                keyboard::prepare_external_maintenance(app).await.is_err()
-            } else {
-                keyboard::prepare_update(app).await.is_err()
-            };
+            let copy = app.clone();
+            let external = scenario == "external_native_stop_timeout";
+            let pending = tauri::async_runtime::spawn(async move {
+                if external { keyboard::prepare_external_maintenance(&copy).await }
+                else { keyboard::prepare_update(&copy).await.map(|_| ()) }
+            });
+            wait_state(app, |state| state["audioState"]["state"] == "stopping").await?;
+            wait_transport_control(app, false).await?;
+            let failed = pending.await?.is_err();
             ensure!(failed, "update succeeded while native capture release was held");
-            ensure!(!keyboard::validation_update_paused(app), "failed update left reconnect admission paused");
+            ensure!(!keyboard::validation_update_paused(app), "failed update left admission paused");
             ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "stopping",
                 "failed update lost the pending native capture owner");
         }
 
+        let resumed_rearm = wait_transport_control(app, true).await?;
+        ensure!(resumed_rearm > previous_rearm, "cancel reused the revoked Rearm generation");
         keyboard::validation_hold_capture_stop(app, false).await.map_err(anyhow::Error::msg)?;
         assert_stable(app, &expected).await?;
         ensure!(!keyboard::validation_update_paused(app), "cancel/failed update left admission paused");
@@ -744,15 +767,23 @@ async fn update_recovery(app: &tauri::AppHandle, fixture: &Fixture) -> Result<Va
         hardware(app, Some(false)).await?;
         expected.push_str(&text);
         settled(app, &expected).await?;
+        ensure!(keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)? == transport_owner,
+            "cancelled update replaced or released the in-process serial owner");
         cases.push(json!({"scenario":scenario,"capture_recovered":true,"old_hold_not_resumed":true,
-            "native_stop_proof_retained":true,"preferences_preserved":true}));
+            "native_stop_proof_retained":true,"preferences_preserved":true,"same_transport_owner_retained":true,
+            "none_reached_owner_before_tick_or_status":true,"fresh_rearm_after_cancel":true}));
     }
 
     keyboard::prepare_external_maintenance(app).await.map_err(anyhow::Error::msg)?;
     hardware(app, Some(true)).await?;
     assert_stable(app, &expected).await?;
     ensure!(keyboard::validation_update_paused(app), "committed handoff resumed the replaced runtime");
+    let stopped_owner = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(stopped_owner["worker"].is_null() && stopped_owner["lockHeld"] == false
+        && stopped_owner["endpointPublished"] == false, "native shutdown did not join/release the serial owner");
     Ok(json!({"cases":cases,"successful_handoff_keeps_old_runtime_paused":true,
+        "in_process_transport_owner":transport_owner,"serial_owner_joined_after_native_stop":true,
+        "serial_lock_released_after_shutdown":true,"no_daemon_endpoint_published":true,
         "cloud_completion_not_required":true,"automatic_recording_not_resumed":true,
         "disabled_and_unconfigured_keyboard_admit_maintenance":true,
         "scope":"production actor with synthetic capture; package file replacement is a separate witness"}))

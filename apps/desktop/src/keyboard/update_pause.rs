@@ -2,7 +2,7 @@
 //! Dropping an interrupted preflight restores admission without restoring any
 //! held key or recording intent. Final application shutdown has a separate flag.
 use super::Message;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) struct UpdatePause {
@@ -17,15 +17,10 @@ struct Recovery {
 #[derive(Default)]
 pub(super) struct UpdateAdmission {
     paused: AtomicBool,
-    generation: AtomicU64,
 }
 
 impl UpdateAdmission {
     pub(super) fn paused(&self) -> bool { self.paused.load(Ordering::Acquire) }
-    pub(super) fn generation(&self) -> u64 { self.generation.load(Ordering::Acquire) }
-    pub(super) fn owns_connection_stop(&self, connected_generation: u64) -> bool {
-        self.paused() || self.generation() != connected_generation
-    }
 
     fn release_after_resume(&self, enqueue_resume: impl FnOnce()) {
         // A subsequent prepare can start as soon as paused becomes false. Its
@@ -37,8 +32,8 @@ impl UpdateAdmission {
 
 impl Recovery {
     fn resume(self, reply: Option<oneshot::Sender<()>>) {
-        // This only releases the IPC reconnect pause. The actor independently
-        // revokes key intent and waits for native capture teardown before it can
+        // This releases the actor pause while retaining its serial transport.
+        // The actor independently revokes key intent and waits for native capture teardown before it can
         // accept another recording.
         self.admission.release_after_resume(|| {
             let _ = self.urgent.send(Message::ResumeAfterUpdate(reply));
@@ -54,7 +49,6 @@ impl UpdatePause {
         if admission.paused.swap(true, Ordering::AcqRel) {
             return Err("键盘更新预检已在进行".into());
         }
-        admission.generation.fetch_add(1, Ordering::AcqRel);
         let guard = Self { recovery: Some(Recovery { urgent, admission }) };
         let (reply, result) = oneshot::channel();
         guard.recovery.as_ref().unwrap().urgent.send(Message::PrepareUpdate(reply))
@@ -113,7 +107,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn dropping_a_cancelled_preflight_restores_reconnect_and_queues_actor_recovery() {
+    async fn dropping_a_cancelled_preflight_restores_admission_and_queues_actor_recovery() {
         let (urgent, mut messages) = mpsc::unbounded_channel();
         let paused = Arc::new(UpdateAdmission::default());
         let (guard, result) = UpdatePause::begin(urgent, paused.clone()).unwrap();
@@ -169,18 +163,6 @@ mod tests {
         assert!(state.system(true));
         assert!(state.update(false));
         assert!(!state.system(false));
-    }
-
-    #[test]
-    fn a_late_stop_from_the_previous_connection_cannot_exit_the_recovered_app() {
-        let admission = Arc::new(UpdateAdmission::default());
-        let connected_generation = admission.generation();
-        let (urgent, _messages) = mpsc::unbounded_channel();
-        let (pause, _) = UpdatePause::begin(urgent, admission.clone()).unwrap();
-        drop(pause);
-        assert!(!admission.paused());
-        assert!(admission.owns_connection_stop(connected_generation));
-        assert!(!admission.owns_connection_stop(admission.generation()));
     }
 
     #[test]

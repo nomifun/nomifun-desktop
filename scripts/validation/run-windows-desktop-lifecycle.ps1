@@ -157,7 +157,8 @@ public static class NomiLifecycleKeyboardMetadata {
 '@
 }
 function Read-KeyboardSharedMetadata {
-    # Only the explicitly authorized current-user value and two opaque files.
+    # Only the authorized retired login value and two opaque shared files.
+    # A pre-existing owner belongs to the user; this fixture never starts or stops it.
     # Do not parse JSON, output registry data, or open any database/profile.
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not [IO.Path]::IsPathRooted($env:LOCALAPPDATA)) {
         throw 'Current-user LOCALAPPDATA cannot be established for Keyboard metadata observation.'
@@ -175,7 +176,8 @@ function Read-KeyboardSharedMetadata {
     }
 }
 function Write-KeyboardSharedEvidence([bool]$Unchanged) {
-    $evidence = [ordered]@{before=$keyboardSharedBefore; ready=$keyboardSharedReady; after=$keyboardSharedAfter; unchanged=$Unchanged}
+    $evidence = [ordered]@{scope='read-only retired login and shared metadata fingerprints'; keyboard_runtime_started=$false;
+        before=$keyboardSharedBefore; ready=$keyboardSharedReady; after=$keyboardSharedAfter; unchanged=$Unchanged}
     [IO.File]::WriteAllText((Join-Path $root 'keyboard-shared.json'),($evidence | ConvertTo-Json -Depth 8 -Compress))
 }
 function Assert-KeyboardSharedUnchanged($Observed,[string]$Phase) {
@@ -621,6 +623,7 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
         agent_stop_before_quit=@{enabled=[bool]$StopAgentBeforeQuit; observation=$agentStopObservation; receipt=$agentStopReceipt};
         computer=@{enabled=[bool]$WithComputer; internal_desktop_worker=$computerWitness; exact_handle_exited=[bool]$WithComputer;
             worker_exit_code=$computerExitCode; input_calls=0; screenshot_calls=0; model='local scripted provider'; ordinary_quit_only=[bool]$WithComputer};
+        keyboard_runtime=@{started=$false; reason='dedicated lifecycle fixture skips Keyboard startup and maintenance CLI'; production_keyboard_exit='not run'};
         exact_browser_exited=$true; coordinator_cleanup_verified=$coordinatorVerified; exit_code=$hostProcess.ExitCode;
         external_owner=@{pid=$externalOwnerProcess.Id; driver_owned_sentinel=$true; alive_before_exit=$externalOwnerAliveBeforeExit;
             alive_after_native_exit=$externalOwnerAliveAfterExit; registered_os_service=$false};
@@ -629,7 +632,8 @@ try { [void]$held.WaitOne() } finally { $held.Dispose() }
             else{'exact isolated shell and managed WebView2 Environment ProcessInfos, real desktop host, and independent driver-owned sentinel (not an OS service)'};
         artifacts=$root}
     if ($WithComputer) {
-        $passReceiptValue.keyboard_shared = [ordered]@{before=$keyboardSharedBefore; ready=$keyboardSharedReady; after=$keyboardSharedAfter; unchanged=$keyboardSharedUnchanged}
+        $passReceiptValue.keyboard_shared = [ordered]@{scope='read-only retired login and shared metadata fingerprints';
+            before=$keyboardSharedBefore; ready=$keyboardSharedReady; after=$keyboardSharedAfter; unchanged=$keyboardSharedUnchanged}
     }
     $passReceipt = ($passReceiptValue | ConvertTo-Json -Depth 8 -Compress)
     [IO.File]::WriteAllText((Join-Path $root 'native-exit-proof.json'), $passReceipt)

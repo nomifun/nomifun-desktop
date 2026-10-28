@@ -53,7 +53,7 @@ pub fn replace_file(source: &Path, target: &Path) -> Result<()> {
 pub fn installed_desktop_running(installed: &Path, runtime: &Path) -> Result<bool> {
     let expected = if installed.exists() { installed.canonicalize()? } else { return Ok(false); };
     let expected = expected.to_string_lossy().to_lowercase();
-    let owner_pid = if nomifun_keyboard::maintenance::ResumeIntent::capture(runtime)?.service { fs::read(runtime.join("owner.json")).ok()
+    let owner_pid = if nomifun_keyboard::legacy_service::owner_running_in(runtime)? { fs::read(runtime.join("owner.json")).ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|value| value["pid"].as_u64()) } else { None };
     let snapshot = unsafe { CreateToolhelp32Snapshot(2, 0) };
@@ -80,30 +80,8 @@ pub fn installed_desktop_running(installed: &Path, runtime: &Path) -> Result<boo
     Ok(false)
 }
 
-fn process_image(pid: u32) -> Result<PathBuf> {
-    let process = unsafe { OpenProcess(0x1000, 0, pid) };
-    ensure!(!process.is_null(), "cannot verify keyboard participant process {pid}: {}", std::io::Error::last_os_error());
-    let process = Parent(process);
-    let mut image = vec![0u16; 32768];
-    let mut size = image.len() as u32;
-    ensure!(unsafe { QueryFullProcessImageNameW(process.0, 0, image.as_mut_ptr(), &mut size) } != 0,
-        "cannot verify keyboard participant image: {}", std::io::Error::last_os_error());
-    Ok(PathBuf::from(OsString::from_wide(&image[..size as usize])))
-}
-
 pub fn validate_runtime_ownership(installed: &Path, runtime: &Path, observed: nomifun_keyboard::maintenance::ResumeIntent) -> Result<()> {
-    let expected = installed.canonicalize().unwrap_or_else(|_| installed.to_path_buf());
-    for (name, active) in [("desktop.json", observed.desktop), ("owner.json", observed.service)] {
-        if !active { continue; }
-        let bytes = fs::read(runtime.join(name))?;
-        ensure!(bytes.len() <= 32768, "keyboard participant descriptor is too large");
-        let descriptor: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let pid = descriptor["pid"].as_u64().filter(|pid| *pid <= u32::MAX as u64).ok_or_else(|| anyhow::anyhow!("keyboard participant PID is unavailable"))?;
-        let image = process_image(pid as u32)?.canonicalize()?;
-        ensure!(image.to_string_lossy().to_lowercase() == expected.to_string_lossy().to_lowercase(),
-            "another NomiFun installation owns the keyboard service; quit that installation before updating this one");
-    }
-    Ok(())
+    nomifun_keyboard::legacy_service::validate_runtime_ownership(installed, runtime, observed.desktop)
 }
 
 #[link(name = "advapi32")]
@@ -131,18 +109,27 @@ fn login_value() -> Result<Option<String>> {
 
 pub fn owns_login_registration(installed: &Path) -> Result<bool> {
     let Some(command) = login_value()? else { return Ok(false); };
-    let Some(executable) = command.trim().strip_suffix(" --keyboard-service") else { return Ok(false); };
-    let executable = executable.trim().trim_matches('"');
+    let Some(executable) = command.strip_prefix('"').and_then(|value| value.strip_suffix("\" --keyboard-service")) else { return Ok(false); };
+    if executable.is_empty() || executable.contains(['"', '\n', '\r', '\0']) { return Ok(false); }
     let registered = Path::new(executable);
     if !registered.is_absolute() { return Ok(false); }
-    let normalize = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().to_lowercase();
-    Ok(normalize(registered) == normalize(installed))
+    let resolve = |path: &Path| -> Result<Option<PathBuf>> {
+        match path.canonicalize() {
+            Ok(path) => Ok(Some(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let (Some(registered), Some(installed)) = (resolve(registered)?, resolve(installed)?) else { return Ok(false); };
+    Ok(registered.to_string_lossy().to_lowercase() == installed.to_string_lossy().to_lowercase())
 }
 
 pub fn unregister_login(installed: &Path) -> Result<()> {
     // Another installation (including a developer fixture) must never remove
     // the current user's real keyboard login registration.
+    let Some(command) = login_value()? else { return Ok(()); };
     if !owns_login_registration(installed)? { return Ok(()); }
+    ensure!(login_value()?.as_deref() == Some(command.as_str()), "keyboard login registration changed; it was not removed");
     let key = 0x80000001u32 as i32 as isize as Handle;
     let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0".encode_utf16().collect();
     let name: Vec<u16> = "NomiFunKeyboard\0".encode_utf16().collect();

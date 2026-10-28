@@ -13,7 +13,7 @@ import { subtitleTextMap } from './subtitleText';
 const snapshot = (patch: Partial<KeyboardState> = {}): KeyboardState => ({
   sequence: 0, cancelGeneration: 0,
   settings: { enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
-    asrModel: null, textModel: null, language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: true, subtitleFontSize: 14, launchAtLogin: false },
+    asrModel: null, textModel: null, language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: true, subtitleFontSize: 14 },
   documentId: 'document-1', revision: 3, operationId: null, editSessionId: null, dictationSelection: null, phase: 'idle', text: '原文 👋\nSecond line',
   originalText: '原文 👋\nSecond line', partial: '', candidate: '', visible: true, pendingAction: null,
   error: null, notice: null,

@@ -22,7 +22,10 @@ Before moving the macOS app to Trash, run:
 /bin/sh /Applications/NomiFun.app/Contents/Resources/keyboard-packaging/macos-uninstall.command
 ```
 
-These commands stop microphone capture and the device service, then unregister
-the login item. They preserve NomiFun's other settings and user data. Normal
-main-app exit keeps the lightweight device service waiting for K1; use the
-keyboard settings' exit-all action to stop it entirely.
+These commands stop microphone capture and the application, then remove any
+retired keyboard service and its matching login item. They preserve NomiFun's
+other settings and user data. The running NomiFun GUI owns the keyboard; K1
+shows or hides its main window. Quitting NomiFun disables all keyboard actions.
+## AppImage running-instance boundary
+
+Quit the running AppImage before updating or uninstalling it. A new invocation can use a different temporary mount; automatic shutdown across mounts is rejected when the OS executable identity cannot prove ownership. After the old instance exits, maintenance can continue. Ordinary fixed-path Linux installations do not have this restriction. This change has no native Linux execution evidence.

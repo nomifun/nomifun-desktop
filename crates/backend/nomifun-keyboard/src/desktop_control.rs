@@ -1,7 +1,7 @@
-//! Independent GUI stop proof, including when no USB daemon exists.
+//! GUI process and native capture stop proof for short-lived maintenance.
 //! Descriptor absence is never evidence that a GUI has stopped: only an
 //! exclusive lifetime lock proves absence and prevents a new GUI during update.
-use crate::service::{private_create, read_line, runtime_dir, send_line, token_equal};
+use crate::ipc::{private_create, read_line, runtime_dir, send_line, token_equal};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,8 @@ fn open_proof_lock(dir: &Path) -> Result<File> {
 /// A live CLI holds the exclusive GUI lock and its fresh private proof. A stale
 /// file after CLI death is insufficient because the lifetime lock is then free.
 /// Any subsequently registered GUI clears the previous proof before recording.
-pub(crate) fn verify_quiescence(dir: &Path, token: &str) -> Result<()> {
+#[cfg(any(test, feature = "maintenance-validation"))]
+pub fn verify_quiescence(dir: &Path, token: &str) -> Result<()> {
     let path = dir.join("desktop-exited.json");
     ensure!(
         !path.is_symlink() && fs::metadata(&path)?.len() <= 128,

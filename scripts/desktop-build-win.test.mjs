@@ -9,7 +9,7 @@ const quote = value => `'${value.replaceAll("'", "''")}'`;
 
 // Run a private copy of the actual PowerShell script with function substitutes
 // for every tool it can invoke. No Cargo, rustup, signer or Tauri is executed.
-function controlledBuild({ signed = true, failSign = false, passthrough = [] } = {}) {
+function controlledBuild({ signed = true, failSign = false, failMaintenanceSign = false, passthrough = [] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'nomifun-win-signing-test-'));
   try {
     mkdirSync(join(root, 'scripts'));
@@ -40,6 +40,7 @@ function nomifun-test-signtool {
   Record-TestCommand 'signtool' $args
   $global:LASTEXITCODE=0
   if ($env:NOMIFUN_TEST_FAIL_SIGN -eq '1' -and $args[0] -eq 'sign') { $global:LASTEXITCODE=7 }
+  if ($env:NOMIFUN_TEST_FAIL_MAINTENANCE_SIGN -eq '1' -and $args[0] -eq 'sign' -and $args[-1].EndsWith('nomifun-keyboard-maintenance.exe')) { $global:LASTEXITCODE=9 }
 }
 function bun {
   if ($args[0].EndsWith('computer/build-worker.mjs') -or $args[0].EndsWith('computer\\build-worker.mjs')) {
@@ -50,6 +51,15 @@ function bun {
     [IO.File]::WriteAllText($worker,'owned fixture bytes, never an executable')
     $global:LASTEXITCODE=0
     $worker
+  } elseif ($args[0].EndsWith('build-keyboard-maintenance.mjs')) {
+    Record-TestCommand 'maintenance-build' $args
+    $profile=$args[-1]
+    $directory=Join-Path $global:signTestRoot "target/x86_64-pc-windows-msvc/$profile"
+    New-Item -ItemType Directory -Force -Path $directory|Out-Null
+    $maintenance=Join-Path $directory 'nomifun-keyboard-maintenance.exe'
+    [IO.File]::WriteAllText($maintenance,'owned maintenance fixture bytes, never an executable')
+    $global:LASTEXITCODE=0
+    $maintenance
   } elseif ($args[0] -eq 'x' -and $args[1] -eq 'tauri' -and $args[2] -eq 'build') {
     $signing=$null
     for ($i=0;$i -lt $args.Count-1;$i++) {
@@ -69,7 +79,8 @@ $tokens=$null;$errors=$null
 if ($errors.Count -ne 0) { throw 'Actual build script did not parse' }
 & (Join-Path $global:signTestRoot 'scripts/desktop-build-win.ps1') @forwarded
 `, 'utf8');
-    const environment = { ...process.env, TEMP: root, TMP: root, NOMIFUN_TEST_FAIL_SIGN: failSign ? '1' : '0' };
+    const environment = { ...process.env, TEMP: root, TMP: root, NOMIFUN_TEST_FAIL_SIGN: failSign ? '1' : '0',
+      NOMIFUN_TEST_FAIL_MAINTENANCE_SIGN: failMaintenanceSign ? '1' : '0' };
     delete environment.WINDOWS_CERTIFICATE_THUMBPRINT;
     delete environment.WINDOWS_TIMESTAMP_URL;
     if (signed) {
@@ -90,14 +101,17 @@ if ($errors.Count -ne 0) { throw 'Actual build script did not parse' }
 }
 
 describe.skipIf(process.platform !== 'win32')('Windows signing build maintenance with controlled PowerShell tools', () => {
-  test('passes the same timestamped identity to the actual worker signature and Tauri overlay', () => {
+  test('passes the same timestamped identity to worker, short-lived maintenance helper and Tauri overlay', () => {
     const { result, commands, collected } = controlledBuild();
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
-    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'signtool', 'signtool', 'tauri-build']);
-    const [sign, verify] = commands.filter(command => command.command === 'signtool');
+    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'maintenance-build', 'signtool', 'signtool', 'signtool', 'signtool', 'tauri-build']);
+    const [sign, verify, maintenanceSign, maintenanceVerify] = commands.filter(command => command.command === 'signtool');
     expect(sign.arguments.slice(0, -1)).toEqual(['sign', '/sha1', 'a'.repeat(40), '/fd', 'SHA256', '/tr', 'https://timestamp.example.invalid/tsa', '/td', 'SHA256']);
     expect(verify.arguments).toEqual(['verify', '/pa', sign.arguments.at(-1)]);
+    expect(maintenanceSign.arguments.slice(0, -1)).toEqual(sign.arguments.slice(0, -1));
+    expect(maintenanceSign.arguments.at(-1).endsWith('nomifun-keyboard-maintenance.exe')).toBe(true);
+    expect(maintenanceVerify.arguments).toEqual(['verify', '/pa', maintenanceSign.arguments.at(-1)]);
     expect(commands.at(-1).extra).toEqual({ certificateThumbprint: 'a'.repeat(40), timestampUrl: 'https://timestamp.example.invalid/tsa', tsp: true });
     expect(collected).toBe(true);
   });
@@ -105,14 +119,22 @@ describe.skipIf(process.platform !== 'win32')('Windows signing build maintenance
   test('does not call Tauri after a failed worker signature', () => {
     const { result, commands, collected } = controlledBuild({ failSign: true });
     expect(result.status).not.toBe(0);
-    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'signtool']);
+    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'maintenance-build', 'signtool']);
+    expect(collected).toBe(false);
+  });
+
+  test('does not call Tauri after a failed maintenance helper signature', () => {
+    const { result, commands, collected } = controlledBuild({ failMaintenanceSign: true });
+    expect(result.status).not.toBe(0);
+    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'maintenance-build', 'signtool', 'signtool', 'signtool']);
     expect(collected).toBe(false);
   });
 
   test('keeps unsigned custom passthrough without invoking a signer', () => {
     const { result, commands } = controlledBuild({ signed: false, passthrough: ['--debug', '--config', 'owned-overlay.json'] });
     expect(result.status).toBe(0);
-    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'tauri-build']);
+    expect(commands.map(command => command.command)).toEqual(['rustup', 'worker-build', 'maintenance-build', 'tauri-build']);
+    expect(commands.find(command => command.command === 'maintenance-build').arguments.slice(-4)).toEqual(['--target', 'x86_64-pc-windows-msvc', '--profile', 'debug']);
     expect(commands.at(-1).arguments.slice(-3)).toEqual(['--debug', '--config', 'owned-overlay.json']);
     expect(commands.at(-1).extra).toBeNull();
   });

@@ -167,7 +167,7 @@ function fixture(root, name, fixtureBinary) {
   appendFileSync(join(payload, 'nomifun-keyboard-fixture.exe'), '\nnomifun-upgrade-fixture-new-release\n');
   writeFileSync(join(install, 'a.txt'), 'old-a'); writeFileSync(join(payload, 'a.txt'), 'new-a');
   writeFileSync(join(install, 'z.txt'), 'old-z'); writeFileSync(join(payload, 'z.txt'), 'new-z');
-  writeFileSync(join(environment.NOMIFUN_DATA_DIR, 'keyboard-settings.json'), '{"enabled":true,"launchAtLogin":false,"sentinel":"preserve"}\n');
+  writeFileSync(join(environment.NOMIFUN_DATA_DIR, 'keyboard-settings.json'), '{"enabled":true,"sentinel":"preserve"}\n');
   environment.NOMIFUN_LEGACY_FIXTURE_LOG = join(directory, 'legacy-arguments.log');
   environment.NOMIFUN_LEGACY_FIXTURE_STOP = join(directory, 'legacy-stop');
   const runtime = join(environment.LOCALAPPDATA, 'NomiFun/keyboard-service');
@@ -181,11 +181,18 @@ function descriptorPid(path) { return existsSync(path) ? JSON.parse(readFileSync
 
 async function startRuntime(item, children, { fail = false } = {}) {
   const gui = process_(item.installed, fail ? ['gui-fail'] : [], item.environment, children);
-  const service = process_(item.installed, ['--keyboard-service'], item.environment, children);
-  await until(() => existsSync(item.desktop) && existsSync(item.owner), 'fixture GUI/service endpoints');
+  await until(() => existsSync(item.desktop), 'fixture GUI endpoint');
   assert.equal(descriptorPid(item.desktop), gui.child.pid);
-  assert.equal(descriptorPid(item.owner), service.child.pid);
-  return { gui, service, guiPid: gui.child.pid, servicePid: service.child.pid };
+  assert(!existsSync(item.owner), 'Current GUI fixture must not create an independent serial owner');
+  return { gui, guiPid: gui.child.pid };
+}
+
+async function startLegacyOwner(item, children) {
+  // This test-only mode models an already installed, authenticated old owner.
+  // Production cannot start it and maintenance must never recover it.
+  const owner = process_(item.installed, ['legacy-owner'], item.environment, children);
+  await until(() => descriptorPid(item.owner) === owner.child.pid, 'controlled legacy owner endpoint');
+  return owner;
 }
 
 async function startMaintenance(item, helper, children, options = {}) {
@@ -215,8 +222,8 @@ function filesAre(item, prefix) {
 }
 
 async function restored(item, previous) {
-  await until(() => descriptorPid(item.desktop) && descriptorPid(item.desktop) !== previous.guiPid
-    && descriptorPid(item.owner) && descriptorPid(item.owner) !== previous.servicePid, 'restored GUI and service', 15000);
+  await until(() => descriptorPid(item.desktop) && descriptorPid(item.desktop) !== previous.guiPid, 'restored GUI', 15000);
+  assert(!existsSync(item.owner), 'GUI recovery must never restore a retired keyboard daemon');
 }
 
 async function cleanup(item, helper, children) {
@@ -245,7 +252,7 @@ export async function runKeyboardUpgradeSmoke(options) {
   const reportPath = options.report ?? join(root, 'report.json');
   const report = { schema: 1, platform: 'windows', root, helper: options.helper, helperSha256: digest(options.helper), fixture: options.fixture,
     fixtureSha256: digest(options.fixture), isolation: { privateInstall: true, privateRuntime: true, userDataUntouched: true, hkcuUntouched: true,
-      serialEnumeration: false, microphoneCapture: false }, evidence: 'native helper, Windows file locks and authenticated IPC; synthetic GUI/device runtime',
+      serialEnumeration: false, microphoneCapture: false }, evidence: 'native helper, Windows file locks and authenticated GUI IPC; controlled legacy owner retirement only',
     hookSha256: digest(join(repository, 'apps/desktop/nsis/keyboard-hooks.nsh')),
     templateSha256: digest(join(repository, 'apps/desktop/nsis/installer.nsi')),
     cases: [], unexecuted: ['physical keyboard K1/K4 and microphone', 'full production Tauri GUI', 'released old application binary'], ok: false };
@@ -267,6 +274,7 @@ export async function runKeyboardUpgradeSmoke(options) {
       await command(maintenance, 'commit', ['committed']); assert.equal((await finished(maintenance.process)).code, 0);
       assert(!existsSync(item.environment.NOMIFUN_LEGACY_FIXTURE_LOG), 'Legacy executable must never receive the new maintenance command');
       assert.equal(digest(item.installed), digest(join(item.payload, 'nomifun-keyboard-fixture.exe')));
+      assert(!existsSync(item.desktop) && !existsSync(item.owner), 'Closed application upgrade must not start a GUI or legacy owner');
     });
     await run('running-legacy-cancel-restores-old-gui', async item => {
       copyFileSync(legacy, item.installed); item.originalExecutable = digest(item.installed);
@@ -282,34 +290,41 @@ export async function runKeyboardUpgradeSmoke(options) {
       assert.equal((await finished(maintenance.process)).code, 0); filesAre(item, 'old');
       await until(() => readFileSync(item.environment.NOMIFUN_LEGACY_FIXTURE_LOG, 'utf8').trim().split('\n').length === 2, 'old legacy GUI restored');
       const invocations = readFileSync(item.environment.NOMIFUN_LEGACY_FIXTURE_LOG, 'utf8');
-      assert(!invocations.includes('--keyboard-stop') && !invocations.includes('--keyboard-unregister'), 'Old GUI must only be resumed normally');
+      assert(!invocations.includes('--keyboard-') && !invocations.includes('--app-maintenance-'), 'Old GUI must only be resumed normally');
     });
-    await run('success-restores-runtime', async item => {
+    await run('success-restores-gui-and-retires-legacy-owner', async item => {
       const previous = await startRuntime(item, children);
+      const legacyOwner = await startLegacyOwner(item, children);
       const maintenance = await startMaintenance(item, options.helper, children);
       assert.equal(maintenance.state().state, 'ready', JSON.stringify(maintenance.state()));
-      assert.equal((await finished(previous.gui)).code, 0); assert.equal((await finished(previous.service)).code, 0);
+      assert.equal((await finished(previous.gui)).code, 0); assert.equal((await finished(legacyOwner)).code, 0);
       const rejectedGui = process_(item.installed, [], item.environment, children);
       const rejectedService = process_(item.installed, ['--keyboard-service'], item.environment, children);
-      await finished(rejectedGui); await finished(rejectedService);
-      assert(!existsSync(item.desktop) && !existsSync(item.owner), 'Maintenance must fence replacement GUI and daemon admission');
+      await finished(rejectedGui);
+      const rejection = await finished(rejectedService);
+      assert(Number.isInteger(rejection.code) && rejection.code > 0, 'Retired daemon entry must be rejected');
+      assert(!existsSync(item.desktop) && !existsSync(item.owner), 'Maintenance must fence the replacement GUI and leave no legacy owner');
       await command(maintenance, 'apply', ['applied']); filesAre(item, 'new');
       await command(maintenance, 'commit', ['committed']); assert.equal((await finished(maintenance.process)).code, 0);
       await restored(item, previous);
     });
-    await run('disabled-voice-preserves-background-service', async item => {
-      writeFileSync(item.settings, '{"enabled":false,"launchAtLogin":false,"sentinel":"preserve-disabled"}\n');
-      item.originalSettings = digest(item.settings);
-      const service = process_(item.installed, ['--keyboard-service'], item.environment, children);
-      await until(() => existsSync(item.owner), 'background-only service endpoint');
-      const maintenance = await startMaintenance(item, options.helper, children);
-      assert.equal(maintenance.state().state, 'ready');
-      assert.equal((await finished(service)).code, 0);
-      await command(maintenance, 'apply', ['applied']); await command(maintenance, 'commit', ['committed']);
-      assert.equal((await finished(maintenance.process)).code, 0); filesAre(item, 'new');
-      await until(() => descriptorPid(item.owner) && descriptorPid(item.owner) !== service.child.pid, 'background-only service restored');
-      assert(!existsSync(item.desktop), 'Updating a background-only keyboard must not create an unwanted GUI');
-    });
+    for (const action of ['commit', 'abort']) {
+      await run(`legacy-owner-only-${action}-never-restores-runtime`, async item => {
+        writeFileSync(item.settings, '{"enabled":false,"sentinel":"preserve-disabled"}\n');
+        item.originalSettings = digest(item.settings);
+        const legacyOwner = await startLegacyOwner(item, children);
+        const maintenance = await startMaintenance(item, options.helper, children);
+        assert.equal(maintenance.state().state, 'ready');
+        assert.equal((await finished(legacyOwner)).code, 0);
+        await command(maintenance, 'apply', ['applied']);
+        await command(maintenance, action, [action === 'commit' ? 'committed' : 'aborted']);
+        assert.equal((await finished(maintenance.process)).code, 0); filesAre(item, action === 'commit' ? 'new' : 'old');
+        assert(!existsSync(item.owner), 'Retired owner must remain stopped after installation or rollback');
+        assert(!existsSync(item.desktop), 'Legacy owner alone must not request a GUI launch');
+        const events = readFileSync(join(item.runtime, 'events.log'), 'utf8').trim().split('\n');
+        assert.equal(events.filter(event => event.startsWith('legacy-owner ')).length, 1, 'Legacy owner must never restart');
+      });
+    }
     for (const applied of [false, true]) {
       await run(applied ? 'cancel-after-apply-restores-runtime-and-files' : 'cancel-before-apply-restores-runtime', async item => {
         const previous = await startRuntime(item, children);
@@ -385,9 +400,9 @@ export async function runKeyboardUpgradeSmoke(options) {
       const maintenance = await startMaintenance(item, options.helper, children, { installed });
       assert.equal(maintenance.state().state, 'error'); await finished(maintenance.process);
       filesAre(item, 'old');
-      assert.equal(descriptorPid(item.desktop), previous.guiPid); assert.equal(descriptorPid(item.owner), previous.servicePid);
+      assert.equal(descriptorPid(item.desktop), previous.guiPid); assert(!existsSync(item.owner));
       const events = readFileSync(join(item.runtime, 'events.log'), 'utf8').trim().split('\n');
-      assert.equal(events.length, 2, 'Maintaining a different installation must not launch duplicate runtimes');
+      assert.equal(events.length, 1, 'Maintaining a different installation must not launch duplicate runtimes');
     });
     for (const action of ['success', 'cancel', 'failure']) {
       await run(`native-nsis-${action}`, async item => {

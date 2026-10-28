@@ -340,7 +340,9 @@ mod platform {
                         let flag: objc2::runtime::Bool = msg_send![value, boolValue];
                         flag.as_bool()
                     };
-                    let key = NSString::from_str("kCGSessionOnConsoleKey");
+                    // CGSession.h defines kCGSessionOnConsoleKey as this string;
+                    // the dictionary key has an extra S after "CG".
+                    let key = NSString::from_str("kCGSSessionOnConsoleKey");
                     let console: *mut AnyObject = msg_send![&*dictionary, objectForKey:&*key];
                     let inactive = if console.is_null() {
                         true
@@ -358,6 +360,32 @@ mod platform {
                     inactive: true,
                     ..Default::default()
                 },
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn current_session_matches_quartz_console_flag() {
+            // Exercise the real Quartz boundary: the SDK constant's name is
+            // different from the string stored in the session dictionary.
+            unsafe {
+                let Some(dictionary) = Retained::from_raw(CGSessionCopyCurrentDictionary()) else {
+                    assert!(current_session().inactive);
+                    return;
+                };
+                let key = NSString::from_str("kCGSSessionOnConsoleKey");
+                let console: *mut AnyObject = msg_send![&*dictionary, objectForKey:&*key];
+                let expected_inactive = if console.is_null() {
+                    true
+                } else {
+                    let on_console: objc2::runtime::Bool = msg_send![console, boolValue];
+                    !on_console.as_bool()
+                };
+                assert_eq!(current_session().inactive, expected_inactive);
             }
         }
     }

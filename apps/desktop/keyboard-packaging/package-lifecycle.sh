@@ -2,6 +2,9 @@
 # Invoked by deb/rpm before replacing or removing installed executables.
 set -eu
 mode=${1:?stop or unregister required}
+# This executable may predate the incoming package. These maintenance-only
+# aliases are understood by old releases and map to application shutdown in
+# current releases; never send an unknown new flag that could open an old GUI.
 case "$mode" in stop) flag=--keyboard-stop ;; unregister) flag=--keyboard-unregister ;; *) exit 2 ;; esac
 binary=/usr/bin/nomifun-desktop
 getent passwd | while IFS=: read -r account unused uid gid comment directory login_shell; do
@@ -20,9 +23,9 @@ getent passwd | while IFS=: read -r account unused uid gid comment directory log
     fi
     continue
   fi
-  # A GUI-only microphone test has no serial owner, and a live process can be
-  # between lock acquisition and descriptor publication. The CLI checks both
-  # authenticated endpoints and process locks; never gate it on owner.json.
+  # The GUI owns the keyboard transport and can be between lock acquisition
+  # and descriptor publication. Maintenance also retires any authenticated old
+  # service owner; never gate application shutdown on a legacy owner.json.
   if [ -d "$runtime" ]; then
     timeout 90s runuser -u "$account" -- env HOME="$directory" XDG_RUNTIME_DIR="$runtime" "$binary" "$flag"
   fi

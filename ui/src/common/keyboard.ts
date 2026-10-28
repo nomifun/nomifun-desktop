@@ -27,7 +27,6 @@ export interface KeyboardSettings {
   beautifyInstruction: string;
   alwaysOnTop: boolean;
   subtitleFontSize: number;
-  launchAtLogin: boolean;
 }
 
 /** Native snapshots are authoritative; the renderer never predicts policy or capture acknowledgements. */
@@ -60,11 +59,12 @@ export interface KeyboardState {
     captureState: 'stopped' | 'capturing' | 'stopping' | 'unknown';
     detail: string | null;
   };
+  /** In-process keyboard transport owned by the NomiFun desktop application. */
   service: { running: boolean; ready: boolean; detail: string | null };
 }
 
 export type KeyboardAction = 'stop' | 'cancel' | 'beautify' | 'restore_original' | 'close'
-  | 'open' | 'reset_position' | 'test_start' | 'test_stop' | 'quit_all' | 'toggle_pin'
+  | 'open' | 'reset_position' | 'test_start' | 'test_stop' | 'toggle_pin'
   | 'edit_begin' | 'edit' | 'edit_end' | 'edit_cancel';
 export interface KeyboardActionRequest {
   action: KeyboardAction;

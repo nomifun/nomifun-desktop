@@ -132,7 +132,7 @@ export async function runKeyboardUpgradePackageSmoke(options) {
       const installed = join(install, `${identity.main}.exe`); copyFileSync(legacy, installed);
       owned.push({ identity, installed });
       const preferences = join(env.NOMIFUN_DATA_DIR, 'keyboard-settings.json');
-      writeFileSync(preferences, '{"enabled":false,"launchAtLogin":false,"sentinel":"do-not-change"}\n'); const preferenceDigest = digest(preferences);
+      writeFileSync(preferences, '{"enabled":false,"sentinel":"do-not-change"}\n'); const preferenceDigest = digest(preferences);
       const runtime = join(env.LOCALAPPDATA, 'NomiFun/keyboard-service'); const desktop = join(runtime, 'desktop.json'); const owner = join(runtime, 'owner.json');
       let old;
       try {
@@ -162,7 +162,7 @@ export async function runKeyboardUpgradePackageSmoke(options) {
           assert.equal(digest(preferences), preferenceDigest);
           await until(() => existsSync(env.NOMIFUN_LEGACY_FIXTURE_LOG), 'Failed updater did not restore old GUI');
           const log = readFileSync(env.NOMIFUN_LEGACY_FIXTURE_LOG, 'utf8');
-          assert(!log.includes('--keyboard-stop') && !log.includes('--keyboard-unregister'));
+          assert(!log.includes('--keyboard-') && !log.includes('--app-maintenance-'));
           assert.equal(actualLoginFingerprint(), loginBefore);
           writeFileSync(env.NOMIFUN_LEGACY_FIXTURE_STOP, 'stop-restored-old-fixture'); await pause(100);
           cleanupFailedFixture(identity, installed); assert(fixtureRegistrationAbsent(identity));
@@ -175,13 +175,17 @@ export async function runKeyboardUpgradePackageSmoke(options) {
           await finish(old);
           await until(() => readPid(desktop), 'Updater /R did not restore new GUI');
           const log = readFileSync(env.NOMIFUN_LEGACY_FIXTURE_LOG, 'utf8');
-          assert(!log.includes('--keyboard-stop') && !log.includes('--keyboard-unregister'));
+          assert(!log.includes('--keyboard-') && !log.includes('--app-maintenance-'));
         } else {
           assert(!existsSync(env.NOMIFUN_LEGACY_FIXTURE_LOG), 'Closed old binary must never be launched for maintenance');
+          assert(!existsSync(desktop) && !existsSync(owner), 'Closed application upgrade must not create any runtime');
           const gui = execute(installed, [], env); await until(() => readPid(desktop) === gui.child.pid, 'New packaged fixture GUI did not start');
         }
-        const service = execute(installed, ['--keyboard-service'], env);
-        await until(() => readPid(owner) === service.child.pid, 'New packaged keyboard service did not start');
+        const guiPid = readPid(desktop);
+        const retiredEntry = await finish(execute(installed, ['--keyboard-service'], env));
+        assert(Number.isInteger(retiredEntry.code) && retiredEntry.code > 0, 'Packaged fixture must reject retired daemon startup');
+        assert.equal(readPid(desktop), guiPid, 'Rejected daemon command must not replace or launch a GUI');
+        assert(!existsSync(owner), 'Packaged GUI must keep serial ownership in its own process');
         // Copy the exact generated uninstaller outside INSTDIR, then use the
         // native final unquoted _?= tail. Its process can delete installed files.
         const uninstall = join(directory, 'uninstall-copy.exe'); copyFileSync(join(install, 'uninstall.exe'), uninstall);

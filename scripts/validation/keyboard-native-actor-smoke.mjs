@@ -127,8 +127,10 @@ async function session(profile) {
     if (result.code !== 0 || report.passed !== true || report.real_os_microphone !== false || report.asr_mode !== details.options.mode || !report.audio_source?.includes('synthetic')) throw new Error('Actor fixture failed or violated its requested synthetic mode');
     const recovery = report.update_recovery;
     if (recovery?.successful_handoff_keeps_old_runtime_paused !== true || recovery.cloud_completion_not_required !== true || recovery.automatic_recording_not_resumed !== true || recovery.disabled_and_unconfigured_keyboard_admit_maintenance !== true
+      || recovery.serial_owner_joined_after_native_stop !== true || recovery.serial_lock_released_after_shutdown !== true || recovery.no_daemon_endpoint_published !== true
+      || !recovery.in_process_transport_owner?.worker || recovery.in_process_transport_owner.lockHeld !== true || recovery.in_process_transport_owner.endpointPublished !== false
       || !Array.isArray(recovery.cases) || recovery.cases.length !== 4
-      || !['cancel_after_ready', 'cancel_during_native_stop', 'native_stop_timeout', 'external_native_stop_timeout'].every(scenario => recovery.cases.some(value => value.scenario === scenario && value.capture_recovered === true && value.old_hold_not_resumed === true && value.native_stop_proof_retained === true && value.preferences_preserved === true))) {
+      || !['cancel_after_ready', 'cancel_during_native_stop', 'native_stop_timeout', 'external_native_stop_timeout'].every(scenario => recovery.cases.some(value => value.scenario === scenario && value.capture_recovered === true && value.old_hold_not_resumed === true && value.native_stop_proof_retained === true && value.preferences_preserved === true && value.same_transport_owner_retained === true && value.none_reached_owner_before_tick_or_status === true && value.fresh_rearm_after_cancel === true))) {
       throw new Error('Actor fixture lacks successful handoff, failed-stop and cancelled-update recovery evidence');
     }
     writeFileSync(join(profile, 'session-result.json'), JSON.stringify({ passed: true, fixtureExitCode: result.code, display, x11SocketPath: existsSync(`/tmp/.X11-unix/X${display}`) ? 'filesystem Unix socket' : 'abstract Unix socket', dbusSessionIsolated: true }));

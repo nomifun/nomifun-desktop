@@ -3,7 +3,7 @@
 //!
 //! Endpoint JSON is an address book, never evidence of a live owner. Stale
 //! endpoints are reclaimed only after acquiring the corresponding lifetime lock.
-use crate::{desktop_control, service};
+use crate::{desktop_control, ipc, legacy_service};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use std::{
@@ -31,7 +31,7 @@ fn contended(error: &std::io::Error) -> bool {
     error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
-/// Held only while a new GUI or device service acquires its own lifetime lock
+/// Held only while a new GUI acquires its own lifetime lock
 /// and publishes its endpoint. Existing processes do not hold this gate: the
 /// maintenance caller must be able to fence new starts before stopping them.
 pub struct StartupAdmission(File);
@@ -61,7 +61,7 @@ pub(crate) fn admit_startup(dir: &Path) -> Result<StartupAdmission> {
 /// None means a live package maintenance lease owns startup, while filesystem
 /// and permission failures remain errors.
 pub fn try_admit_startup() -> Result<Option<StartupAdmission>> {
-    match admit_startup(&service::runtime_dir()?) {
+    match admit_startup(&ipc::runtime_dir()?) {
         Ok(admission) => Ok(Some(admission)),
         Err(error) if error.is::<MaintenanceBusy>() => Ok(None),
         Err(error) => Err(error),
@@ -74,27 +74,17 @@ impl Drop for StartupAdmission {
     }
 }
 
-/// Capture running intent before asking any participant to stop. Preferences
-/// (including enabled and launch-at-login) are never changed by maintenance.
+/// Capture GUI recovery intent before asking it to stop. A retired legacy
+/// owner is never part of recovery and no user keyboard preferences are changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResumeIntent {
     pub desktop: bool,
-    pub service: bool,
 }
 
 impl ResumeIntent {
     pub fn capture(dir: &Path) -> Result<Self> {
-        fn busy(dir: &Path, name: &str) -> Result<bool> {
-            let file = open_lock(dir, name)?;
-            match FileExt::try_lock_exclusive(&file) {
-                Ok(()) => Ok(false),
-                Err(error) if contended(&error) => Ok(true),
-                Err(error) => Err(error.into()),
-            }
-        }
         Ok(Self {
-            desktop: busy(dir, "desktop.lock")?,
-            service: busy(dir, "owner.lock")?,
+            desktop: lifetime_busy(dir, "desktop.lock")?,
         })
     }
 }
@@ -111,7 +101,7 @@ pub struct MaintenanceGuard {
 
 impl MaintenanceGuard {
     pub fn prepare() -> Result<Self> {
-        Self::prepare_in(service::runtime_dir()?, Duration::from_secs(30))
+        Self::prepare_in(ipc::runtime_dir()?, Duration::from_secs(30))
     }
 
     /// An explicit directory is useful to package validation and embedders. It
@@ -132,7 +122,7 @@ impl MaintenanceGuard {
         runtime: PathBuf,
         wait: Duration,
         intent: &mut ResumeIntent,
-        check: impl FnOnce(ResumeIntent) -> Result<()>,
+        mut check: impl FnMut(ResumeIntent) -> Result<()>,
     ) -> Result<Self> {
         ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid keyboard runtime directory");
         let admission = open_lock(&runtime, "maintenance.lock")?;
@@ -149,32 +139,9 @@ impl MaintenanceGuard {
         }
         let observed = ResumeIntent::capture(&runtime)?;
         intent.desktop |= observed.desktop;
-        intent.service |= observed.service;
         check(observed)?;
         let desktop = desktop_control::request_at(runtime.clone(), wait)?;
-        let owner = open_lock(&runtime, "owner.lock")?;
-        let deadline = Instant::now() + wait;
-        let mut shutdown_sent = false;
-        loop {
-            match FileExt::try_lock_exclusive(&owner) {
-                Ok(()) => break,
-                Err(error) if contended(&error) => {}
-                Err(error) => return Err(error.into()),
-            }
-            // A live owner may be between lifetime-lock acquisition and
-            // descriptor publication. Wait briefly instead of inferring absence.
-            if !shutdown_sent && runtime.join("owner.json").exists() {
-                service::request_shutdown_after_desktop_exit_in(&runtime, &desktop)?;
-                shutdown_sent = true;
-            }
-            ensure!(Instant::now() < deadline, "keyboard service did not release its lifetime lock");
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let descriptor = runtime.join("owner.json");
-        ensure!(!descriptor.is_symlink(), "keyboard owner descriptor is a symlink");
-        if descriptor.exists() {
-            fs::remove_file(descriptor).context("remove stopped keyboard service endpoint")?;
-        }
+        let owner = stop_legacy_owner(&runtime, wait, &desktop, &mut check)?;
         Ok(Self {
             _owner: owner,
             _desktop: desktop,
@@ -188,9 +155,78 @@ impl MaintenanceGuard {
     }
 }
 
+fn lifetime_busy(dir: &Path, name: &str) -> Result<bool> {
+    let file = open_lock(dir, name)?;
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(false),
+        Err(error) if contended(&error) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The GUI uses this before registering its own lifetime endpoint. A shared
+/// admission is intentional: main startup already holds a shared admission.
+/// Taking maintenance's exclusive gate here would wait for the current GUI.
+pub struct LegacyRetirementGuard {
+    _owner: File,
+    _desktop: desktop_control::DesktopQuiescence,
+    _admission: StartupAdmission,
+}
+
+pub fn retire_legacy_service_in(
+    runtime: PathBuf,
+    wait: Duration,
+    mut check: impl FnMut(ResumeIntent) -> Result<()>,
+) -> Result<LegacyRetirementGuard> {
+    ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid keyboard runtime directory");
+    let admission = admit_startup(&runtime)?;
+    check(ResumeIntent::capture(&runtime)?)?;
+    let desktop = desktop_control::request_at(runtime.clone(), wait)?;
+    let owner = stop_legacy_owner(&runtime, wait, &desktop, &mut check)?;
+    Ok(LegacyRetirementGuard { _owner: owner, _desktop: desktop, _admission: admission })
+}
+
+fn stop_legacy_owner(runtime: &Path, wait: Duration, desktop: &desktop_control::DesktopQuiescence, check: &mut impl FnMut(ResumeIntent) -> Result<()>) -> Result<File> {
+    let owner = open_lock(runtime, "owner.lock")?;
+    let deadline = Instant::now() + wait;
+    let mut shutdown_sent = false;
+    loop {
+        match FileExt::try_lock_exclusive(&owner) {
+            Ok(()) => break,
+            Err(error) if contended(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+        // A live owner may be between lifetime-lock acquisition and
+        // descriptor publication. Wait briefly instead of inferring absence.
+        if !shutdown_sent && runtime.join("owner.json").exists() {
+            // Recheck after publication: an old release may not honor the startup
+            // admission gate and can acquire its owner lock during preparation.
+            check(ResumeIntent { desktop: false })?;
+            legacy_service::request_shutdown_after_desktop_exit_in(runtime, desktop)?;
+            shutdown_sent = true;
+        }
+        ensure!(Instant::now() < deadline, "keyboard service did not release its lifetime lock");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let descriptor = runtime.join("owner.json");
+    ensure!(!descriptor.is_symlink(), "keyboard owner descriptor is a symlink");
+    if descriptor.exists() {
+        fs::remove_file(descriptor).context("remove stopped keyboard service endpoint")?;
+    }
+    Ok(owner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_owner_never_becomes_application_recovery_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = open_lock(dir.path(), "owner.lock").unwrap();
+        FileExt::try_lock_exclusive(&owner).unwrap();
+        assert_eq!(ResumeIntent::capture(dir.path()).unwrap(), ResumeIntent::default());
+    }
 
     #[test]
     fn missing_services_are_normal_and_lease_fences_both_lifetimes() {
@@ -228,7 +264,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let owner = open_lock(dir.path(), "owner.lock").unwrap();
         FileExt::try_lock_exclusive(&owner).unwrap();
-        assert!(ResumeIntent::capture(dir.path()).unwrap().service);
+        assert!(lifetime_busy(dir.path(), "owner.lock").unwrap());
         assert!(MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(50)).is_err());
         assert!(admit_startup(dir.path()).is_ok());
         let desktop = open_lock(dir.path(), "desktop.lock").unwrap();
@@ -261,12 +297,12 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let auth: serde_json::Value = service::read_line(&mut reader).unwrap();
+            let auth: serde_json::Value = ipc::read_line(&mut reader).unwrap();
             assert_eq!(auth["token"], token);
-            service::send_line(&mut stream, &serde_json::json!({"accepted":true})).unwrap();
-            let command: service::Control = service::read_line(&mut reader).unwrap();
-            assert!(matches!(command, service::Control::Shutdown));
-            service::send_line(&mut stream, &serde_json::json!({"completed":true})).unwrap();
+            ipc::send_line(&mut stream, &serde_json::json!({"accepted":true})).unwrap();
+            let command: serde_json::Value = ipc::read_line(&mut reader).unwrap();
+            assert_eq!(command["kind"], "shutdown");
+            ipc::send_line(&mut stream, &serde_json::json!({"completed":true})).unwrap();
             // Shutdown receipts precede destruction of native owner resources.
             // A second management request would now fail on the closed listener.
             drop(listener);
@@ -278,6 +314,29 @@ mod tests {
         server.join().unwrap();
         assert!(!dir.path().join("owner.json").exists());
         drop(guard);
+    }
+
+    #[test]
+    fn startup_retirement_allows_its_existing_shared_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let _starting_gui = admit_startup(dir.path()).unwrap();
+        let guard = retire_legacy_service_in(dir.path().into(), Duration::from_millis(50), |_| Ok(())).unwrap();
+        assert!(lifetime_busy(dir.path(), "desktop.lock").unwrap());
+        assert!(lifetime_busy(dir.path(), "owner.lock").unwrap());
+        drop(guard);
+        assert!(!lifetime_busy(dir.path(), "desktop.lock").unwrap());
+        assert!(!lifetime_busy(dir.path(), "owner.lock").unwrap());
+    }
+
+    #[test]
+    fn installation_check_rejects_before_touching_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("owner.json"), "foreign installation").unwrap();
+        fs::write(dir.path().join("desktop.json"), "foreign installation").unwrap();
+        let result = retire_legacy_service_in(dir.path().into(), Duration::from_millis(50), |_| anyhow::bail!("another installation"));
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(dir.path().join("owner.json")).unwrap(), "foreign installation");
+        assert_eq!(fs::read_to_string(dir.path().join("desktop.json")).unwrap(), "foreign installation");
     }
 
     #[test]

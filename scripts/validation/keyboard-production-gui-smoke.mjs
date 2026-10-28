@@ -24,7 +24,7 @@ if (!inner) {
   writeFileSync(join(profile, 'data/keyboard-settings.json'), JSON.stringify({ settings: {
     enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true, asrMode: 'streaming', asrModel: null, textModel: null, language: 'zh', audioDeviceId: null,
     dictionary: [], beautifyInstruction: '整理标点、语法、口头重复和段落，保留原意、事实、人名、数字、日期、代码和专有词。只输出整理后的完整正文。',
-    alwaysOnTop: true, subtitleFontSize: 14, launchAtLogin: false } }));
+    alwaysOnTop: true, subtitleFontSize: 14 } }));
   const child = spawn('dbus-run-session', ['--', process.execPath, fileURLToPath(import.meta.url), '--session', binary, reportPath, profile],
     { env: environment, detached: true, stdio: ['ignore', 'inherit', 'ignore'] });
   process.exitCode = await new Promise((done) => { child.once('exit', (code) => done(code ?? 1)); child.once('error', () => done(1)); });
@@ -45,13 +45,12 @@ if (!inner) {
     try { return await Promise.race([child.exited, new Promise((_, fail) => { timer = setTimeout(() => fail(new Error('Production process did not exit within its deadline')), milliseconds); })]); }
     finally { clearTimeout(timer); }
   };
-  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; } };
   const root = join(profile, 'runtime/NomiFun/keyboard-service');
   const desktop = join(root, 'desktop.json'); const owner = join(root, 'owner.json');
-  const report = { schema: 1, binary, ordinaryProductionMain: true, profileIsolated: true, sessionBusIsolated: true, userDisplayUntouched: true,
+  const report = { schema: 2, binary, ordinaryProductionMain: true, profileIsolated: true, sessionBusIsolated: true, userDisplayUntouched: true,
     modelsConfigured: false, microphoneCaptureAttempted: false, clipboardOperationsRequested: false,
-    mainWindowVisible: false, desktopEndpointPublished: false, serialOwnerPublished: false,
-    authenticatedStopSucceeded: false, guiExited: false, daemonExited: false, desktopDescriptorRemoved: false, ownerDescriptorRemoved: false,
+    mainWindowVisible: false, desktopEndpointPublished: false, legacyOwnerDescriptorAbsent: false,
+    authenticatedStopSucceeded: false, guiExited: false, desktopDescriptorRemoved: false,
     loginNotRegistered: false, ok: false };
   try {
     rmSync(reportPath, { force: true });
@@ -69,36 +68,33 @@ if (!inner) {
       await pause(50);
     }
     if (!wmReady) throw new Error('Private Openbox did not start');
-    const gui = start(binary, ['--keyboard-activate']);
+    const gui = start(binary, []);
     deadline = Date.now() + 45000;
     let window;
-    while (!(report.mainWindowVisible && report.desktopEndpointPublished && report.serialOwnerPublished)) {
+    while (!(report.mainWindowVisible && report.desktopEndpointPublished)) {
       if (gui.child.exitCode !== null) throw new Error(`Ordinary GUI exited before startup completed (code ${gui.child.exitCode})`);
-      if (Date.now() >= deadline) throw new Error('Ordinary GUI did not publish its main window and both endpoints within 45 seconds');
+      if (Date.now() >= deadline) throw new Error('Ordinary GUI did not publish its main window and desktop endpoint within 45 seconds');
+      if (existsSync(owner)) throw new Error('Ordinary GUI must not publish a retired standalone keyboard owner');
       const visible = spawnSync('xdotool', ['search', '--onlyvisible', '--pid', String(gui.child.pid), '--name', '^NomiFun$'], { env: environment, encoding: 'utf8', timeout: 1000 });
       window = visible.stdout?.trim().split('\n')[0];
       report.mainWindowVisible = visible.status === 0 && /^\d+$/.test(window);
       report.desktopEndpointPublished = existsSync(desktop);
-      report.serialOwnerPublished = existsSync(owner);
       await pause(80);
     }
     const geometry = spawnSync('xdotool', ['getwindowgeometry', '--shell', window], { env: environment, encoding: 'utf8', timeout: 1000 }).stdout;
     report.mainWindowSize = { width: Number(geometry.match(/^WIDTH=(\d+)$/m)?.[1]), height: Number(geometry.match(/^HEIGHT=(\d+)$/m)?.[1]) };
     if (report.mainWindowSize.width < 880 || report.mainWindowSize.height < 600) throw new Error('Ordinary main window violated the 880×600 contract');
     const desktopPid = JSON.parse(readFileSync(desktop, 'utf8')).pid;
-    const ownerPid = JSON.parse(readFileSync(owner, 'utf8')).pid;
-    if (desktopPid !== gui.child.pid || !Number.isInteger(ownerPid) || !alive(ownerPid)) throw new Error('Native endpoint process identity did not match the running production processes');
-    const stop = start(binary, ['--keyboard-stop']);
+    if (desktopPid !== gui.child.pid) throw new Error('Desktop endpoint process identity did not match the running GUI');
+    if (existsSync(owner)) throw new Error('Running keyboard transport must stay inside the GUI process');
+    const stop = start(binary, ['--app-maintenance-stop']);
     if (await wait(stop, 90000) !== 0) throw new Error('Authenticated production stop returned failure');
     report.authenticatedStopSucceeded = true;
     report.guiExited = await wait(gui, 5000) === 0;
-    deadline = Date.now() + 5000;
-    while (alive(ownerPid) && Date.now() < deadline) await pause(40);
-    report.daemonExited = !alive(ownerPid);
     report.desktopDescriptorRemoved = !existsSync(desktop);
-    report.ownerDescriptorRemoved = !existsSync(owner);
+    report.legacyOwnerDescriptorAbsent = !existsSync(owner);
     report.loginNotRegistered = !existsSync(join(profile, 'config/autostart/nomifun-keyboard.desktop'));
-    report.ok = report.guiExited && report.daemonExited && report.desktopDescriptorRemoved && report.ownerDescriptorRemoved && report.loginNotRegistered;
+    report.ok = report.guiExited && report.desktopDescriptorRemoved && report.legacyOwnerDescriptorAbsent && report.loginNotRegistered;
   } catch (error) { report.error = error instanceof Error ? error.message : String(error); }
   finally {
     for (const { child } of children.reverse()) if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');

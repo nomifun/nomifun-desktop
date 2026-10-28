@@ -1,25 +1,24 @@
-//! One serial owner, entered before desktop single-instance or GUI startup.
-//! IPC is loopback-only, authenticated with a fresh per-owner 256-bit secret in
-//! the user's private runtime directory. Keyboard transport never captures audio.
+//! Joinable serial ownership inside the running desktop process.
+//! Commands and events are bounded in-memory queues. This module never launches
+//! another process, publishes an endpoint, or captures audio.
 use crate::protocol::{self, Parser};
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
-    path::{Path, PathBuf},
+    fs::OpenOptions,
+    io::{Read, Write},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
-const IPC_LIMIT: u64 = 32768;
 const WAITING_RELEASE_DETAIL: &str = "键盘采音已关闭；等待旧按键释放";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,457 +69,108 @@ pub enum Event {
 pub enum Control {
     Policy { voice_key: String },
     Rearm { generation: u64 },
-    DesktopStopped,
     Display { state: String },
-    Heartbeat,
-    Shutdown,
-}
-#[derive(Serialize, Deserialize)]
-struct Descriptor {
-    port: u16,
-    token: String,
-    pid: u32,
-}
-enum Message {
-    Connect(SyncSender<Event>),
-    Disconnect,
-    Control(Control),
-    Shutdown(SyncSender<std::result::Result<(), String>>),
-    ShutdownAfterDesktopExit(SyncSender<std::result::Result<(), String>>, String),
 }
 
-pub fn runtime_dir() -> Result<PathBuf> {
-    #[cfg(windows)]
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .context("LOCALAPPDATA unavailable")?;
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME unavailable")?
-        .join("Library/Application Support");
-    #[cfg(target_os = "linux")]
-    let base = if let Some(root) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(root)
-    } else {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME unavailable")?
-            .join(".local/state")
-    };
-    let dir = base.join("NomiFun/keyboard-service");
-    fs::create_dir_all(&dir)?;
-    ensure!(
-        !fs::symlink_metadata(&dir)?.file_type().is_symlink(),
-        "runtime directory is a symlink"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        ensure!(
-            fs::metadata(&dir)?.uid() == unsafe { libc_getuid() },
-            "runtime directory owner mismatch"
-        );
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+/// A bounded command handle; it cannot outlive the serial worker's ownership.
+#[derive(Clone)]
+pub struct Commands {
+    tx: SyncSender<Control>,
+    stop: Arc<AtomicBool>,
+}
+impl Commands {
+    pub fn control(&self, control: Control) -> Result<()> {
+        match &control {
+            Control::Policy { voice_key } => ensure!(voice_key == "none", "keyboard policy only permits NONE"),
+            Control::Rearm { generation } => ensure!(*generation != 0, "invalid rearm generation"),
+            Control::Display { .. } => {}
+        }
+        ensure!(!self.stop.load(Ordering::Acquire), "keyboard transport stopped");
+        if let Err(error) = self.tx.try_send(control) {
+            // Losing an admission/release command must revoke this transport,
+            // never leave an earlier generation authorized indefinitely.
+            self.stop.store(true, Ordering::Release);
+            bail!("keyboard command queue unavailable: {error}");
+        }
+        Ok(())
     }
-    Ok(dir)
-}
-#[cfg(unix)]
-unsafe extern "C" {
-    #[link_name = "getuid"]
-    fn libc_getuid() -> u32;
-    #[link_name = "setsid"]
-    fn libc_setsid() -> i32;
-}
-pub(crate) fn private_create(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).read(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    Ok(options.open(path)?)
-}
-pub(crate) fn send_line<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
-    let mut bytes = serde_json::to_vec(value)?;
-    ensure!(bytes.len() < IPC_LIMIT as usize, "IPC message too large");
-    bytes.push(b'\n');
-    stream.write_all(&bytes)?;
-    Ok(())
-}
-pub(crate) fn read_line<T: for<'de> Deserialize<'de>>(
-    reader: &mut BufReader<TcpStream>,
-) -> Result<T> {
-    let mut line = String::new();
-    let n = reader.take(IPC_LIMIT + 1).read_line(&mut line)?;
-    ensure!(
-        n > 0 && n as u64 <= IPC_LIMIT && line.ends_with('\n'),
-        "IPC closed or message limit exceeded"
-    );
-    Ok(serde_json::from_str(&line)?)
-}
-pub(crate) fn token_equal(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes().zip(b.bytes()).fold(0u8, |v, (a, b)| v | (a ^ b)) == 0
 }
 
-/// The file lock stays held for the process lifetime, including serial teardown.
-pub fn run() -> Result<()> {
-    run_at(runtime_dir()?, true)
+/// Owns the thread and exclusive serial lock until teardown has been joined.
+/// The GUI calls shutdown only after native capture has reported stopped.
+pub struct Transport {
+    commands: Commands,
+    worker: Option<JoinHandle<Result<()>>>,
 }
-/// Native package regression fixture. This entry is absent from production
-/// builds and never enumerates or opens a real serial device.
-#[cfg(feature = "maintenance-validation")]
-pub fn run_maintenance_fixture() -> Result<()> {
-    run_at(runtime_dir()?, false)
-}
-fn run_at(dir: PathBuf, scan_enabled: bool) -> Result<()> {
-    let admission = match crate::maintenance::admit_startup(&dir) {
-        Ok(admission) => admission,
-        Err(error) if error.is::<crate::maintenance::MaintenanceBusy>() => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let lock_path = dir.join("owner.lock");
-    ensure!(!lock_path.is_symlink(), "owner lock is a symlink");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    if lock.try_lock_exclusive().is_err() {
-        return Ok(());
+impl Transport {
+    pub fn start() -> Result<(Self, Receiver<Event>)> {
+        Self::start_at(crate::ipc::runtime_dir()?, true)
     }
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-    listener.set_nonblocking(true)?;
-    let mut random = [0u8; 32];
-    getrandom::getrandom(&mut random).map_err(|_| anyhow::anyhow!("secure random unavailable"))?;
-    let descriptor = Descriptor {
-        port: listener.local_addr()?.port(),
-        token: random.iter().map(|b| format!("{b:02x}")).collect(),
-        pid: std::process::id(),
-    };
-    let path = dir.join("owner.json");
-    if path.exists() {
-        fs::remove_file(&path)?;
+    /// Explicit disposable fixture: no USB enumeration, audio, or endpoint.
+    #[cfg(feature = "maintenance-validation")]
+    pub fn start_validation(dir: PathBuf) -> Result<(Self, Receiver<Event>)> {
+        ensure!(dir.is_dir(), "isolated transport directory must exist");
+        Self::start_at(dir, false)
     }
-    let mut file = private_create(&path)?;
-    serde_json::to_writer(&mut file, &descriptor)?;
-    file.sync_all()?;
-    drop(file);
-    drop(admission);
-    let (tx, rx) = mpsc::sync_channel(64);
-    let alive = Arc::new(AtomicBool::new(true));
-    let accepting = alive.clone();
-    let token = descriptor.token;
-    let accept = std::thread::spawn(move || {
-        let busy = Arc::new(AtomicBool::new(false));
-        let mut connections: Vec<std::thread::JoinHandle<()>> = Vec::new();
-        while accepting.load(Ordering::Acquire) {
-            connections.retain(|connection| !connection.is_finished());
-            match listener.accept() {
-                Ok((mut stream, addr)) => {
-                    if !addr.ip().is_loopback() || connections.len() >= 16 {
-                        continue;
-                    }
-                    let busy = busy.clone();
-                    let token = token.clone();
-                    let tx = tx.clone();
-                    connections.push(std::thread::spawn(move || {
-                        let mut desktop = false;
-                        let mut owner_guard = None;
-                        let result = (|| -> Result<()> {
-                            // Winsock inherits listener nonblocking mode on accept.
-                            stream.set_nonblocking(false)?;
-                            stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-                            stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-                            let mut reader = BufReader::new(stream.try_clone()?);
-                            let auth: Value = read_line(&mut reader)?;
-                            ensure!(
-                                auth["protocol"] == 1
-                                    && auth["token"]
-                                        .as_str()
-                                        .is_some_and(|value| token_equal(value, &token)),
-                                "IPC authentication failed"
-                            );
-                            if auth["mode"] == "control" {
-                                send_line(&mut stream, &json!({"accepted":true}))?;
-                                let control: Control = read_line(&mut reader)?;
-                                ensure!(
-                                    matches!(control, Control::Shutdown),
-                                    "management connection only permits shutdown"
-                                );
-                                let (reply, result) = mpsc::sync_channel(1);
-                                if let Some(proof) = auth["desktop_exit_proof"].as_str() {
-                                    tx.send(Message::ShutdownAfterDesktopExit(
-                                        reply,
-                                        proof.into(),
-                                    ))?;
-                                } else {
-                                    tx.send(Message::Shutdown(reply))?;
-                                }
-                                let result =
-                                    result.recv_timeout(Duration::from_secs(12)).unwrap_or_else(
-                                        |_| Err("owner shutdown proof timed out".into()),
-                                    );
-                                match result {
-                                    Ok(()) => send_line(&mut stream, &json!({"completed":true}))?,
-                                    Err(error) => send_line(
-                                        &mut stream,
-                                        &json!({"completed":false,"error":error}),
-                                    )?,
-                                }
-                                return Ok(());
-                            }
-                            ensure!(
-                                !busy.swap(true, Ordering::AcqRel),
-                                "desktop IPC owner already connected"
-                            );
-                            desktop = true;
-                            owner_guard = Some(ConnectionGuard(busy));
-                            send_line(&mut stream, &json!({"accepted":true}))?;
-                            let (events_tx, events_rx) = mpsc::sync_channel(40);
-                            tx.send(Message::Connect(events_tx))?;
-                            let read_tx = tx.clone();
-                            let mut read_stream = reader;
-                            let read_thread = std::thread::spawn(move || -> Result<()> {
-                                let result = (|| -> Result<()> {
-                                    loop {
-                                        let cmd: Control = read_line(&mut read_stream)?;
-                                        read_tx.send(Message::Control(cmd))?;
-                                    }
-                                })();
-                                let _ = read_tx.send(Message::Disconnect);
-                                result
-                            });
-                            let writing = (|| -> Result<()> {
-                                while let Ok(event) = events_rx.recv() {
-                                    send_line(&mut stream, &event)?;
-                                }
-                                Ok(())
-                            })();
-                            let _ = stream.shutdown(std::net::Shutdown::Both);
-                            let _ = read_thread.join();
-                            writing
-                        })();
-                        #[cfg(any(test, feature = "maintenance-validation"))]
-                        if let Err(e) = &result {
-                            eprintln!("IPC test connection: {e:#}");
-                        }
-                        let _ = result;
-                        if desktop {
-                            let _ = tx.send(Message::Disconnect);
-                        }
-                        // A new connection cannot overtake either old disconnect.
-                        drop(owner_guard);
-                    }));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(40))
-                }
-                Err(_) => break,
-            }
+    fn start_at(dir: PathBuf, scan_enabled: bool) -> Result<(Self, Receiver<Event>)> {
+        Self::start_with_device(dir, scan_enabled, None)
+    }
+    fn start_with_device(dir: PathBuf, scan_enabled: bool, device: Option<Device>) -> Result<(Self, Receiver<Event>)> {
+        let path = dir.join("owner.lock");
+        ensure!(!path.is_symlink(), "owner lock is a symlink");
+        let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
+        lock.try_lock_exclusive().context("keyboard serial owner is already running")?;
+        let (tx, rx) = mpsc::sync_channel(64);
+        let (events, receiver) = mpsc::sync_channel(40);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = std::thread::Builder::new().name("nomifun-keyboard-serial".into()).spawn(move || {
+            #[cfg(feature = "maintenance-validation")]
+            let _validation = validation::Worker::new();
+            let result = owner_loop(rx, events, worker_stop.clone(), scan_enabled, device);
+            worker_stop.store(true, Ordering::Release);
+            // File is deliberately retained until after Device and serial I/O
+            // have been dropped by owner_loop, even on a failed NONE receipt.
+            drop(lock);
+            result
+        })?;
+        Ok((Self { commands: Commands { tx, stop }, worker: Some(worker) }, receiver))
+    }
+    #[cfg(feature = "maintenance-validation")]
+    pub fn validation_owner(&self) -> Option<String> {
+        self.worker.as_ref().filter(|worker| !worker.is_finished())
+            .map(|worker| format!("{}:{:?}", std::process::id(), worker.thread().id()))
+    }
+    #[cfg(feature = "maintenance-validation")]
+    pub fn validation_last_control(&self) -> Option<Control> {
+        self.worker.as_ref().and_then(|worker| validation::last(worker.thread().id()))
+    }
+    #[cfg(feature = "maintenance-validation")]
+    pub fn validation_lock_held(dir: &std::path::Path) -> Result<bool> {
+        let lock = OpenOptions::new().read(true).write(true).open(dir.join("owner.lock"))?;
+        match lock.try_lock_exclusive() {
+            Ok(()) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(error) => Err(error.into()),
         }
-        // Final management proof must reach the socket before service exit.
-        for connection in connections {
-            let _ = connection.join();
+    }
+    pub fn commands(&self) -> Commands { self.commands.clone() }
+    pub fn shutdown(&mut self) -> Result<()> {
+        self.commands.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| anyhow::anyhow!("keyboard serial worker panicked"))??;
         }
-    });
-    let result = owner_loop(rx, scan_enabled, dir);
-    alive.store(false, Ordering::Release);
-    let _ = accept.join();
-    let _ = fs::remove_file(path);
-    drop(lock);
-    result
+        Ok(())
+    }
 }
-struct ConnectionGuard(Arc<AtomicBool>);
-impl Drop for ConnectionGuard {
+impl Drop for Transport {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        // Drop is a final backstop, not an asynchronous or detached teardown.
+        let _ = self.shutdown();
     }
 }
-
-pub struct Client {
-    writer: TcpStream,
-    reader: BufReader<TcpStream>,
-}
-impl Client {
-    pub fn connect() -> Result<Self> {
-        Self::connect_at(runtime_dir()?.join("owner.json"))
-    }
-    fn connect_at(path: PathBuf) -> Result<Self> {
-        ensure!(!path.is_symlink(), "IPC descriptor is a symlink");
-        let d: Descriptor = serde_json::from_reader(File::open(path)?)?;
-        ensure!(d.token.len() == 64, "invalid IPC descriptor");
-        let mut writer =
-            TcpStream::connect_timeout(&([127, 0, 0, 1], d.port).into(), Duration::from_secs(1))?;
-        writer.set_write_timeout(Some(Duration::from_secs(1)))?;
-        writer.set_read_timeout(Some(Duration::from_secs(4)))?;
-        send_line(
-            &mut writer,
-            &json!({"protocol":1,"token":d.token,"mode":"desktop"}),
-        )?;
-        let mut reader = BufReader::new(writer.try_clone()?);
-        let accepted: Value = read_line(&mut reader)?;
-        ensure!(
-            accepted["accepted"] == true,
-            "IPC rejected desktop connection"
-        );
-        Ok(Self { writer, reader })
-    }
-    pub fn control(&mut self, control: Control) -> Result<()> {
-        send_line(&mut self.writer, &control)
-    }
-    pub fn next(&mut self) -> Result<Event> {
-        read_line(&mut self.reader)
-    }
-    pub fn writer(&self) -> Result<TcpStream> {
-        Ok(self.writer.try_clone()?)
-    }
-}
-pub fn write_control(writer: &mut TcpStream, control: Control) -> Result<()> {
-    send_line(writer, &control)
-}
-pub fn request_shutdown() -> Result<()> {
-    request_shutdown_at(runtime_dir()?.join("owner.json"))
-}
-/// External maintenance only: the typed guard proves the GUI process has
-/// exited and prevents a replacement GUI until this management call finishes.
-pub fn request_shutdown_after_desktop_exit(
-    proof: &crate::desktop_control::DesktopQuiescence,
-) -> Result<()> {
-    let dir = runtime_dir()?;
-    request_shutdown_after_desktop_exit_in(&dir, proof)
-}
-pub(crate) fn request_shutdown_after_desktop_exit_in(
-    dir: &Path,
-    proof: &crate::desktop_control::DesktopQuiescence,
-) -> Result<()> {
-    request_shutdown_with_proof_at(dir.join("owner.json"), Some(proof.proof_for(dir)?))
-}
-fn request_shutdown_at(path: PathBuf) -> Result<()> {
-    request_shutdown_with_proof_at(path, None)
-}
-fn request_shutdown_with_proof_at(path: PathBuf, desktop_exit_proof: Option<&str>) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    ensure!(!path.is_symlink(), "IPC descriptor is a symlink");
-    let descriptor: Descriptor = serde_json::from_reader(File::open(path)?)?;
-    let mut stream = TcpStream::connect_timeout(
-        &([127, 0, 0, 1], descriptor.port).into(),
-        Duration::from_secs(1),
-    )?;
-    stream.set_read_timeout(Some(Duration::from_secs(13)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-    send_line(
-        &mut stream,
-        &json!({"protocol":1,"token":descriptor.token,"mode":"control","desktop_exit_proof":desktop_exit_proof}),
-    )?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let accepted: Value = read_line(&mut reader).context("management authentication reply")?;
-    ensure!(
-        accepted["accepted"] == true,
-        "management IPC authentication rejected"
-    );
-    send_line(&mut stream, &Control::Shutdown).context("management shutdown send")?;
-    let accepted: Value = read_line(&mut reader).context("management final shutdown proof")?;
-    ensure!(
-        accepted["completed"] == true,
-        "shutdown not completed: {}",
-        accepted["error"]
-            .as_str()
-            .unwrap_or("missing capture stop proof")
-    );
-    Ok(())
-}
-fn transient_mount(path: &Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_string_lossy()
-            .starts_with(".mount_")
-    })
-}
-fn launch_file(path: &Path) -> bool {
-    if !path.is_absolute() || !path.is_file() || transient_mount(path) {
-        return false;
-    }
-    let Ok(resolved) = fs::canonicalize(path) else {
-        return false;
-    };
-    if transient_mount(&resolved) {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if !fs::metadata(&resolved).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-        {
-            return false;
-        }
-    }
-    true
-}
-/// Select the durable outer AppImage, never the temporary FUSE executable.
-/// Invalid ambient APPIMAGE values do not override an ordinary installed exe.
-fn launch_path(app_image: Option<&Path>, current_exe: &Path) -> Result<PathBuf> {
-    if let Some(image) = app_image.filter(|image| launch_file(image)) {
-        return Ok(image.to_path_buf());
-    }
-    ensure!(
-        launch_file(current_exe),
-        "durable NomiFun executable unavailable; APPIMAGE must be an existing absolute executable outside .mount_ directories"
-    );
-    Ok(current_exe.to_path_buf())
-}
-fn configure_detached(command: &mut std::process::Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Only async-signal-safe setsid runs after fork. Preserve the inherited
-        // DISPLAY/Wayland/DBus environment while releasing the parent's TTY.
-        unsafe {
-            command.pre_exec(|| {
-                if libc_setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-}
-fn launch_command(mode: &str) -> Result<std::process::Command> {
-    let current_exe = std::env::current_exe()?;
-    #[cfg(target_os = "linux")]
-    let image = std::env::var_os("APPIMAGE").map(PathBuf::from);
-    #[cfg(not(target_os = "linux"))]
-    let image: Option<PathBuf> = None;
-    let mut command = std::process::Command::new(launch_path(image.as_deref(), &current_exe)?);
-    command.arg(mode);
-    configure_detached(&mut command);
-    Ok(command)
-}
-pub fn spawn() -> Result<()> {
-    launch_command("--keyboard-service")?.spawn()?;
-    Ok(())
-}
-
 trait Wire: Read + Write + Send {}
 impl<T: Read + Write + Send> Wire for T {}
-
 fn validate_device_id(id: &str) -> Result<()> {
     ensure!(
         !id.is_empty()
@@ -531,26 +181,6 @@ fn validate_device_id(id: &str) -> Result<()> {
         "invalid stable device id"
     );
     Ok(())
-}
-
-#[derive(Default)]
-struct LaunchGate {
-    last: Option<Instant>,
-}
-impl LaunchGate {
-    fn claim(&mut self, now: Instant) -> bool {
-        if self
-            .last
-            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(3))
-        {
-            return false;
-        }
-        self.last = Some(now);
-        true
-    }
-    fn ready(&mut self) {
-        self.last = None;
-    }
 }
 
 struct Device {
@@ -844,248 +474,126 @@ fn discover() -> Result<Option<Device>> {
     }
     Ok(None)
 }
-#[derive(Default)]
-struct ShutdownReplies(Vec<SyncSender<std::result::Result<(), String>>>);
-impl ShutdownReplies {
-    fn success(&mut self) {
-        for reply in self.0.drain(..) {
-            let _ = reply.send(Ok(()));
+
+/// Every terminal failure retains the serial device until bounded NONE cleanup
+/// has completed or failed explicitly. Queue overflow follows the same teardown
+/// as shutdown; an event delivery failure cannot bypass the device receipt.
+fn owner_loop(
+    rx: Receiver<Control>,
+    events: SyncSender<Event>,
+    stop: Arc<AtomicBool>,
+    scan_enabled: bool,
+    mut device: Option<Device>,
+) -> Result<()> {
+    let result = owner_active_loop(rx, events, stop, scan_enabled, &mut device);
+    if let Err(error) = result {
+        if let Some(d) = device.as_mut() {
+            if let Err(cleanup) = stop_device(d) {
+                return Err(error.context(format!("keyboard NONE cleanup failed: {cleanup:#}")));
+            }
         }
+        return Err(error);
     }
+    Ok(())
 }
-impl Drop for ShutdownReplies {
-    fn drop(&mut self) {
-        for reply in self.0.drain(..) {
-            let _ = reply.send(Err(
-                "NONE/desktop capture stop proof failed; service did not complete a clean shutdown"
-                    .into(),
-            ));
-        }
+fn stop_device(d: &mut Device) -> Result<()> {
+    d.reset_rearm();
+    d.policy()?;
+    d.display("sleeping")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while d.none_pending() || d.status.capture_state != "stopped" || d.status.policy_state != "applied" {
+        ensure!(Instant::now() < deadline, "keyboard NONE cleanup deadline exceeded");
+        poll_device(d, &mut None, false)?;
     }
+    Ok(())
 }
-struct Shutdown {
-    started: Instant,
-    needs_desktop: bool,
-}
-fn owner_loop(rx: Receiver<Message>, scan_enabled: bool, dir: PathBuf) -> Result<()> {
-    let mut device: Option<Device> = None;
-    let mut subscriber = None;
+fn owner_active_loop(
+    rx: Receiver<Control>,
+    events: SyncSender<Event>,
+    stop: Arc<AtomicBool>,
+    scan_enabled: bool,
+    device: &mut Option<Device>,
+) -> Result<()> {
+    let mut subscriber = Some(events);
     let mut ready = false;
     let mut rearm_generation: Option<u64> = None;
-    let mut desktop_unproven = false;
-    let mut desktop_stopped = false;
-    let mut lease = Instant::now();
     let mut scan = Instant::now() - Duration::from_secs(2);
-    let mut shutdown: Option<Shutdown> = None;
-    let mut replies = ShutdownReplies::default();
-    let mut launch = LaunchGate::default();
+    let mut shutdown: Option<Instant> = None;
+    emit(&mut subscriber, Event::Status(device.as_ref().map(|d| d.status.clone()).unwrap_or_default()))?;
     loop {
-        while let Ok(message) = rx.try_recv() {
-            let mut request_shutdown = false;
-            match message {
-                Message::Connect(tx) => {
-                    ensure!(shutdown.is_none(), "desktop connection during shutdown");
-                    subscriber = Some(tx);
-                    ready = false;
-                    rearm_generation = None;
-                    desktop_unproven = true;
-                    desktop_stopped = false;
-                    lease = Instant::now();
-                    if let Some(d) = device.as_mut() {
-                        d.reset_rearm();
-                        d.policy()?;
-                        d.display("connecting")?;
-                    }
-                    let _ = emit(
-                        &mut subscriber,
-                        Event::Status(
-                            device
-                                .as_ref()
-                                .map(|d| d.status.clone())
-                                .unwrap_or_default(),
-                        ),
-                    );
-                }
-                Message::Disconnect => {
-                    subscriber = None;
-                    ready = false;
-                    rearm_generation = None;
-                    if let Some(d) = device.as_mut() {
-                        d.reset_rearm();
-                        let _ = d.policy();
-                        let _ = d.display("sleeping");
-                    }
-                    // A broken socket is not evidence that the OS microphone stopped.
-                    if shutdown.as_ref().is_some_and(|s| s.needs_desktop) && !desktop_stopped {
-                        bail!("desktop disconnected without native OS capture stop proof");
-                    }
-                }
-                Message::Shutdown(reply) => {
-                    replies.0.push(reply);
-                    request_shutdown = true;
-                }
-                Message::ShutdownAfterDesktopExit(reply, proof) => {
-                    if let Err(error) = crate::desktop_control::verify_quiescence(&dir, &proof) {
-                        let _ = reply.send(Err(format!("desktop exit proof rejected: {error}")));
-                        continue;
-                    }
-                    desktop_stopped = true;
-                    desktop_unproven = false;
-                    ready = false;
-                    replies.0.push(reply);
-                    request_shutdown = true;
-                }
-                Message::Control(control) => {
-                    lease = Instant::now();
-                    match control {
-                        Control::Heartbeat => {}
-                        Control::DesktopStopped => {
-                            rearm_generation = None;
-                            desktop_stopped = true;
-                            desktop_unproven = false;
-                            ready = false;
-                            if let Some(d) = device.as_mut() {
-                                d.reset_rearm();
-                                d.display("sleeping")?;
-                            }
-                        }
-                        Control::Display { state } => {
-                            if let Some(d) = device.as_mut() {
-                                d.display(&state)?;
-                                let _ = emit(&mut subscriber, Event::Status(d.status.clone()));
-                            }
-                        }
-                        Control::Policy { voice_key } => {
-                            if voice_key != "none" {
-                                let _ = emit(
-                                    &mut subscriber,
-                                    Event::Failure(
-                                        "键盘策略只允许 NONE；语音来自系统麦克风".into(),
-                                    ),
-                                );
-                                continue;
-                            }
-                            if shutdown.is_some() {
-                                continue;
-                            }
-                            ready = true;
-                            desktop_stopped = false;
-                            desktop_unproven = true;
-                            launch.ready();
-                            if let Some(d) = device.as_mut() {
-                                d.policy()?;
-                                let _ = emit(&mut subscriber, Event::Status(d.status.clone()));
-                            }
-                        }
-                        Control::Rearm { generation } => {
-                            if shutdown.is_some() {
-                                continue;
-                            }
-                            ensure!(generation != 0, "invalid rearm generation");
-                            rearm_generation = Some(
-                                rearm_generation
-                                    .map_or(generation, |latest| latest.max(generation)),
-                            );
-                            ready = true;
-                            desktop_stopped = false;
-                            desktop_unproven = true;
-                            launch.ready();
-                            if let Some(d) = device.as_mut() {
-                                d.rearm(generation)?;
-                                let _ = emit(&mut subscriber, Event::Status(d.status.clone()));
-                                if let Some(generation) = d.rearmed_ready.take() {
-                                    emit(&mut subscriber, Event::Rearmed { generation })?;
-                                }
-                            }
-                        }
-                        Control::Shutdown => {
-                            request_shutdown = true;
-                        }
-                    }
-                }
-            }
-            if request_shutdown {
-                if shutdown.is_none() {
-                    shutdown = Some(Shutdown {
-                        started: Instant::now(),
-                        needs_desktop: desktop_unproven,
-                    });
-                    ready = false;
-                    let _ = emit(
-                        &mut subscriber,
-                        Event::Failure("device_service_stopping".into()),
-                    );
-                    if let Some(d) = device.as_mut() {
-                        d.policy()?;
-                        d.display("sleeping")?;
-                    }
-                }
-                ensure!(replies.0.len() <= 8, "too many shutdown waiters");
-            }
-        }
-        if ready && lease.elapsed() > Duration::from_secs(3) {
+        // A separate stop signal cannot be blocked by a full command queue.
+        if stop.load(Ordering::Acquire) && shutdown.is_none() {
+            shutdown = Some(Instant::now());
             ready = false;
+            subscriber = None;
             if let Some(d) = device.as_mut() {
-                let _ = d.policy();
+                d.reset_rearm();
+                d.policy()?;
+                d.display("sleeping")?;
             }
-            let _ = emit(
-                &mut subscriber,
-                Event::Failure("主程序心跳中断；设备保持 NONE".into()),
-            );
         }
-        if shutdown.is_none()
-            && scan_enabled
-            && device.is_none()
-            && scan.elapsed() > Duration::from_secs(2)
-        {
+        if shutdown.is_none() {
+            for control in rx.try_iter().take(64) {
+                #[cfg(feature = "maintenance-validation")]
+                validation::record(control.clone());
+                match control {
+                    Control::Display { state } => {
+                        if let Some(d) = device.as_mut() { d.display(&state)?; }
+                    }
+                    Control::Policy { voice_key } => {
+                        ensure!(voice_key == "none", "keyboard policy only permits NONE");
+                        ready = false;
+                        rearm_generation = None;
+                        if let Some(d) = device.as_mut() {
+                            d.reset_rearm();
+                            d.policy()?;
+                        }
+                    }
+                    Control::Rearm { generation } => {
+                        ensure!(generation != 0, "invalid rearm generation");
+                        rearm_generation = Some(rearm_generation.map_or(generation, |latest| latest.max(generation)));
+                        ready = true;
+                        if let Some(d) = device.as_mut() {
+                            d.rearm(generation)?;
+                            emit(&mut subscriber, Event::Status(d.status.clone()))?;
+                            if let Some(generation) = d.rearmed_ready.take() {
+                                emit(&mut subscriber, Event::Rearmed { generation })?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if shutdown.is_none() && scan_enabled && device.is_none() && scan.elapsed() > Duration::from_secs(2) {
             scan = Instant::now();
             match discover() {
                 Ok(mut found) => {
-                    if let Some(d) = found.as_mut() {
-                        d.rearm_latest = rearm_generation;
-                    }
-                    device = found;
+                    if let Some(d) = found.as_mut() { d.rearm_latest = rearm_generation; }
+                    *device = found;
                 }
-                Err(error) => {
-                    let _ = emit(&mut subscriber, Event::Failure(error.to_string()));
-                }
+                Err(error) => emit(&mut subscriber, Event::Failure(error.to_string()))?,
+            }
+        }
+        if let Some(at) = shutdown {
+            ensure!(at.elapsed() < Duration::from_secs(10), "keyboard NONE shutdown deadline exceeded");
+            if device.as_ref().is_none_or(|d| !d.none_pending() && d.status.capture_state == "stopped" && d.status.policy_state == "applied") {
+                return Ok(());
             }
         }
         let result = if let Some(d) = device.as_mut() {
-            poll_device(d, &mut subscriber, ready, &mut launch)
+            poll_device(d, &mut subscriber, ready)
         } else {
             std::thread::sleep(Duration::from_millis(25));
             Ok(())
         };
         if let Err(error) = result {
-            device = None;
             ready = false;
-            let _ = emit(&mut subscriber, Event::Failure(error.to_string()));
-            let _ = emit(
-                &mut subscriber,
-                Event::Status(DeviceStatus {
-                    detail: Some(error.to_string()),
-                    ..Default::default()
-                }),
-            );
-            if shutdown.is_some() {
-                return Err(error);
-            }
-        }
-        if let Some(state) = &shutdown {
-            ensure!(
-                state.started.elapsed() < Duration::from_secs(10),
-                "shutdown deadline exceeded without native OS capture stop proof"
-            );
-            let keyboard_stopped = device.as_ref().is_none_or(|d| {
-                !d.none_pending()
-                    && d.status.capture_state == "stopped"
-                    && d.status.policy_state == "applied"
-            });
-            if keyboard_stopped && (!state.needs_desktop || desktop_stopped) {
-                replies.success();
-                return Ok(());
-            }
+            if shutdown.is_some() || subscriber.is_none() { return Err(error); }
+            // Revoke desktop capture promptly. If either event queue send
+            // fails, owner_loop still owns Device for its final NONE cleanup.
+            emit(&mut subscriber, Event::Failure(error.to_string()))?;
+            emit(&mut subscriber, Event::Status(DeviceStatus { detail: Some(error.to_string()), ..Default::default() }))?;
+            if let Some(mut failed) = device.take() { let _ = stop_device(&mut failed); }
         }
     }
 }
@@ -1108,7 +616,6 @@ fn poll_device(
     d: &mut Device,
     subscriber: &mut Option<SyncSender<Event>>,
     ready: bool,
-    launch: &mut LaunchGate,
 ) -> Result<()> {
     ensure!(
         d.identity || d.opened.elapsed() < Duration::from_secs(4),
@@ -1259,14 +766,6 @@ fn poll_device(
             }
             "button_down" | "button_up" | "button_click" => {
                 forward = d.button(value, ready)?;
-                if forward
-                    && value["button"] == "k1"
-                    && event == "button_click"
-                    && subscriber.is_none()
-                    && launch.claim(Instant::now())
-                {
-                    spawn_main()?;
-                }
             }
             _ => {}
         }
@@ -1276,14 +775,152 @@ fn poll_device(
     }
     Ok(())
 }
-fn spawn_main() -> Result<()> {
-    launch_command("--keyboard-activate")?.spawn()?;
-    Ok(())
+#[cfg(feature = "maintenance-validation")]
+mod validation {
+    use super::Control;
+    use std::{collections::HashMap, sync::{Mutex, OnceLock}, thread::ThreadId};
+    fn controls() -> &'static Mutex<HashMap<ThreadId, Control>> {
+        static CONTROLS: OnceLock<Mutex<HashMap<ThreadId, Control>>> = OnceLock::new();
+        CONTROLS.get_or_init(Default::default)
+    }
+    pub(super) struct Worker(ThreadId);
+    impl Worker {
+        pub(super) fn new() -> Self { Self(std::thread::current().id()) }
+    }
+    impl Drop for Worker {
+        fn drop(&mut self) { controls().lock().unwrap().remove(&self.0); }
+    }
+    pub(super) fn record(control: Control) {
+        controls().lock().unwrap().insert(std::thread::current().id(), control);
+    }
+    pub(super) fn last(id: ThreadId) -> Option<Control> {
+        controls().lock().unwrap().get(&id).cloned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_stop_joins_owner_and_releases_lock_without_a_daemon_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut transport, events) = Transport::start_at(root.path().into(), false).unwrap();
+        assert!(matches!(events.recv_timeout(Duration::from_secs(1)).unwrap(), Event::Status(_)));
+        assert!(!root.path().join("owner.json").exists());
+        assert!(Transport::start_at(root.path().into(), false).is_err());
+        let commands = transport.commands();
+        transport.shutdown().unwrap();
+        assert!(commands.control(Control::Rearm { generation: 1 }).is_err());
+        let (next, _) = Transport::start_at(root.path().into(), false).unwrap();
+        drop(next);
+    }
+    #[test]
+    fn transport_drop_joins_even_when_other_command_handles_survive() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _) = Transport::start_at(root.path().into(), false).unwrap();
+        let commands = transport.commands();
+        drop(transport);
+        assert!(commands.control(Control::Rearm { generation: 1 }).is_err());
+        let (next, _) = Transport::start_at(root.path().into(), false).unwrap();
+        drop(next);
+        assert!(!root.path().join("owner.json").exists());
+    }
+    #[test]
+    fn command_overflow_revokes_admission_without_blocking_shutdown() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let commands = Commands { tx, stop: stop.clone() };
+        commands.control(Control::Rearm { generation: 1 }).unwrap();
+        assert!(commands.control(Control::Policy { voice_key: "none".into() }).is_err());
+        assert!(stop.load(Ordering::Acquire));
+        assert!(commands.control(Control::Rearm { generation: 2 }).is_err());
+    }
+    struct ControlledWire {
+        input: Receiver<Vec<u8>>,
+        output: Arc<std::sync::Mutex<Vec<u8>>>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl Read for ControlledWire {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            match self.input.recv_timeout(Duration::from_millis(20)) {
+                Ok(frame) => { bytes[..frame.len()].copy_from_slice(&frame); Ok(frame.len()) }
+                Err(_) => Err(std::io::ErrorKind::TimedOut.into()),
+            }
+        }
+    }
+    impl Write for ControlledWire {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.lock().unwrap().extend_from_slice(bytes); Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    impl Drop for ControlledWire {
+        fn drop(&mut self) { self.dropped.store(true, Ordering::Release); }
+    }
+    #[test]
+    fn transport_stop_waits_for_current_none_receipt_and_drops_serial_before_unlock() {
+        let root = tempfile::tempdir().unwrap();
+        let (input, frames) = mpsc::sync_channel(8);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut serial = device(vec![]);
+        serial.status.capture_state = "stopped".into();
+        serial.port = Box::new(ControlledWire { input: frames, output: output.clone(), dropped: dropped.clone() });
+        let (mut transport, events) = Transport::start_with_device(root.path().into(), false, Some(serial)).unwrap();
+        events.recv_timeout(Duration::from_secs(1)).unwrap();
+        let stopping = std::thread::spawn(move || transport.shutdown());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while output.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!stopping.is_finished() && !dropped.load(Ordering::Acquire));
+        assert!(Transport::start_at(root.path().into(), false).is_err());
+        let commands = Parser::default().append(&output.lock().unwrap()).unwrap();
+        assert_eq!(commands[0]["event"], "nk_policy");
+        assert_eq!(commands[0]["voice_key"], "none");
+        // A different request in this epoch cannot prove the pending NONE.
+        // A different epoch is a reset/protocol failure and closes the wire.
+        input.send(protocol::command(none_receipt(2)).unwrap()).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!stopping.is_finished());
+        input.send(protocol::command(none_receipt(1)).unwrap()).unwrap();
+        stopping.join().unwrap().unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        let (next, _) = Transport::start_at(root.path().into(), false).unwrap();
+        drop(next);
+    }
+    #[test]
+    fn event_overflow_retains_serial_lock_until_none_cleanup_is_confirmed() {
+        let root = tempfile::tempdir().unwrap();
+        let (input, frames) = mpsc::sync_channel(64);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut serial = device(vec![]);
+        serial.status.capture_state = "stopped".into();
+        serial.port = Box::new(ControlledWire { input: frames, output: output.clone(), dropped: dropped.clone() });
+        let (mut transport, _undrained_events) = Transport::start_with_device(root.path().into(), false, Some(serial)).unwrap();
+        // Initial status plus 40 identity refreshes overflow the bounded FIFO.
+        let identity = protocol::command(json!({"event":"device_info","hardware":"vibe_keyboard",
+            "device_id":"NK-TEST","native_keyboard_protocol":1,"epoch":7})).unwrap();
+        for _ in 0..40 { input.send(identity.clone()).unwrap(); }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while output.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "overflow did not request NONE cleanup");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(Transport::start_at(root.path().into(), false).is_err());
+        let commands = Parser::default().append(&output.lock().unwrap()).unwrap();
+        assert_eq!(commands[0]["event"], "nk_policy");
+        assert_eq!(commands[0]["voice_key"], "none");
+        input.send(protocol::command(none_receipt(1)).unwrap()).unwrap();
+        let failure = transport.shutdown().unwrap_err().to_string();
+        assert!(failure.contains("queue"), "original overflow error was lost: {failure}");
+        assert!(dropped.load(Ordering::Acquire));
+        let (next, _) = Transport::start_at(root.path().into(), false).unwrap();
+        drop(next);
+    }
     struct FakeWire {
         input: std::io::Cursor<Vec<u8>>,
         output: Arc<std::sync::Mutex<Vec<u8>>>,
@@ -1331,16 +968,10 @@ mod tests {
         }
     }
     fn poll(d: &mut Device) -> Result<()> {
-        poll_device(d, &mut None, true, &mut LaunchGate::default())
+        poll_device(d, &mut None, true)
     }
     #[test]
-    fn authentication_is_exact() {
-        assert!(token_equal("abcdef", "abcdef"));
-        assert!(!token_equal("abcdef", "abcdeg"));
-        assert!(!token_equal("abc", "abcdef"));
-    }
-    #[test]
-    fn ipc_rejects_retired_or_extra_control() {
+    fn controls_reject_retired_or_extra_fields() {
         for value in [
             json!({"kind":"stop","session_id":1}),
             json!({"kind":"cancel","session_id":1}),
@@ -1413,7 +1044,7 @@ mod tests {
         json!({"event":"nk_policy_applied","epoch":7,"request_id":request,"session_id":0,"voice_key":"none","capture_stopped":true,"waiting_release":true})
     }
     #[test]
-    fn rearm_proof_follows_real_none_ack_and_old_socket_keys() {
+    fn rearm_proof_follows_real_none_ack_and_rejects_old_key_frames() {
         let mut bytes = Vec::new();
         for event in ["button_down", "button_up", "button_click"] {
             bytes
@@ -1432,7 +1063,7 @@ mod tests {
         assert!(d.rearmed_ready.is_none());
         let (tx, rx) = mpsc::sync_channel(16);
         let mut subscriber = Some(tx);
-        poll_device(&mut d, &mut subscriber, true, &mut LaunchGate::default()).unwrap();
+        poll_device(&mut d, &mut subscriber, true).unwrap();
         let events: Vec<_> = rx.try_iter().collect();
         assert!(matches!(events[0], Event::Status(_)));
         assert!(matches!(events[1], Event::Rearmed { generation: 9 }));
@@ -1617,85 +1248,6 @@ mod tests {
         }
     }
     #[test]
-    fn cold_launch_clicks_are_throttled() {
-        let mut gate = LaunchGate::default();
-        let now = Instant::now();
-        assert!(gate.claim(now));
-        assert!(!gate.claim(now + Duration::from_millis(200)));
-        assert!(gate.claim(now + Duration::from_secs(3)));
-        gate.ready();
-        assert!(gate.claim(now + Duration::from_secs(3)));
-    }
-    #[test]
-    fn management_shutdown_works_while_desktop_is_connected() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let path = root.join("owner.json");
-        let owner = std::thread::spawn(move || run_at(root, false));
-        let started = Instant::now();
-        while !path.exists() {
-            assert!(started.elapsed() < Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut desktop = Client::connect_at(path.clone()).unwrap();
-        assert!(matches!(desktop.next().unwrap(), Event::Status(_)));
-        desktop.control(Control::DesktopStopped).unwrap();
-        request_shutdown_at(path.clone()).unwrap();
-        owner.join().unwrap().unwrap();
-        assert!(!path.exists());
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(dir.path().join("owner.lock"))
-            .unwrap();
-        lock.try_lock_exclusive().unwrap();
-    }
-    #[test]
-    fn orphan_daemon_accepts_only_live_gui_exit_lock_proof() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let path = root.join("owner.json");
-        let owner = std::thread::spawn(move || run_at(root, false));
-        let start = Instant::now();
-        while !path.exists() {
-            assert!(start.elapsed() < Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut desktop = Client::connect_at(path.clone()).unwrap();
-        desktop.next().unwrap();
-        let lifetime = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.path().join("desktop.lock"))
-            .unwrap();
-        FileExt::try_lock_exclusive(&lifetime).unwrap();
-        assert!(
-            crate::desktop_control::request_at(dir.path().into(), Duration::from_millis(100))
-                .is_err()
-        );
-        desktop
-            .control(Control::Policy {
-                voice_key: "none".into(),
-            })
-            .unwrap();
-        // Abruptly gone, with no DesktopStopped: existing disconnect logic
-        // intentionally retains desktop_unproven rather than fabricating proof.
-        drop(desktop);
-        drop(lifetime); // the OS releases this handle when a GUI crashes
-        let proof =
-            crate::desktop_control::request_at(dir.path().into(), Duration::from_secs(1)).unwrap();
-        assert!(request_shutdown_with_proof_at(path.clone(), Some("forged")).is_err());
-        assert!(path.exists() && !owner.is_finished());
-        let token = proof.proof_for(dir.path()).unwrap();
-        request_shutdown_with_proof_at(path.clone(), Some(token)).unwrap();
-        owner.join().unwrap().unwrap();
-        assert!(!path.exists());
-        drop(proof);
-        assert!(!dir.path().join("desktop-exited.json").exists());
-    }
-    #[test]
     fn only_fixed_k1_is_available_before_desktop_readiness() {
         for button in ["k1", "k2", "k3", "k4"] {
             let mut d = device(vec![]);
@@ -1721,7 +1273,7 @@ mod tests {
         }
         let mut d = device(input);
         let (tx, rx) = mpsc::sync_channel(16);
-        poll_device(&mut d, &mut Some(tx), true, &mut LaunchGate::default()).unwrap();
+        poll_device(&mut d, &mut Some(tx), true).unwrap();
         let frames: Vec<_> = rx
             .try_iter()
             .map(|event| match event {
@@ -1737,71 +1289,6 @@ mod tests {
                 ["button_down", "button_up", "button_click"][index % 3]
             );
         }
-    }
-    #[test]
-    fn disconnected_desktop_can_reconnect_before_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let path = root.join("owner.json");
-        let owner = std::thread::spawn(move || run_at(root, false));
-        let start = Instant::now();
-        while !path.exists() {
-            assert!(start.elapsed() < Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut first = Client::connect_at(path.clone()).unwrap();
-        first.next().unwrap();
-        drop(first);
-        let mut second = loop {
-            if let Ok(client) = Client::connect_at(path.clone()) {
-                break client;
-            }
-            assert!(start.elapsed() < Duration::from_secs(4));
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        assert!(matches!(second.next().unwrap(), Event::Status(_)));
-        second.control(Control::DesktopStopped).unwrap();
-        request_shutdown_at(path).unwrap();
-        owner.join().unwrap().unwrap();
-    }
-    #[test]
-    fn disconnect_does_not_prove_desktop_capture_stopped() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let (tx, rx) = mpsc::sync_channel(8);
-        let owner = std::thread::spawn(move || owner_loop(rx, false, root));
-        let (events, reader) = mpsc::sync_channel(8);
-        tx.send(Message::Connect(events)).unwrap();
-        reader.recv().unwrap();
-        let (reply, result) = mpsc::sync_channel(1);
-        tx.send(Message::Shutdown(reply)).unwrap();
-        tx.send(Message::Disconnect).unwrap();
-        assert!(owner.join().unwrap().is_err());
-        assert!(result.recv().unwrap().is_err());
-    }
-    #[test]
-    fn management_waits_for_late_native_capture_stop_proof() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let path = root.join("owner.json");
-        let owner = std::thread::spawn(move || run_at(root, false));
-        let start = Instant::now();
-        while !path.exists() {
-            assert!(start.elapsed() < Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut desktop = Client::connect_at(path.clone()).unwrap();
-        desktop.next().unwrap();
-        let request_path = path.clone();
-        let shutdown = std::thread::spawn(move || request_shutdown_at(request_path));
-        assert!(
-            matches!(desktop.next().unwrap(),Event::Failure(value)if value=="device_service_stopping")
-        );
-        assert!(!shutdown.is_finished());
-        desktop.control(Control::DesktopStopped).unwrap();
-        shutdown.join().unwrap().unwrap();
-        owner.join().unwrap().unwrap();
-        assert!(!path.exists());
     }
     #[test]
     fn display_queue_coalesces_and_none_has_priority_without_dropping_key_up() {
@@ -1841,7 +1328,7 @@ mod tests {
         d.status.display_available = true;
         d.display("ready").unwrap();
         let (tx, rx) = mpsc::sync_channel(8);
-        poll_device(&mut d, &mut Some(tx), true, &mut LaunchGate::default()).unwrap();
+        poll_device(&mut d, &mut Some(tx), true).unwrap();
         assert!(matches!(rx.recv().unwrap(),Event::Status(status)if !status.display_available));
         assert!(
             rx.try_iter()
@@ -1883,103 +1370,5 @@ mod tests {
                 .to_string()
                 .contains("identity refresh")
         );
-    }
-    fn executable_fixture(path: &Path) {
-        fs::write(path, b"fixture").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-    }
-    #[test]
-    fn appimage_launch_uses_durable_outer_image_instead_of_mount() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("NomiFun.AppImage");
-        executable_fixture(&image);
-        let mount = dir.path().join(".mount_NomiFun");
-        fs::create_dir(&mount).unwrap();
-        let inner = mount.join("nomifun-desktop");
-        executable_fixture(&inner);
-        assert_eq!(launch_path(Some(&image), &inner).unwrap(), image);
-        assert!(launch_path(None, &inner).is_err());
-        assert!(launch_path(Some(Path::new("relative.AppImage")), &inner).is_err());
-        assert!(launch_path(Some(&inner), &inner).is_err());
-    }
-    #[test]
-    fn invalid_appimage_does_not_override_valid_normal_executable() {
-        let dir = tempfile::tempdir().unwrap();
-        let current = dir.path().join("nomifun-desktop");
-        executable_fixture(&current);
-        for candidate in [
-            Path::new("relative.AppImage"),
-            dir.path(),
-            &dir.path().join("missing.AppImage"),
-        ] {
-            assert_eq!(launch_path(Some(candidate), &current).unwrap(), current);
-        }
-        assert_eq!(launch_path(None, &current).unwrap(), current);
-        assert!(launch_path(None, Path::new("relative-executable")).is_err());
-        assert!(launch_path(None, &dir.path().join("missing")).is_err());
-    }
-    #[cfg(unix)]
-    #[test]
-    fn unix_child_gets_own_session_and_keeps_graphical_environment() {
-        unsafe extern "C" {
-            fn getpgid(pid: i32) -> i32;
-            fn getsid(pid: i32) -> i32;
-        }
-        let mut command = std::process::Command::new("/bin/sh");
-        configure_detached(&mut command);
-        command.arg("-c").arg("printf '%s|%s|%s' \"$DISPLAY\" \"$WAYLAND_DISPLAY\" \"$DBUS_SESSION_BUS_ADDRESS\"; read NOMIFUN_TEST_DONE")
-            .env("DISPLAY",":nomifun-test").env("WAYLAND_DISPLAY","wayland-nomifun-test").env("DBUS_SESSION_BUS_ADDRESS","unix:path=/nomifun-test-bus")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
-        let mut child = command.spawn().unwrap();
-        let id = child.id() as i32;
-        assert_eq!(unsafe { getpgid(id) }, id);
-        assert_eq!(unsafe { getsid(id) }, id);
-        child.stdin.take().unwrap().write_all(b"\n").unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            ":nomifun-test|wayland-nomifun-test|unix:path=/nomifun-test-bus"
-        );
-    }
-    #[test]
-    fn stopped_gui_disconnect_leaves_owner_ready_for_next_main() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let path = root.join("owner.json");
-        let owner = std::thread::spawn(move || run_at(root, false));
-        let start = Instant::now();
-        while !path.exists() {
-            assert!(start.elapsed() < Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut first = Client::connect_at(path.clone()).unwrap();
-        first.next().unwrap();
-        first
-            .control(Control::Policy {
-                voice_key: "none".into(),
-            })
-            .unwrap();
-        first.control(Control::DesktopStopped).unwrap();
-        drop(first);
-        let mut next = loop {
-            if let Ok(client) = Client::connect_at(path.clone()) {
-                break client;
-            }
-            assert!(start.elapsed() < Duration::from_secs(4));
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        assert!(!owner.is_finished() && path.exists());
-        assert!(matches!(next.next().unwrap(), Event::Status(_)));
-        // A fresh GUI connection is permitted after the previous GUI's proof;
-        // K1 cold launch uses the existing no-subscriber path and launch gate.
-        next.control(Control::DesktopStopped).unwrap();
-        request_shutdown_at(path).unwrap();
-        owner.join().unwrap().unwrap();
     }
 }

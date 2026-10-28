@@ -2,12 +2,12 @@
 //! Runs from the package's private temporary directory, never the installed
 //! application. No GUI, storage startup, model credentials or audio are loaded.
 use anyhow::{Context, Result, bail, ensure};
-use nomifun_keyboard::{maintenance::{FileReplacement, MaintenanceGuard, ResumeIntent}, service};
+use nomifun_keyboard::{maintenance::{FileReplacement, MaintenanceGuard, ResumeIntent}, ipc};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     process::{Child, Command, ExitCode, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(windows)]
@@ -43,7 +43,6 @@ impl Options {
                 Some("--payload") => payload = Some(PathBuf::from(args.next().context("missing staged payload")?)),
                 Some("--parent-pid") => parent = Some(args.next().context("missing parent PID")?.to_str().context("invalid parent PID")?.parse::<u32>()?),
                 Some("--resume-app") => resume.desktop = true,
-                Some("--resume-service") => resume.service = true,
                 Some("--no-resume") => no_resume = true,
                 Some("--uninstall") => uninstall = true,
                 Some("--defer-app-on-commit") => defer_app_on_commit = true,
@@ -87,10 +86,9 @@ fn status(options: &Options, state: &str, detail: &str) -> Result<()> {
     Ok(())
 }
 
-fn launch(installed: &Path, argument: Option<&str>) -> Result<Child> {
+fn launch(installed: &Path) -> Result<Child> {
     ensure!(installed.is_file() && !installed.is_symlink(), "installed executable is unavailable for recovery");
     let mut command = Command::new(installed);
-    if let Some(argument) = argument { command.arg(argument); }
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
     {
@@ -100,43 +98,26 @@ fn launch(installed: &Path, argument: Option<&str>) -> Result<Child> {
     command.spawn().context("restart installed NomiFun")
 }
 
-fn wait_for_service(child: &mut Child) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let runtime = service::runtime_dir()?;
-    loop {
-        let descriptor = fs::read(runtime.join("owner.json")).ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-        if descriptor.as_ref().and_then(|value| value["pid"].as_u64()) == Some(child.id() as u64)
-            && ResumeIntent::capture(&runtime)?.service { return Ok(()); }
-        if let Some(status) = child.try_wait()? {
-            bail!("keyboard service exited before readiness was confirmed: {status}");
-        }
-        ensure!(Instant::now() < deadline, "keyboard service started but readiness was not confirmed");
-        std::thread::sleep(Duration::from_millis(30));
-    }
-}
-
 fn resume(options: &Options, intent: ResumeIntent) -> Vec<String> {
     if options.no_resume { return Vec::new(); }
     let mut errors = Vec::new();
     // A failed preparation can leave the original process alive. Restart only
     // participants proven absent instead of duplicating every observed process.
-    let mut running = match service::runtime_dir().and_then(|dir| ResumeIntent::capture(&dir)) {
+    let running = match ipc::runtime_dir().and_then(|dir| ResumeIntent::capture(&dir)) {
         Ok(running) => running,
         Err(error) => return vec![format!("cannot verify recovery participants: {error:#}")],
     };
     #[cfg(windows)]
-    match service::runtime_dir().and_then(|dir| windows::installed_desktop_running(&options.installed, &dir)) {
+    let running = {
+    let mut running = running;
+    match ipc::runtime_dir().and_then(|dir| windows::installed_desktop_running(&options.installed, &dir)) {
         Ok(desktop) => running.desktop |= desktop,
         Err(error) => return vec![format!("cannot verify installed application recovery: {error:#}")],
     }
-    if intent.service && !running.service {
-        if let Err(error) = launch(&options.installed, Some("--keyboard-service")).and_then(|mut child| wait_for_service(&mut child)) {
-            errors.push(format!("keyboard service: {error:#}"));
-        }
-    }
+    running
+    };
     if intent.desktop && !running.desktop {
-        if let Err(error) = launch(&options.installed, None) { errors.push(format!("desktop: {error:#}")); }
+        if let Err(error) = launch(&options.installed) { errors.push(format!("desktop: {error:#}")); }
     }
     errors
 }
@@ -149,7 +130,6 @@ fn finish(options: &Options, state: &str, detail: &str, intent: ResumeIntent) ->
     let _ = fs::write(options.session.join("outcome.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "state": state, "detail": detail, "resumeWarnings": warnings,
         "resumeDesktopRequested": intent.desktop && !options.no_resume,
-        "resumeServiceRequested": intent.service && !options.no_resume,
     }))?);
     // Resume warnings never turn a successfully committed application back into
     // an uncommitted installation. The caller can display the actionable warning.
@@ -195,31 +175,22 @@ fn run(options: &Options) -> Result<()> {
     FileExt::try_lock_exclusive(&session_lock).context("maintenance session is already active")?;
     let parent = Parent::open(options.parent)?;
     ensure!(parent.alive(), "installer already exited");
-    let runtime = service::runtime_dir()?;
+    let runtime = ipc::runtime_dir()?;
     let mut intent = ResumeIntent::capture(&runtime)?;
     intent.desktop |= options.resume.desktop;
-    intent.service |= options.resume.service;
     #[cfg(windows)]
     {
         // Legacy versions have no desktop lifetime lock. Inspect exact image
         // paths without launching their unsupported management command.
         intent.desktop |= windows::installed_desktop_running(&options.installed, &runtime)?;
     }
-    #[cfg(windows)]
-    let (login_enabled, login_warning) = match windows::owns_login_registration(&options.installed) {
-        Ok(enabled) => (enabled, String::new()),
-        Err(error) if options.uninstall => return Err(error),
-        Err(error) => (false, format!("Startup preference could not be inspected; its registration was preserved: {error:#}")),
-    };
-    #[cfg(not(windows))]
-    let (login_enabled, login_warning) = (false, String::new());
     let checked_runtime = runtime.clone();
     let mut participants_checked = false;
     let prepared = MaintenanceGuard::prepare_with_intent_checked_in(runtime, Duration::from_secs(30), &mut intent, |observed| {
         #[cfg(windows)]
         windows::validate_runtime_ownership(&options.installed, &checked_runtime, observed)?;
         #[cfg(not(windows))]
-        let _ = (&checked_runtime, observed);
+        nomifun_keyboard::legacy_service::validate_runtime_ownership(&options.installed, &checked_runtime, observed.desktop)?;
         participants_checked = true;
         Ok(())
     });
@@ -233,6 +204,10 @@ fn run(options: &Options) -> Result<()> {
     // All failures after preparation take the same rollback/recovery path,
     // including unexpected command I/O and failed status publication.
     let completion = (|| -> Result<bool> {
+      // Retired login entries never return on cancellation. Verify and remove
+      // them before uninstall deletes the executable needed to prove ownership.
+      #[cfg(windows)]
+      windows::unregister_login(&options.installed)?;
       status(options, "ready", "")?;
       loop {
         // Claim the old command atomically before reading it. A newly
@@ -265,8 +240,6 @@ fn run(options: &Options) -> Result<()> {
             }
             "commit" => {
                 ensure!(options.uninstall || replacement.is_some(), "replacement has not been applied");
-                #[cfg(windows)]
-                if options.uninstall { windows::unregister_login(&options.installed)?; }
                 return Ok(true);
             }
             "abort" => return Ok(false),
@@ -281,10 +254,9 @@ fn run(options: &Options) -> Result<()> {
         let committed_intent = if options.uninstall { ResumeIntent::default() } else {
             ResumeIntent {
                 desktop: intent.desktop && !options.defer_app_on_commit,
-                service: intent.service || login_enabled,
             }
         };
-        return finish(options, "committed", &login_warning, committed_intent);
+        return finish(options, "committed", "", committed_intent);
     }
     let rollback = replacement.as_mut().map(|replacement| replacement.rollback()).unwrap_or(Ok(()));
     // Drop the transaction while the lifetime fence is still held; it never
@@ -300,7 +272,6 @@ fn run(options: &Options) -> Result<()> {
             Ok(true) => unreachable!(),
         },
     };
-    let detail = if login_warning.is_empty() { detail } else { format!("{detail} {login_warning}") };
     finish(options, state, &detail, if state == "repair_required" { ResumeIntent::default() } else { intent })
 }
 

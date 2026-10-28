@@ -137,8 +137,8 @@ Var NomiFunMaintenanceCommand
       StrCpy $NomiFunMaintenanceActive 0
       StrCpy $NomiFunMaintenanceFinished 1
       ${If} $NomiFunMaintenanceDetail != ""
-        DetailPrint "Keyboard restart: $NomiFunMaintenanceDetail"
-        MessageBox MB_OK|MB_ICONEXCLAMATION "NomiFun was installed, but its services need attention.$\r$\n$\r$\n$NomiFunMaintenanceDetail" /SD IDOK
+        DetailPrint "Application restart: $NomiFunMaintenanceDetail"
+        MessageBox MB_OK|MB_ICONEXCLAMATION "NomiFun was installed, but its application restart needs attention.$\r$\n$\r$\n$NomiFunMaintenanceDetail" /SD IDOK
       ${EndIf}
     ${EndIf}
   FunctionEnd

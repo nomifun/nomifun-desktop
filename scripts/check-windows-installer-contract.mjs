@@ -223,9 +223,12 @@ for (const token of ['Function .onInstFailed', 'Function .onGUIEnd', 'Call NomiF
   checkIncludes(source, token, 'installer must retain recoverable maintenance lifecycle: ' + token);
 }
 const maintenanceHooks = readFileSync(resolve(root, 'apps/desktop/nsis/keyboard-hooks.nsh'), 'utf8');
-check(!maintenanceHooks.includes('--keyboard-stop'), 'installer must not send a new maintenance CLI to an unknown old application');
+for (const retired of ['--keyboard-stop', '--keyboard-unregister', '--keyboard-service', '--resume-service']) {
+  check(!maintenanceHooks.includes(retired), 'installer must not launch or recover the retired keyboard service: ' + retired);
+}
 checkIncludes(maintenanceHooks, 'NOMIFUN_MAINTENANCE_BINARY', 'installer must embed its own maintenance helper');
 checkIncludes(maintenanceHooks, 'command.next', 'maintenance commands must be published atomically');
+checkIncludes(maintenanceHooks, '--resume-app --defer-app-on-commit', 'updater cancellation must retain GUI recovery intent');
 for (const hook of [
   'NSIS_HOOK_PREINSTALL',
   'NSIS_HOOK_POSTINSTALL',

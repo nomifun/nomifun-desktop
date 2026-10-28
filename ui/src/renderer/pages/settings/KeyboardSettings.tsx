@@ -94,7 +94,7 @@ export default function KeyboardSettings() {
     } : current);
     setDirty(true);
   };
-  const toggle = async (key: 'enabled' | 'k2Enabled' | 'k3Enabled' | 'k4Enabled' | 'alwaysOnTop' | 'launchAtLogin', value: boolean) => {
+  const toggle = async (key: 'enabled' | 'k2Enabled' | 'k3Enabled' | 'k4Enabled' | 'alwaysOnTop', value: boolean) => {
     if (!state) return;
     const updated = await native.updateSettings({ ...state.settings, [key]: value });
     if (updated) setDraft((current) => current ? { ...current, [key]: updated.settings[key] } : updated.settings);
@@ -104,7 +104,7 @@ export default function KeyboardSettings() {
     const updated = await native.updateSettings({ ...draft,
       enabled: state.settings.enabled, k2Enabled: state.settings.k2Enabled,
       k3Enabled: state.settings.k3Enabled, k4Enabled: state.settings.k4Enabled,
-      alwaysOnTop: state.settings.alwaysOnTop, launchAtLogin: state.settings.launchAtLogin,
+      alwaysOnTop: state.settings.alwaysOnTop,
     });
     if (updated) { setDraft(updated.settings); setDirty(false); }
   };
@@ -122,6 +122,9 @@ export default function KeyboardSettings() {
             <VisualStatus tone={state.device.connected ? 'success' : 'warning'}>{t(state.device.connected ? 'settings.keyboard.connected' : 'settings.keyboard.disconnected')}</VisualStatus>
           </VisualRow>
           <VisualRow label={t('settings.keyboard.firmware')} description={state.device.firmware || t('settings.keyboard.unknown')} />
+          <VisualRow label={t('settings.keyboard.runtimeStatus')} description={state.service.detail}>
+            <VisualStatus tone={state.service.ready ? 'success' : 'warning'}>{t(state.service.ready ? 'settings.keyboard.ready' : state.service.running ? 'settings.keyboard.waiting' : 'settings.keyboard.stopped')}</VisualStatus>
+          </VisualRow>
         </VisualPanel>
         <VisualPanel title={t('settings.keyboard.keysTitle')} description={t('settings.keyboard.keysHint')}>
           <VisualRow label={t('settings.keyboard.enabled')} description={t('settings.keyboard.enabledHint')}>
@@ -210,15 +213,6 @@ export default function KeyboardSettings() {
           <Button type='primary' loading={native.busy} disabled={!dirty} onClick={() => void save()}>{t('settings.keyboard.save')}</Button>
           <Button disabled={!dirty || native.busy} onClick={() => { setDraft(state.settings); setDirty(false); }}>{t('settings.keyboard.discard')}</Button>
         </div>
-        <VisualPanel title={t('settings.keyboard.serviceTitle')}>
-          <VisualRow label={t('settings.keyboard.launchAtLogin')} description={t('settings.keyboard.loginHint')}>
-            <VisualSwitch label={t('settings.keyboard.launchAtLogin')} checked={state.settings.launchAtLogin} disabled={native.busy} onChange={(value) => toggle('launchAtLogin', value)} />
-          </VisualRow>
-          <VisualRow label={t('settings.keyboard.serviceStatus')} description={state.service.detail}>
-            <VisualStatus tone={state.service.ready ? 'success' : 'warning'}>{t(state.service.ready ? 'settings.keyboard.ready' : state.service.running ? 'settings.keyboard.waiting' : 'settings.keyboard.stopped')}</VisualStatus>
-          </VisualRow>
-          <div className='keyboard-form-actions'><Button status='danger' disabled={native.busy} onClick={() => void native.action({ action: 'quit_all' })}>{t('settings.keyboard.quitAll')}</Button></div>
-        </VisualPanel>
       </>}
     </div>
   </SettingsPageWrapper>;

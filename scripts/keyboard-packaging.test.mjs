@@ -83,6 +83,14 @@ describe('native keyboard packaging lifecycle', () => {
     expect(hooks).toContain('NomiFunMaintenanceCommit');
     expect(hooks).not.toContain('nsExec::ExecToStack');
     expect(hooks).not.toContain('--keyboard-stop');
+    expect(hooks).not.toContain('--resume-service');
+    expect(hooks).not.toContain('--keyboard-service');
+    for (const [name, unregister] of [['package-lifecycle.sh', '--keyboard-unregister'],
+      ['appimage-uninstall.sh', '--keyboard-unregister'], ['macos-uninstall.command', '--app-maintenance-unregister']]) {
+      const source = readFileSync(join(sourceDirectory, name), 'utf8');
+      expect(source).toContain(unregister);
+      expect(source).not.toContain('--keyboard-service');
+    }
     expect(readFileSync(join(sourceDirectory, '70-nomifun-keyboard.rules'), 'utf8')).not.toContain('0666');
   });
 
@@ -96,6 +104,18 @@ describe('native keyboard packaging lifecycle', () => {
     expect(() => maintenanceBuildArgs({ target: '../other' })).toThrow();
   });
 
+  test('cross-version stop aliases stay in headless application maintenance and cannot start a daemon', () => {
+    const source = readFileSync(join(root, 'apps/desktop/src/keyboard/mod.rs'), 'utf8');
+    const start = source.indexOf('pub(crate) fn early_entry()');
+    const entry = source.slice(start, source.indexOf('/// Call during single-threaded GUI startup', start));
+    for (const [current, alias, unregister] of [['--app-maintenance-stop', '--keyboard-stop', false],
+      ['--app-maintenance-unregister', '--keyboard-unregister', true]]) {
+      const pattern = new RegExp(`(?:"${current}"\\s*\\|\\s*"${alias}"|"${alias}"\\s*\\|\\s*"${current}")\\s*=>\\s*(?:\\{\\s*)?platform::stop_application\\(\\s*${unregister}\\s*,?\\s*\\)`);
+      expect(entry).toMatch(pattern);
+    }
+    expect(entry).toMatch(/"--keyboard-service"\s*=>\s*Err\(/);
+  });
+
   test.skipIf(process.platform === 'win32')('package scripts parse in a real POSIX shell', () => {
     for (const name of readdirSync(sourceDirectory).filter((name) => /\.(sh|command)$/.test(name))) {
       const result = spawnSync('/bin/sh', ['-n', join(sourceDirectory, name)], { encoding: 'utf8' });
@@ -103,13 +123,14 @@ describe('native keyboard packaging lifecycle', () => {
     }
   });
 
-  test.skipIf(process.platform === 'win32')('upgrade stops the authenticated owner in its user account and preserves login registration', () => {
+  test.skipIf(process.platform === 'win32')('upgrade stops the application and retires the authenticated legacy owner in its user account', () => {
     const item = fixture({ owner: true, registration: true });
     expect(item.run('stop').status).toBe(0);
     expect(item.calls()).toContain('-u fixture -- env HOME=');
     expect(item.calls()).toContain(`XDG_RUNTIME_DIR=${item.runtime}`);
     expect(item.calls()).toContain('--keyboard-stop');
     expect(item.calls()).not.toContain('--keyboard-unregister');
+    expect(item.calls()).not.toContain('--app-maintenance-');
   });
 
   test.skipIf(process.platform === 'win32')('uninstall cleans the registration for a logged out user without claiming a graphical session', () => {
@@ -117,9 +138,10 @@ describe('native keyboard packaging lifecycle', () => {
     expect(item.run('unregister').status).toBe(0);
     expect(item.calls()).toContain('env -u XDG_RUNTIME_DIR');
     expect(item.calls()).toContain('--keyboard-unregister');
+    expect(item.calls()).not.toContain('--app-maintenance-');
   });
 
-  test.skipIf(process.platform === 'win32')('an unconfirmed service stop prevents package replacement', () => {
+  test.skipIf(process.platform === 'win32')('an unconfirmed application or legacy owner stop prevents package replacement', () => {
     const item = fixture({ owner: true, failure: true });
     expect(item.run('stop').status).not.toBe(0);
   });

@@ -18,7 +18,7 @@ beforeEach(() => {
   current = {
     settings: { enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
       asrModel: { providerId: 'provider-1', model: 'streaming-model' }, textModel: null,
-      language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false, subtitleFontSize: 14, launchAtLogin: false },
+      language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false, subtitleFontSize: 14 },
     sequence: 0, cancelGeneration: 0, documentId: 'doc-1', revision: 2, operationId: null, editSessionId: null, dictationSelection: null, phase: 'idle', text: 'Ready text', originalText: 'Ready text',
     partial: '', candidate: '', visible: false, pendingAction: null, error: null, notice: null,
     audioState: { state: 'stopped', detail: null },
@@ -45,7 +45,30 @@ await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { tr
 const show = () => render(<SWRConfig value={{ provider: () => new Map() }}><I18nextProvider i18n={i18n}><MemoryRouter><KeyboardSettings /></MemoryRouter></I18nextProvider></SWRConfig>);
 
 describe('system microphone keyboard settings', () => {
-  test('the explicit microphone test works without a connected keyboard or device service', async () => {
+  test('the app-owned keyboard has no separate service startup or quit controls', async () => {
+    show();
+    await screen.findByRole('region', { name: 'Keyboard device' });
+    expect(Boolean(screen.queryByRole('region', { name: 'Background device service' }))).toBe(false);
+    expect(Boolean(screen.queryByRole('switch', { name: 'Start at user login' }))).toBe(false);
+    expect(Boolean(screen.queryByRole('button', { name: 'Quit all services' }))).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Open subtitle board' }));
+    await waitFor(() => expect(actions).toEqual([{ action: 'open' }]));
+  });
+
+  test.each([
+    { running: true, ready: true, label: 'Ready' },
+    { running: true, ready: false, label: 'Preparing keyboard' },
+    { running: false, ready: false, label: 'Not running' },
+  ])('the device panel shows app-owned keyboard readiness: $label', async ({ running, ready, label }) => {
+    current.service = { running, ready, detail: 'Keyboard runtime detail' };
+    show();
+    const device = within(await screen.findByRole('region', { name: 'Keyboard device' }));
+    expect(device.getByText('Keyboard readiness')).toBeTruthy();
+    expect(device.getByText(label)).toBeTruthy();
+    expect(device.getByText('Keyboard runtime detail')).toBeTruthy();
+  });
+
+  test('the explicit microphone test works without a connected keyboard', async () => {
     show();
     const start = await screen.findByRole('button', { name: 'Test microphone' });
     await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
@@ -193,6 +216,7 @@ describe('system microphone keyboard settings', () => {
     await waitFor(() => expect(updates.length).toBe(1));
     expect(updates[0].audioDeviceId).toBe('microphone-1');
     expect(updates[0].asrModel).toEqual(current.settings.asrModel);
+    expect(updates[0]).not.toHaveProperty('launchAtLogin');
   });
 
   test('switching to standard ASR filters models, clears an incompatible reference and saves the explicit mode', async () => {
