@@ -138,6 +138,7 @@ windows = { version = "0.61", features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util.workspace = true
+libc.workspace = true
 gtk = { version = "0.18", features = ["v3_24"] }
 gdkx11 = "0.18"
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
