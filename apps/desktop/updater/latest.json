@@ -1,11 +1,27 @@
 {
   "version": "0.8.19",
   "notes": "## 升级前请阅读 / Before upgrading\n\n- 从数据库谱系不兼容的旧版本跨代升级前，请备份或导出重要数据；应用沿用既有的数据集重建规则，不转换历史数据，Agent 数据清理保留非 Agent 配置。使用已退役 Computer 契约的会话需新建会话，原历史保留，个人 Agent 请重新选择 Computer 动作。\n- Back up or export important data before upgrading from an incompatible older database lineage. Existing dataset rebuild rules remain in effect without converting historical data; Agent clean cuts preserve non-Agent configuration. Retired Computer bindings require a new session and reselected actions for personal Agents; existing history is retained.\n\n## 更新内容\n\n- 键盘设置新增引导式配置：本地麦克风检测、就绪状态判断与设置自动保存；字幕键盘同步新的采集状态。\n\n## Highlights\n\n- Add a guided keyboard setup with local microphone checks, readiness detection and automatic settings save; the subtitle keyboard reflects the new capture state.\n\n## Windows 下载 / Downloads\n\n- x64 安装包 / x64 installer: `NomiFun_0.8.19_x64-setup.exe`\n- 本次首发仅提供 Windows x64；其他平台产物后续追加。\n- This initial publication provides Windows x64 only; other platform artifacts will follow.",
-  "pub_date": "2026-10-28T18:29:46.576Z",
+  "pub_date": "2026-10-29T00:32:00.425Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRkU0RwMDk2Nkc3YTRDSkhNNEJXRnpLbHBKSFVYa01Rc1pTWVV6RU9NU01DUC8rRmRvcHFDWnQ5TzJvVkFkUGZHS0JmQm9CR2Q3MTNBWkh1YUVoSUFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjEyMTg2CWZpbGU6Tm9taUZ1bl8wLjguMTlfeDY0LXNldHVwLmV4ZQp6dHJMQ2FKaWtiM0NKZ0IxcGdNUXoxSUdTZVdJRm11VjJ5ZTJRL1V6clRJb2srcmhtVnNOWW9IQjY1OEd3UVhkY3AyK081akY1WWEzcCtYUjMvdnlDZz09Cg==",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.19/NomiFun_0.8.19_x64-setup.exe"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtxcFFwSWZDYjNJSjhYZDF2cGV3aGo2a1JibFlwQkF6TFl3UW95bXB5Y2k0QkpmRFZ5QUNGeWs2dU5KcnJlSU9nUTNZdStOdU1td29OREp4NzN0V3dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjMzOTE4CWZpbGU6Tm9taUZ1bl8wLjguMTlfYW1kNjQuQXBwSW1hZ2UKUG1UeTJFK29HT1JjNXNMbmFVRk92TGErbEtmM3NoV1hCTlFVeGFnN0VFSjlnWDAwV01tWFQ2SDVwb29RN0c1Njc3VHZIaEg5eSt1UjJWVkR6dmQxQUE9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.19/NomiFun_0.8.19_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtxcFFwSWZDYjNJSjhYZDF2cGV3aGo2a1JibFlwQkF6TFl3UW95bXB5Y2k0QkpmRFZ5QUNGeWs2dU5KcnJlSU9nUTNZdStOdU1td29OREp4NzN0V3dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjMzOTE4CWZpbGU6Tm9taUZ1bl8wLjguMTlfYW1kNjQuQXBwSW1hZ2UKUG1UeTJFK29HT1JjNXNMbmFVRk92TGErbEtmM3NoV1hCTlFVeGFnN0VFSjlnWDAwV01tWFQ2SDVwb29RN0c1Njc3VHZIaEg5eSt1UjJWVkR6dmQxQUE9PQo=",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.19/NomiFun_0.8.19_amd64.AppImage"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODkwVkdkckNVQ0Rqb3ZlNlg0Q3c2QmlGVW5nb2NnUUtPYzFVQndzRVFueW4wR2FRbDIyVURWOFY4dWFLRTBSVldkeVRoMEN6b2pibTdqWDNOeW56bHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjMzOTE4CWZpbGU6Tm9taUZ1bi0wLjguMTktMS54ODZfNjQucnBtCnBDcHRMODRkaEZrV1JYZFl4RXhFbjJkNWdvUjlodk12Zk81VTdwNXFCSVRhV0ppS0tzQ0VRZXlvb3ViK2E0T2d3WEl6d2tIMWRzdXFsUDJzdEo4ZURRPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.19/NomiFun-0.8.19-1.x86_64.rpm"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODUzVTQ4TjZJVnhjWU5OY3NVYjBCazQzZkJkdFJNRSs3RGNhaFFoakZTa3BRRVM1ZzhnMElSMktzZHVqeis5VU1TNVRBRDhhNEpaUWlNd0pycisvZUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjMzOTE4CWZpbGU6Tm9taUZ1bl8wLjguMTlfYW1kNjQuZGViClUvYjJjUGhzVitlZWRGdjlnaW5SVGtZSEtOZTJ6THorQ0U0eDA0dnZoVE0wbHFIMk4wWVRSQ1BXNXZnUTFMRlphcDl3Mk85N0kzdThiM1o2ZFQrR0N3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.19/NomiFun_0.8.19_amd64.deb"
     }
   }
 }
