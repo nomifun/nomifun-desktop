@@ -2201,7 +2201,7 @@ const KnowledgeDetailPage: React.FC = () => {
                                       ['conflicted', 'failed', 'missing'].includes(
                                         item.source?.sync_status ?? ''
                                       )
-                                        ? 'text-[var(--color-warning-6)]'
+                                        ? 'text-[var(--warning)]'
                                         : 'text-[var(--color-text-3)]'
                                     )}
                                   >
@@ -2330,7 +2330,7 @@ const KnowledgeDetailPage: React.FC = () => {
                                 ['conflicted', 'failed', 'missing'].includes(
                                   loadedDocument?.source?.sync_status ?? ''
                                 )
-                                  ? 'text-[var(--color-warning-6)]'
+                                  ? 'text-[var(--warning)]'
                                   : 'text-[var(--color-text-2)]'
                               )}
                             >

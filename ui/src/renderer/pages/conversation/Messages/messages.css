@@ -23,7 +23,7 @@
   width: 100%;
   min-width: 0;
   margin: 6px 0;
-  color: var(--color-danger-6, #f53f3f);
+  color: var(--danger);
   font-size: 13px;
   line-height: 22px;
 }
@@ -432,7 +432,7 @@
 
 .turn-process-receipt--failed,
 .turn-process-receipt--canceled {
-  color: var(--color-danger-6, #f53f3f);
+  color: var(--danger);
 }
 
 .turn-process-receipt--attention {
@@ -593,7 +593,7 @@ button.turn-process-trace__row:focus-visible {
   display: block;
 }
 
-.turn-process-trace__row--failed .turn-process-trace__row-icon { color: var(--color-danger-6); }
+.turn-process-trace__row--failed .turn-process-trace__row-icon { color: var(--danger); }
 
 .turn-process-trace__paragraph {
   min-width: 0;
@@ -1013,7 +1013,7 @@ button.turn-process-trace__row:focus-visible {
 }
 
 .turn-process-trace-delegation[data-delegation-record-kind='failed'] .turn-process-trace-delegation__summary {
-  color: var(--color-danger-6);
+  color: var(--danger);
 }
 
 .turn-process-trace-delegation__records {

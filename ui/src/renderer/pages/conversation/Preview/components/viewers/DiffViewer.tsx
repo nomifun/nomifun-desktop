@@ -123,13 +123,13 @@ const DiffPreview: React.FC<DiffPreviewProps> = ({
         <div className='flex items-center justify-between h-40px px-12px bg-2 flex-shrink-0'>
           <div className='flex items-center gap-4px'>
             <div
-              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'source' ? 'bg-primary text-white' : 'text-t-secondary hover:bg-3'}`}
+              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'source' ? 'bg-primary text-[var(--on-primary)]' : 'text-t-secondary hover:bg-3'}`}
               onClick={() => handleViewModeChange('source')}
             >
               {t('preview.source')}
             </div>
             <div
-              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'preview' ? 'bg-primary text-white' : 'text-t-secondary hover:bg-3'}`}
+              className={`px-12px py-4px rd-4px cursor-pointer transition-colors text-12px ${viewMode === 'preview' ? 'bg-primary text-[var(--on-primary)]' : 'text-t-secondary hover:bg-3'}`}
               onClick={() => handleViewModeChange('preview')}
             >
               {t('preview.preview')}

@@ -208,7 +208,11 @@
     },
     "check:theme": {
       "group": "check",
-      "desc": "校验预设 CSS 主题契约"
+      "desc": "校验预设及默认回退主题的颜色契约和前景/背景对比度"
+    },
+    "check:theme-vars": {
+      "group": "check",
+      "desc": "检查 Renderer 未定义的 CSS 变量和主题强调色背景配固定白字"
     },
     "check:icons": {
       "group": "check",

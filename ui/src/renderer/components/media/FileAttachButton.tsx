@@ -33,7 +33,7 @@ const MenuItem: React.FC<{
     onClick={onClick}
     title={title}
   >
-    <span className='flex-shrink-0 inline-flex items-center justify-center color-#86909c w-18px leading-none'>
+    <span className='flex-shrink-0 inline-flex items-center justify-center text-t-secondary w-18px leading-none'>
       {icon}
     </span>
     <span className='min-w-0 flex-1'>

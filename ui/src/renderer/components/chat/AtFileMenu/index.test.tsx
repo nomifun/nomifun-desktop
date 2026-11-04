@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from 'bun:test';
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, within } from '@testing-library/react';
 import AtFileMenu from './index';
 
 afterEach(cleanup);
@@ -19,7 +19,7 @@ const props = {
 test('a failed file listing exposes an error and retry instead of a no-match result', () => {
   const failure = { message: 'Cannot read files', retryLabel: 'Retry', onRetry: mock(() => {}) };
   const view = render(<AtFileMenu {...{ ...props, failure }} />);
-  expect(view.getByRole('alert').textContent).toContain(failure.message);
+  expect(within(view.getByRole('group', { name: 'File mentions' })).getByRole('alert').textContent).toContain(failure.message);
   expect(view.getByRole('button', { name: 'Retry' })).toBeTruthy();
   expect(view.queryByText('No files found')).toBeNull();
 });

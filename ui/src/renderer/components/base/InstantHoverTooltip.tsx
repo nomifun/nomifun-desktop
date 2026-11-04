@@ -58,7 +58,7 @@ const InstantHoverTooltip: React.FC<InstantHoverTooltipProps> = ({
             data-placement={placement}
             style={{ ...floatingStyles, opacity: isPositioned ? 1 : 0 }}
             className={classNames(
-              'pointer-events-none z-[10000] box-border w-max max-w-[calc(100vw-16px)] whitespace-normal break-words rd-6px bg-[var(--color-tooltip-bg)] px-8px py-5px text-12px font-500 leading-none text-white shadow-[0_6px_18px_rgba(0,0,0,0.18)] transition-opacity duration-75',
+              'pointer-events-none z-[10000] box-border w-max max-w-[calc(100vw-16px)] whitespace-normal break-words rd-6px bg-[var(--color-tooltip-bg)] px-8px py-5px text-12px font-500 leading-none text-[var(--tooltip-fg,#fff)] shadow-[0_6px_18px_rgba(0,0,0,0.18)] transition-opacity duration-75',
               tooltipClassName
             )}
           >

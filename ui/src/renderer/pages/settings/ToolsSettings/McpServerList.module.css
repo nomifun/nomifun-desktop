@@ -99,6 +99,14 @@
   cursor: default;
 }
 
+.warningIcon {
+  color: color-mix(in srgb, var(--warning) 38%, var(--text-primary));
+}
+
+.dangerAction {
+  color: color-mix(in srgb, var(--danger) 38%, var(--text-primary));
+}
+
 .controls {
   display: flex;
   flex: none;

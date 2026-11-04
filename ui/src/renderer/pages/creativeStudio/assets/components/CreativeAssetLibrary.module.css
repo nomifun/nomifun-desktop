@@ -394,7 +394,7 @@
 .primaryButton {
   background: rgb(var(--primary-6));
   box-shadow: 0 6px 18px rgba(var(--primary-6), 0.2);
-  color: #fff;
+  color: var(--on-primary);
 }
 
 .primaryButton:hover:not(:disabled) {

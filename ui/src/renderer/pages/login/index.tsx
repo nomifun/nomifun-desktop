@@ -313,12 +313,15 @@ const LoginPage: React.FC = () => {
 
           {!needsSetup && (
             <div className='login-page__checkbox'>
-              <input
-                type='checkbox'
-                id='remember-me'
-                checked={rememberMe}
-                onChange={(event) => setRememberMe(event.target.checked)}
-              />
+              <span className='login-page__checkbox-control'>
+                <input
+                  type='checkbox'
+                  id='remember-me'
+                  checked={rememberMe}
+                  onChange={(event) => setRememberMe(event.target.checked)}
+                />
+                <span className='login-page__checkbox-mark' aria-hidden='true' />
+              </span>
               <label htmlFor='remember-me'>{t('login.rememberMe')}</label>
             </div>
           )}

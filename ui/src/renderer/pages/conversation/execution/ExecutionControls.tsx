@@ -50,7 +50,7 @@ const HeaderControl: React.FC<{
       }}
       className={classNames(
         'flex h-30px shrink-0 cursor-pointer select-none items-center gap-5px rd-8px px-10px text-12px font-500 transition-all duration-150',
-        primary ? 'text-white' : 'border border-solid border-[var(--border-base)] text-t-secondary',
+        primary ? 'text-[var(--on-primary)]' : 'border border-solid border-[var(--border-base)] text-t-secondary',
         hover,
       )}
       style={{

@@ -86,7 +86,6 @@ const Config: React.FC<PropsWithChildren> = ({ children }) => {
   const arcoLocale = arcoLocales[language] ?? enUS;
 
   return React.createElement(ConfigProvider, {
-    theme: { primaryColor: '#4E5969' },
     locale: arcoLocale,
     componentConfig: { Modal: modalDefaults },
   }, children);

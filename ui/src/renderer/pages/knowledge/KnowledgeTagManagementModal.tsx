@@ -27,6 +27,16 @@ const PRESET_COLORS = [
   '#86909C', // grey
 ];
 
+// A selected mark must stay visible on each swatch, regardless of the app theme.
+const swatchInk = (hex: string): '#000' | '#fff' => {
+  const channels = [1, 3, 5].map((start) => {
+    const channel = Number.parseInt(hex.slice(start, start + 2), 16) / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  return luminance > 0.179 ? '#000' : '#fff';
+};
+
 type KnowledgeTagManagementModalProps = {
   visible: boolean;
   onClose: () => void;
@@ -75,7 +85,7 @@ const ColorPicker: React.FC<{
             : '0 0 0 1px rgba(0, 0, 0, 0.06)',
         }}
       >
-        {value === color && <Check theme='outline' size={7} strokeWidth={4} fill='#fff' />}
+        {value === color && <Check theme='outline' size={7} strokeWidth={4} fill={swatchInk(color)} />}
       </div>
     ))}
   </div>
@@ -427,7 +437,7 @@ const KnowledgeTagManagementModal: React.FC<KnowledgeTagManagementModalProps> = 
               'inline-flex h-26px flex-shrink-0 cursor-pointer items-center gap-3px rounded-8px px-8px text-11px font-medium leading-none',
               'border border-solid transition-all duration-150',
               newLabel.trim() && !busy
-                ? 'border-primary-6 bg-primary-6 text-white hover:opacity-90'
+                ? 'border-primary-6 bg-primary-6 text-[var(--on-primary)] hover:opacity-90'
                 : 'cursor-not-allowed border-[var(--color-border-2)] bg-[var(--color-fill-2)] text-[var(--color-text-3)]',
             ].join(' ')}
           >

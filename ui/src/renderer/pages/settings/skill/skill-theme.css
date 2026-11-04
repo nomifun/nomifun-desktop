@@ -1,0 +1,18 @@
+/* Skill source and status labels must stay legible on both built-in themes.
+ * The hue is a cue; the foreground is pulled toward the theme's text ink. */
+.skill-source-tone {
+  --skill-source-hue: var(--primary);
+  background-color: color-mix(in srgb, var(--skill-source-hue) 11%, transparent) !important;
+  color: color-mix(in srgb, var(--skill-source-hue) 38%, var(--text-primary)) !important;
+}
+
+.skill-source-tone--success { --skill-source-hue: var(--success); }
+.skill-source-tone--warning { --skill-source-hue: var(--warning); }
+.skill-source-tone--info { --skill-source-hue: var(--info); }
+.skill-source-tone--purple { --skill-source-hue: rgb(var(--purple-6)); }
+
+.skill-market-warning {
+  border-color: color-mix(in srgb, var(--warning) 24%, transparent);
+  background-color: color-mix(in srgb, var(--warning) 8%, transparent);
+  color: color-mix(in srgb, var(--warning) 38%, var(--text-primary));
+}

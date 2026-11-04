@@ -4,24 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useThemeContext } from '@/renderer/hooks/context/ThemeContext';
 import { Down, Up } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-// 渐变遮罩常量 Gradient mask constants
-// mask-image 模式：让内容本身淡出，适用于有背景色的场景（如 Alert）
-// mask-image mode: fade out content itself, suitable for scenarios with background color (like Alert)
+// Fade the content itself so the reveal always matches its actual parent surface,
+// including message bubbles, custom presets and a theme switch while collapsed.
 const MASK_GRADIENT =
   'linear-gradient(to bottom, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 1) 60%, rgba(0, 0, 0, 0.4) 90%, rgba(0, 0, 0, 0) 100%)';
-
-// 背景渐变模式：使用固定颜色遮罩，适用于普通场景
-// Background gradient mode: use fixed color mask, suitable for normal scenarios
-const BG_GRADIENT_DARK =
-  'linear-gradient(to bottom, rgba(30, 30, 30, 0) 0%, rgba(30, 30, 30, 0.6) 40%, rgba(30, 30, 30, 0.95) 80%, rgba(30, 30, 30, 1) 100%)';
-const BG_GRADIENT_LIGHT =
-  'linear-gradient(to bottom, rgba(247, 248, 250, 0) 0%, rgba(247, 248, 250, 0.6) 40%, rgba(247, 248, 250, 0.95) 80%, rgba(247, 248, 250, 1) 100%)';
 
 interface CollapsibleContentProps {
   children: React.ReactNode;
@@ -47,12 +38,6 @@ interface CollapsibleContentProps {
    * Content area className
    */
   contentClassName?: string;
-  /**
-   * 是否使用 mask 模式（适用于有背景色的场景，如 Alert）
-   * Whether to use mask mode (suitable for scenarios with background color, like Alert)
-   * @default false
-   */
-  useMask?: boolean;
   /**
    * 是否允许横向滚动，避免宽内容被裁剪
    * Allow horizontal scrolling to prevent clipping wide content
@@ -82,11 +67,9 @@ const CollapsibleContent: React.FC<CollapsibleContentProps> = ({
   defaultCollapsed = true,
   className,
   contentClassName,
-  useMask = false,
   allowHorizontalScroll = false,
 }) => {
   const { t } = useTranslation(); // 国际化 i18n
-  const { theme } = useThemeContext(); // 主题上下文（亮色/暗色）Theme context (light/dark)
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed); // 折叠状态 Collapse state
   const [needsCollapse, setNeedsCollapse] = useState(false); // 是否需要折叠功能 Whether collapse feature is needed
   const contentRef = useRef<HTMLDivElement>(null); // 内容容器引用 Content container ref
@@ -164,19 +147,13 @@ const CollapsibleContent: React.FC<CollapsibleContentProps> = ({
       style.overflowX = 'visible';
     }
 
-    // mask-image 模式：让内容本身淡出 mask-image mode: fade out content itself
-    if (useMask && isCollapsed) {
+    if (needsCollapse && isCollapsed) {
       style.maskImage = MASK_GRADIENT;
       style.WebkitMaskImage = MASK_GRADIENT;
     }
 
     return style;
-  }, [allowHorizontalScroll, isCollapsed, maxHeight, useMask]);
-
-  // 计算背景渐变颜色 Calculate background gradient color
-  const bgGradient = useMemo(() => {
-    return theme === 'dark' ? BG_GRADIENT_DARK : BG_GRADIENT_LIGHT;
-  }, [theme]);
+  }, [allowHorizontalScroll, isCollapsed, maxHeight, needsCollapse]);
 
   return (
     <div className={classNames('relative', className)}>
@@ -188,24 +165,6 @@ const CollapsibleContent: React.FC<CollapsibleContentProps> = ({
       >
         {children}
       </div>
-
-      {/* 渐变遮罩（仅在非 mask 模式、折叠且内容超出时显示）
-          Gradient mask (only shown in non-mask mode when collapsed and content exceeds)
-          采用多段渐变实现内容淡出效果：
-          Multi-step gradient for content fade-out effect:
-          - 0%: 完全透明，内容清晰可见 Fully transparent, content clearly visible
-          - 40%: 60% 不透明度，内容隐约可见 60% opacity, content faintly visible
-          - 80%: 95% 不透明度，内容几乎看不见 95% opacity, content barely visible
-          - 100%: 完全不透明，融入背景色 Fully opaque, blends with background */}
-      {!useMask && needsCollapse && isCollapsed && (
-        <div
-          className='absolute bottom-0 left-0 right-0 pointer-events-none'
-          style={{
-            height: '80px',
-            background: bgGradient,
-          }}
-        />
-      )}
 
       {/* 展开/折叠按钮 Expand/Collapse button */}
       {needsCollapse && (

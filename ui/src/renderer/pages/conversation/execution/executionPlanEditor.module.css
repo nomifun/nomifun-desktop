@@ -8,7 +8,7 @@
  * page's GuidInputCard. Tokens mirror guid/index.module.css's `.guidLayout`
  * (800px centered) + `.guidInputInner` (rd-24 inner card) + `.actionSubmit`
  * (transparent sendbox-model-btn pills). All colors go through CSS variables
- * to protect the 5 themes. */
+ * to follow the active palette and mode. */
 
 /* 800px centered column — mirrors `.guidLayout`. */
 .composerLayout {
@@ -40,7 +40,7 @@
 /* Inner card — the rd-24 white card (mirrors `.guidInputInner`): bg-base +
  * 1px border-3, focus border/shadow driven by useInputFocusRing inline. */
 .composerInner {
-  background: var(--bg-base, #fff);
+  background: var(--bg-base);
   border: 1px solid var(--color-border-3);
   border-radius: 24px;
   box-sizing: border-box;
@@ -50,8 +50,8 @@
 }
 
 :global([data-theme='dark']) .composerInner {
-  background: #262626;
-  border-color: #3a3a3a;
+  background: var(--bg-2);
+  border-color: var(--bg-4);
 }
 
 /* Small primary-tinted label strip at the top of the inner card (e.g. 「新建
@@ -77,7 +77,7 @@
 }
 
 .composerTextarea :global(textarea::placeholder) {
-  color: #b4b5bc !important;
+  color: var(--text-secondary) !important;
   opacity: 1 !important;
 }
 
@@ -117,7 +117,7 @@
   width: min(320px, calc(100vw - 32px));
   box-sizing: border-box;
   border-radius: 12px;
-  background: var(--bg-base, #fff);
+  background: var(--bg-base);
   border: 1px solid var(--color-border-2);
   box-shadow:
     0 10px 32px rgba(0, 0, 0, 0.1),
@@ -127,8 +127,8 @@
 }
 
 :global([data-theme='dark']) .composerPopover {
-  background: #262626;
-  border-color: #3a3a3a;
+  background: var(--bg-2);
+  border-color: var(--bg-4);
 }
 
 .composerPopoverTitle {

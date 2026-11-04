@@ -1,11 +1,16 @@
 /* Base styles - theme-independent */
 
 :root {
+  color-scheme: light;
   /* Keep the WebUI aligned with the desktop shell's supported minimum width. */
   --app-min-width: 880px;
   --titlebar-height: 36px;
   --page-title-size: 18px;
   --page-title-line-height: 26px;
+}
+
+html[data-theme='dark'] {
+  color-scheme: dark;
 }
 
 .app-shell {

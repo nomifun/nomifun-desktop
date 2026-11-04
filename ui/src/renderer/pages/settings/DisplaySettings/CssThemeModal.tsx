@@ -122,7 +122,7 @@ const CssThemeModal: React.FC<CssThemeModalProps> = ({ visible, theme, onClose, 
     >
       <div className='space-y-20px'>
         {/* 封面和名称行 / Cover and name row */}
-        <div className='flex gap-16px p-16px bg-[var(--fill-1)] rounded-12px'>
+        <div className='flex gap-16px p-16px bg-[var(--color-fill-1)] rounded-12px'>
           {/* 封面上传 / Cover upload */}
           <div className='flex-shrink-0'>
             <div className='text-13px text-t-secondary mb-8px'>{t('settings.cssTheme.previewCover')}</div>
@@ -144,7 +144,7 @@ const CssThemeModal: React.FC<CssThemeModalProps> = ({ visible, theme, onClose, 
           {/* 名称输入 / Name input */}
           <div className='flex-1'>
             <div className='text-13px text-t-secondary mb-8px'>
-              <span className='text-[var(--color-danger)]'>*</span>
+              <span className='text-[var(--danger)]'>*</span>
               {t('settings.cssTheme.name')}
             </div>
             <Input

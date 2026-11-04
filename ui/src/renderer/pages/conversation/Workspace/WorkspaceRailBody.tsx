@@ -471,7 +471,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
                       <span className='flex items-center gap-4px min-w-0'>
                         <span className='overflow-hidden text-ellipsis whitespace-nowrap'>{node.title}</span>
                         {isPasteTarget && (
-                          <span className='ml-1 text-xs font-bold bg-[var(--color-primary)] text-white px-1.5 py-0.5 rounded'>
+                          <span className='ml-1 text-xs font-bold bg-[var(--color-primary)] text-[var(--on-primary)] px-1.5 py-0.5 rounded'>
                             PASTE
                           </span>
                         )}

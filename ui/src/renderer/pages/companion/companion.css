@@ -792,7 +792,7 @@
   border-radius: 15px;
   border: none;
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -923,7 +923,7 @@
   border-radius: 14px;
   border: none;
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;

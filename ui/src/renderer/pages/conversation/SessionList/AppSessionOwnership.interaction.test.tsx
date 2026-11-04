@@ -11,6 +11,7 @@ import { ipcBridge } from '@/common';
 import { appHosting } from '@/common/adapter/appHostingBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import { parseConversationId } from '@/common/types/ids';
+import { initializeAgentBrowserStorageGeneration, setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import * as historyContext from '@/renderer/hooks/context/ConversationHistoryContext';
 import * as cron from '@/renderer/pages/cron';
 import * as terminalSessions from '@/renderer/pages/terminal/useTerminalSessions';
@@ -67,6 +68,10 @@ function restore(spy: { mockRestore: () => void }) {
 }
 
 beforeEach(() => {
+  // Batch deletion retires creation drafts, which use the renderer bootstrap
+  // generations. Own this precondition rather than inheriting another test's state.
+  setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000930');
+  initializeAgentBrowserStorageGeneration(1);
   localStorage.clear();
   localStorage.setItem(WORKPATH_EXPANSION_STORAGE_KEY, JSON.stringify({
     [DEFAULT_WORKPATH_KEY]: true,

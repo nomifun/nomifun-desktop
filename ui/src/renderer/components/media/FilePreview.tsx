@@ -163,12 +163,14 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
           {!imageUrl && <div className='w-60px h-60px bg-3'></div>}
         </div>
         {!readonly && onRemove && (
-          <div
-            className='absolute -top-4px -right-4px w-16px h-16px rd-50% bg-white dark:bg-gray-700 cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1px border-solid border-gray-200 dark:border-gray-600'
+          <button
+            type='button'
+            aria-label={`移除${file_name}`}
+            className='absolute -top-4px -right-4px w-16px h-16px box-border p-0 rd-50% bg-1 text-t-primary cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1px border-solid border-arco-2'
             onClick={handleRemove}
           >
-            <Close theme='filled' size='10' fill='#666' />
-          </div>
+            <Close theme='filled' size='10' fill='currentColor' />
+          </button>
         )}
       </div>
     );
@@ -191,12 +193,14 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
         </div>
       </div>
       {!readonly && onRemove && (
-        <div
-          className='absolute -top-4px -right-4px w-16px h-16px rd-50% bg-white dark:bg-gray-700 cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1px border-solid border-gray-200 dark:border-gray-600'
+        <button
+          type='button'
+          aria-label={`移除${file_name}`}
+          className='absolute -top-4px -right-4px w-16px h-16px box-border p-0 rd-50% bg-1 text-t-primary cursor-pointer flex items-center justify-center shadow-md hover:shadow-lg transition-all z-10 border-1px border-solid border-arco-2'
           onClick={handleRemove}
         >
-          <Close theme='filled' size='10' fill='#666' />
-        </div>
+          <Close theme='filled' size='10' fill='currentColor' />
+        </button>
       )}
     </div>
   );

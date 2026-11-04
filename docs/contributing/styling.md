@@ -17,6 +17,7 @@ to detect classes that emit no CSS.
 | --- | --- | --- |
 | Background | `bg-base`, `bg-1` through `bg-6`, `bg-8` through `bg-10` | `bg-bg-N`, `bg-0`, `bg-7` |
 | Text | `text-t-primary`, `text-t-secondary` | `text-text-primary` |
+| Text on solid accents | `bg-primary text-on-primary`, `bg-brand text-on-brand`, `bg-danger text-on-danger` | `text-white` on a theme-dependent fill |
 | Semantic ramp | `text-danger-6`, `bg-primary-6` | `text-[rgb(var(--danger-6))]` |
 | Explicit alpha | `bg-[rgba(var(--primary-6),0.12)]` | `bg-primary-6/12` |
 | Border color | `border-arco-2`, `border-[var(--border-base)]` | `border-border-2`, `border-b-base`, `border-b-light` |
@@ -52,6 +53,16 @@ Theme mode and color scheme are separate concerns. Prefer semantic tokens in
 [styles/themes](../../ui/src/renderer/styles/themes); `--aou-1..10` is the
 current brand scale's compatibility name.
 
+Treat a solid accent and its foreground as a pair: `--primary` with
+`--on-primary`, `--brand` with `--on-brand`, and `--danger` with
+`--on-danger`; status fills `--success` and `--warning` have `--on-success`
+and `--on-warning`. Use `--tooltip-fg` on `--color-tooltip-bg`. The foreground must
+follow the active preset and light/dark mode; a fixed white foreground can
+disappear on a lighter dark-mode accent. Use a declared semantic token for
+ordinary text and controls, rather than a literal color or an undeclared CSS
+variable. Fixed white is appropriate only on a deliberately dark, fixed
+surface such as a media overlay.
+
 [AppThemeRuntime](../../ui/src/renderer/components/layout/AppThemeRuntime.tsx)
 injects custom CSS through
 [applyCustomCss](../../ui/src/renderer/utils/theme/applyCustomCss.ts), which
@@ -70,13 +81,16 @@ adds `!important` to declarations outside keyframes. Presets must:
   `@media`.
 - Keep text contrast at least 4.5:1. Content popovers/dropdowns/select menus
   need sufficiently solid backgrounds (alpha at least 0.86). Feedback and
-  tooltip backgrounds must be opaque.
+  tooltip backgrounds must be opaque. Check accent/foreground pairs in both
+  modes when adding or changing a preset.
 - Keep the message layout wrapper `.message-item` free of preset backgrounds,
   glass borders and blur. Use semantic bubble tokens or specific components.
 
 ## Validation
 
-Run `bun run check:dead-css` and `bun run check:theme` for styling changes.
+Run `bun run check:dead-css`, `bun run check:theme`, and
+`bun run check:theme-vars` for styling changes. The last check catches
+unresolved CSS variables and fixed white text on theme-dependent accent fills.
 Inspect affected controls in both light and dark modes. For changed behavior,
 run the focused component/contract tests; a documentation-only edit needs
 `bun run check:docs` and `git diff --check`.

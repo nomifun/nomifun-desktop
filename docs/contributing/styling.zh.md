@@ -16,6 +16,7 @@
 | --- | --- | --- |
 | 背景 | `bg-base`、`bg-1` 至 `bg-6`、`bg-8` 至 `bg-10` | `bg-bg-N`、`bg-0`、`bg-7` |
 | 文字 | `text-t-primary`、`text-t-secondary` | `text-text-primary` |
+| 实色强调背景上的文字 | `bg-primary text-on-primary`、`bg-brand text-on-brand`、`bg-danger text-on-danger` | 在随主题变化的背景上用 `text-white` |
 | 语义色阶 | `text-danger-6`、`bg-primary-6` | `text-[rgb(var(--danger-6))]` |
 | 显式透明度 | `bg-[rgba(var(--primary-6),0.12)]` | `bg-primary-6/12` |
 | 边框颜色 | `border-arco-2`、`border-[var(--border-base)]` | `border-border-2`、`border-b-base`、`border-b-light` |
@@ -48,6 +49,14 @@ Arco 色阶是逗号分隔的 RGB 三元组。UnoCSS 注入的 slash-alpha 会�
 [styles/themes](../../ui/src/renderer/styles/themes) 中的语义 token；
 `--aou-1..10` 是当前品牌色阶的兼容名称。
 
+实色强调背景及其前景色应成对使用：`--primary` 配 `--on-primary`、
+`--brand` 配 `--on-brand`、`--danger` 配 `--on-danger`；状态色
+`--success` 和 `--warning` 分别配 `--on-success`、`--on-warning`；
+`--color-tooltip-bg` 配 `--tooltip-fg`。前景色必须随预设和明暗模式变化，
+不能假设暗色模式的强调背景一定适合白字。普通文字和控件使用已声明的
+语义 token，不使用固定字面量颜色或未声明的 CSS 变量。仅在媒体遮罩等
+刻意保持深色的固定背景上使用白字。
+
 [AppThemeRuntime](../../ui/src/renderer/components/layout/AppThemeRuntime.tsx)
 通过 [applyCustomCss](../../ui/src/renderer/utils/theme/applyCustomCss.ts)
 注入自定义 CSS，处理器给 keyframes 以外的声明追加 `!important`。预设必须：
@@ -62,12 +71,15 @@ Arco 色阶是逗号分隔的 RGB 三元组。UnoCSS 注入的 slash-alpha 会�
 - 装饰只作用于具体目标和外观。禁止布局属性、宽选择器、外联资源及
   `@media` 内的变量。
 - 正文对比度至少 4.5:1。Popover/Dropdown/Select 内容弹层背景足够实
-  （alpha 至少 0.86）；反馈与 Tooltip 背景完全不透明。
+  （alpha 至少 0.86）；反馈与 Tooltip 背景完全不透明。新增或修改预设时，
+  同时检查强调色及前景色配对在明暗两种模式的对比度。
 - 不给消息排版外层 `.message-item` 添加预设背景、玻璃边框或模糊；
   使用语义气泡 token 或具体消息组件。
 
 ## 验证
 
-样式改动运行 `bun run check:dead-css` 和 `bun run check:theme`，
+样式改动运行 `bun run check:dead-css`、`bun run check:theme` 和
+`bun run check:theme-vars`。最后一项会检查未解析的 CSS 变量，以及主题强调色
+背景配固定白字的常见错误。
 并在亮暗模式检查受影响控件。行为改动运行定向组件/契约测试；
 纯文档改动运行 `bun run check:docs` 和 `git diff --check`。

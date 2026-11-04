@@ -131,7 +131,7 @@
   flex: 1 1 34px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--fill-2);
+  background: var(--color-fill-2);
 }
 
 .progressBar {

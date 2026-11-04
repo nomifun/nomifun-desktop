@@ -27,6 +27,7 @@ body {
   /* ---- A. 主色 Primary ---- */
   --color-primary: #6c5ce7;
   --primary: #6c5ce7;
+  --on-primary: #ffffff;
   --color-primary-light-1: #8678ed;
   --color-primary-light-2: #a195f2;
   --color-primary-light-3: #c1b8f7;
@@ -36,6 +37,7 @@ body {
 
   /* ---- A. 品牌 Brand ---- */
   --brand: #7d6fd0;
+  --on-brand: #111018;
   --brand-light: #f0edfb;
   --brand-hover: #b3a8ea;
   --color-brand-fill: #7d6fd0;
@@ -111,8 +113,11 @@ body {
 
   /* ---- A. 语义 Semantic ---- */
   --success: #00a854;
+  --on-success: #111018;
   --warning: #ff7d00;
+  --on-warning: #111018;
   --danger: #f53f3f;
+  --on-danger: #111018;
   --info: #6c5ce7;
 
   /* ---- A. 组件 Components ---- */
@@ -135,13 +140,16 @@ body {
   --primary-5: 129, 114, 236;
   --primary-6: 108, 92, 231;
   --primary-7: 84, 67, 198;
+  --arcoblue-5: var(--primary-5);
+  --arcoblue-6: var(--primary-6);
+  --arcoblue-7: var(--primary-7);
 
   /* ---- B. Arco 次级按钮 Secondary ---- */
   --color-secondary: rgba(108, 92, 231, 0.12);
   --color-secondary-hover: rgba(108, 92, 231, 0.18);
   --color-secondary-active: rgba(108, 92, 231, 0.25);
   --color-secondary-disabled: rgba(108, 92, 231, 0.04);
-  --button-primary-text: #ffffff;
+  --button-primary-text: var(--on-primary);
   --button-primary-disabled-bg: var(--color-fill-2);
   --button-primary-disabled-border: var(--color-border-2);
   --button-primary-disabled-text: var(--color-text-3);
@@ -156,6 +164,7 @@ body {
 
   /* ---- B. Arco 杂项 Misc ---- */
   --color-tooltip-bg: #26233c;
+  --tooltip-fg: #ffffff;
   --color-mask-bg: rgba(18, 16, 38, 0.45);
   --color-spin-layer-bg: rgba(255, 255, 255, 0.72);
   --color-menu-light-bg: rgba(250, 247, 255, 0.88);
@@ -168,6 +177,7 @@ body {
   /* ---- A. 主色 Primary（提亮的冰紫） ---- */
   --color-primary: #9d8cff;
   --primary: #9d8cff;
+  --on-primary: #111018;
   --color-primary-light-1: #b1a3ff;
   --color-primary-light-2: #c5baff;
   --color-primary-light-3: #d9d2ff;
@@ -177,6 +187,7 @@ body {
 
   /* ---- A. 品牌 Brand ---- */
   --brand: #8f86c6;
+  --on-brand: #111018;
   --brand-light: #2d2a4a;
   --brand-hover: #575288;
   --color-brand-fill: #8f86c6;
@@ -252,8 +263,11 @@ body {
 
   /* ---- A. 语义 Semantic ---- */
   --success: #2ed15e;
+  --on-success: #111018;
   --warning: #ff9a2e;
+  --on-warning: #111018;
   --danger: #f76560;
+  --on-danger: #111018;
   --info: #9d8cff;
 
   /* ---- A. 组件 Components ---- */
@@ -276,13 +290,16 @@ body {
   --primary-5: 134, 120, 232;
   --primary-6: 157, 140, 255;
   --primary-7: 181, 168, 255;
+  --arcoblue-5: var(--primary-5);
+  --arcoblue-6: var(--primary-6);
+  --arcoblue-7: var(--primary-7);
 
   /* ---- B. Arco 次级按钮 Secondary ---- */
   --color-secondary: rgba(157, 140, 255, 0.13);
   --color-secondary-hover: rgba(157, 140, 255, 0.2);
   --color-secondary-active: rgba(157, 140, 255, 0.28);
   --color-secondary-disabled: rgba(157, 140, 255, 0.05);
-  --button-primary-text: #ffffff;
+  --button-primary-text: var(--on-primary);
   --button-primary-disabled-bg: var(--color-fill-3);
   --button-primary-disabled-border: var(--color-border-3);
   --button-primary-disabled-text: var(--color-text-2);
@@ -297,6 +314,7 @@ body {
 
   /* ---- B. Arco 杂项 Misc ---- */
   --color-tooltip-bg: #33304e;
+  --tooltip-fg: #ffffff;
   --color-mask-bg: rgba(7, 6, 14, 0.55);
   --color-spin-layer-bg: rgba(21, 20, 31, 0.72);
   --color-menu-light-bg: rgba(32, 30, 48, 0.82);

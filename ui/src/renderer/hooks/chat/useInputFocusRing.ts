@@ -1,12 +1,9 @@
-import { useThemeContext } from '@/renderer/hooks/context/ThemeContext';
-
 export const useInputFocusRing = () => {
-  const { theme } = useThemeContext();
-  const isDarkTheme = theme === 'dark';
-
   return {
-    activeBorderColor: isDarkTheme ? '#4D4B87' : '#E1E0FF',
-    inactiveBorderColor: isDarkTheme ? '#3a3a4a' : '#c9cacf',
-    activeShadow: isDarkTheme ? '0px 2px 20px rgba(77, 75, 135, 0.45)' : '0px 2px 20px rgba(225, 224, 255, 0.6)',
+    // Keep the focus treatment in CSS so custom presets and live theme changes
+    // update both the Composer and plan editor without a React theme branch.
+    activeBorderColor: 'var(--control-selected-bg, var(--color-primary))',
+    inactiveBorderColor: 'var(--control-idle-border, var(--color-border-3))',
+    activeShadow: '0px 2px 20px var(--control-focus-ring, color-mix(in srgb, var(--color-primary) 26%, transparent))',
   };
 };

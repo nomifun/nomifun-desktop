@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { useSkillDisplay } from '@/renderer/services/skills/useSkillDisplay';
 import { readSkillContent, stripSkillFrontmatter } from './skillDetail';
+import './skill-theme.css';
 
 type SkillDetailDrawerProps = {
   visible: boolean;
@@ -77,10 +78,10 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
       ? t('settings.skillsHub.custom', { defaultValue: 'Custom' })
       : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
   const sourceBadgeClass = isAutoInjected
-    ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
+    ? 'skill-source-tone skill-source-tone--success'
     : skill?.source === 'custom'
-      ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgba(var(--orange-6),1)]'
-      : 'bg-primary-1 text-primary-6';
+      ? 'skill-source-tone skill-source-tone--warning'
+      : 'skill-source-tone';
 
   return (
     <Drawer
@@ -112,8 +113,8 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
                 className={[
                   'flex h-44px w-44px flex-shrink-0 items-center justify-center rounded-12px text-17px font-700 uppercase shadow-sm',
                   isAutoInjected
-                    ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
-                    : 'bg-primary-1 text-primary-6',
+                    ? 'skill-source-tone skill-source-tone--success'
+                    : 'skill-source-tone',
                 ].join(' ')}
               >
                 {isAutoInjected ? <Lightning theme='filled' size={20} /> : display.name.charAt(0)}

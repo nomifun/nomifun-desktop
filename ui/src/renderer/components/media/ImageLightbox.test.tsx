@@ -1,7 +1,7 @@
 import '../../../../test/setup-dom.ts';
 import { readFileSync } from 'node:fs';
 import { Modal } from '@arco-design/web-react';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState, type ReactElement } from 'react';
@@ -145,12 +145,13 @@ test('keeps gallery navigation available when an image is unavailable', () => {
     />;
   }
   const page = renderPreview(<Gallery />);
-  expect(page.getByRole('alert').textContent).toContain('图片已不可用');
+  const dialog = page.getByRole('dialog', { name: '查看图片' });
+  expect(within(dialog).getByRole('alert').textContent).toContain('图片已不可用');
   expect((page.getByRole('button', { name: '图片另存为' }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(page.getByRole('button', { name: '重试' }));
   expect(retries).toBe(1);
   fireEvent.click(page.getByRole('button', { name: '下一张图片' }));
   expect(page.getByAltText('任务结果').getAttribute('src')).toBe('/available.png');
-  expect(page.queryByRole('alert')).toBeNull();
+  expect(within(dialog).queryByRole('alert')).toBeNull();
   expect(page.getByText('2 / 2')).toBeTruthy();
 });

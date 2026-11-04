@@ -179,7 +179,7 @@ const MessageTips: React.FC<{ message: IMessageTips; compactError?: boolean }> =
         <div className='flex items-start gap-4px'>
           {icon[type] || icon.warning}
           <div className='flex-1 min-w-0'>
-            <CollapsibleContent maxHeight={48} defaultCollapsed={true} useMask={true}>
+            <CollapsibleContent maxHeight={48} defaultCollapsed={true}>
               <span className='whitespace-break-spaces text-t-primary [word-break:break-word]'>{displayContent}</span>
             </CollapsibleContent>
           </div>

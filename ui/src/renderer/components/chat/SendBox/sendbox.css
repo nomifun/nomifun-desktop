@@ -67,6 +67,7 @@
 .sendbox-stop-button.bg-animate,
 .sendbox-stop-button.arco-btn.bg-animate,
 .sendbox-stop-button.arco-btn-secondary.bg-animate {
+  color: var(--text-primary) !important;
   animation: sendbox-stop-breathe 1.4s ease-in-out infinite alternate;
 }
 
@@ -78,37 +79,37 @@
 
 .sendbox-stop-button.bg-animate .arco-icon,
 .sendbox-stop-button.bg-animate svg {
-  color: #fff !important;
-  fill: #fff !important;
+  color: currentColor !important;
+  fill: currentColor !important;
 }
 
 @keyframes sendbox-stop-breathe {
   0% {
-    background-color: var(--aou-2) !important;
-    border-color: var(--aou-2) !important;
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--aou-6-brand) 0%, transparent);
+    background-color: var(--aou-2);
+    border-color: var(--aou-2);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 0%, transparent);
     transform: scale(1);
   }
 
   100% {
-    background-color: var(--aou-5) !important;
-    border-color: var(--aou-5) !important;
-    box-shadow: 0 0 0 8px color-mix(in srgb, var(--aou-6-brand) 22%, transparent);
+    background-color: var(--aou-5);
+    border-color: var(--aou-5);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--brand) 22%, transparent);
     transform: scale(1.08);
   }
 }
 
 @keyframes sendbox-stop-breathe-dark {
   0% {
-    background-color: var(--aou-2) !important;
-    border-color: var(--aou-2) !important;
+    background-color: var(--aou-2);
+    border-color: var(--aou-2);
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--aou-5) 0%, transparent);
     transform: scale(1);
   }
 
   100% {
-    background-color: var(--aou-5) !important;
-    border-color: var(--aou-5) !important;
+    background-color: var(--aou-5);
+    border-color: var(--aou-5);
     box-shadow: 0 0 0 8px color-mix(in srgb, var(--aou-5) 28%, transparent);
     transform: scale(1.08);
   }
@@ -137,8 +138,8 @@
 }
 
 /* Input placeholder color */
-::placeholder {
-  color: #a1a2aa !important;
+.sendbox-panel textarea::placeholder {
+  color: var(--text-secondary) !important;
 }
 
 /* Desktop-companion composer: references first, editor second, controls last.
@@ -461,22 +462,6 @@
   flex-shrink: 0 !important;
 }
 
-/* Pill marquee animation for overflowing text */
-@keyframes pill-marquee {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(var(--pill-marquee-scroll));
-  }
-}
-
-.pill-marquee-track {
-  animation-name: pill-marquee;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-}
-
 .sendbox-highlight-container {
   position: relative;
 }
@@ -523,6 +508,6 @@
 }
 
 .sendbox-highlight-textarea::placeholder {
-  color: #a1a2aa !important;
-  -webkit-text-fill-color: #a1a2aa !important;
+  color: var(--text-secondary) !important;
+  -webkit-text-fill-color: var(--text-secondary) !important;
 }

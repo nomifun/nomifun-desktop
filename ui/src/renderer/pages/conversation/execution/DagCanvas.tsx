@@ -30,7 +30,7 @@ import {
 import { buildExecutionDagEdges } from './executionDagEdges';
 import { collectExecutionDagFocus, layoutExecutionDag } from './layoutExecutionDag';
 import { participantLogo, participantShortLabel } from './participantLabel';
-import StepNode, { type JudgeWinner, type LoopState, normalizeStepKind, type StepFlowNode, type VerifyVerdict } from './nodes/StepNode';
+import StepNode, { type JudgeWinner, type LoopState, normalizeStepKind, stepStatusMeta, type StepFlowNode, type VerifyVerdict } from './nodes/StepNode';
 import type { LeadThinkingState } from './useLeadThinking';
 import './dag-canvas.css';
 
@@ -94,27 +94,6 @@ function parseLoopState(summary?: string): LoopState {
       }
     : { state: null, reason: null, iterations: null, maxIter: null };
 }
-
-const MINI_MAP_COLORS: Record<'light' | 'dark', Record<string, string>> = {
-  light: {
-    running: '#2f6bff',
-    completed: '#aeb6c3',
-    failed: '#dc2626',
-    waiting_input: '#d97706',
-    skipped: '#94a3b8',
-    cancelled: '#94a3b8',
-    pending: '#b4bccb',
-  },
-  dark: {
-    running: '#5b8bff',
-    completed: '#626b7a',
-    failed: '#f04438',
-    waiting_input: '#f59e0b',
-    skipped: '#64748b',
-    cancelled: '#64748b',
-    pending: '#5a6273',
-  },
-};
 
 export interface OpenStepPayload {
   /** Stable UI identity across immutable replacements of the same selected step. */
@@ -412,7 +391,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
             elementsSelectable={false}
           >
             <NodeInternalsRefresher nodeIds={activeNodeIds} />
-            <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color={theme === 'dark' ? '#333333' : '#d1d5e5'} />
+            <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color='var(--border-base)' />
             <Controls showFitView={false} showInteractive={false} />
             <Panel position='top-right' className='nomi-dag-toolbar'>
               <Tooltip content={t('agentExecution.canvas.fit', { defaultValue: '适应视图' })} position='bottom'>
@@ -449,12 +428,11 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, ref
                 zoomable
                 position='bottom-right'
                 className='nomi-dag-minimap'
-                maskColor={theme === 'dark' ? 'rgba(0,0,0,.55)' : 'rgba(255,255,255,.62)'}
+                maskColor='color-mix(in srgb, var(--bg-base) 60%, transparent)'
                 nodeColor={(node) => {
                   const nodeData = node.data as { status?: string; relationState?: string };
                   if (nodeData.relationState === 'focus') return 'rgb(var(--primary-6))';
-                  const status = String(nodeData.status ?? 'pending');
-                  return MINI_MAP_COLORS[theme][status] ?? MINI_MAP_COLORS[theme].pending;
+                  return stepStatusMeta(String(nodeData.status ?? 'pending')).color;
                 }}
                 nodeStrokeWidth={2}
               />

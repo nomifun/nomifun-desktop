@@ -1102,7 +1102,7 @@ const SendBox: React.FC<{
       disabled={isStopping}
       loading={isStopping}
       className='bg-animate sendbox-stop-button'
-      icon={<div className='mx-auto size-12px bg-6'></div>}
+      icon={<div className='mx-auto size-12px' style={{ backgroundColor: 'currentColor' }}></div>}
       onClick={stopHandler}
       data-testid='sendbox-stop-btn'
       aria-label={t(isStopping ? 'conversation.stop.stopping' : 'conversation.stop.button')}

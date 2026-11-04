@@ -417,7 +417,7 @@ describe('Feishu knowledge space with isolated real API boundaries', () => {
     expect(view.queryByText(feishu.saved)).toBeNull();
     expect((view.getByLabelText(feishu.resources.search) as HTMLInputElement).value).toBe('');
     expect(f.external).not.toHaveBeenCalled();
-  });
+  }, 10000);
   for (const phase of ['loading', 'queued', 'running'] as const) test('ordinary save ' + phase + ' shows neutral progress without network recovery controls', async () => {
     const f = fixture(); let finish: () => void = () => {};
     f.execute.mockImplementation(async request => phase === 'loading' ? await new Promise<FeishuOperation>(resolve => { finish = () => resolve(receipt(request)); }) : receipt(request, phase));

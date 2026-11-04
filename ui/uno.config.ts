@@ -93,6 +93,11 @@ const aouColors = {
 // ==================== UI 组件专用颜色 / UI Component Specific Colors ====================
 const componentColors = {
   'message-tips': 'var(--message-tips-bg)',
+  'on-primary': 'var(--on-primary)', // text-on-primary - foreground paired with bg-primary
+  'on-success': 'var(--on-success)', // text-on-success - foreground paired with bg-success
+  'on-warning': 'var(--on-warning)', // text-on-warning - foreground paired with bg-warning
+  'on-danger': 'var(--on-danger)', // text-on-danger - foreground paired with bg-danger
+  'on-brand': 'var(--on-brand)', // text-on-brand - foreground paired with bg-brand
 };
 
 export default defineConfig({

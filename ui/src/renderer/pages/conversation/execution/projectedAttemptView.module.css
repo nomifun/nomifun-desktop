@@ -7,7 +7,7 @@
 /* ProjectedAttemptView — the content-area projection of a clicked collaboration task
  * A thin banner over a read-only participant transcript that
  * fills the content region. All colors flow through CSS variables so the view
- * honors every one of the 5 themes; it overlays the (display:none) main NomiChat
+ * honors the active palette and mode; it overlays the (display:none) main NomiChat
  * without unmounting it, so returning to main preserves scroll + input state. */
 
 /* The projection fills the content region and stacks: banner (fixed height) on
@@ -66,7 +66,7 @@
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .bannerTitle {
@@ -126,13 +126,13 @@
 
 /* The primary "return to main" action — filled so it reads as the exit. */
 .actionPrimary {
-  color: #fff;
+  color: var(--on-primary);
   background: rgb(var(--primary-6));
   border-color: rgb(var(--primary-6));
 }
 
 .actionPrimary:hover {
-  color: #fff;
+  color: var(--on-primary);
   background: color-mix(in srgb, rgb(var(--primary-6)) 88%, #000);
   border-color: color-mix(in srgb, rgb(var(--primary-6)) 88%, #000);
 }
@@ -204,8 +204,8 @@
   width: 52px;
   height: 52px;
   border-radius: 16px;
-  background: var(--fill-2);
-  color: var(--text-tertiary);
+  background: var(--color-fill-2);
+  color: var(--text-secondary);
 }
 
 .emptyTitle {
@@ -218,7 +218,7 @@
   max-width: 320px;
   font-size: 12px;
   line-height: 18px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 /* Decision question banner. */

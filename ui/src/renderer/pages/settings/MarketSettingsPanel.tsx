@@ -9,6 +9,7 @@ import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBr
 import { openExternalUrl } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import SkillMarketCard from './skill/SkillMarketCard';
+import './skill/skill-theme.css';
 import {
   ENHANCED_TOOLS_EMPTY_STATE_CLASS,
   ENHANCED_TOOLS_GRID_CLASS,
@@ -366,7 +367,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       </div>
 
       {errors.length > 0 && (
-        <div className='mb-14px rounded-12px border border-solid border-[rgba(var(--orange-6),0.24)] bg-[rgba(var(--orange-6),0.08)] px-14px py-10px text-12px leading-18px text-[rgba(var(--orange-7),1)]'>
+        <div className='skill-market-warning mb-14px rounded-12px border border-solid px-14px py-10px text-12px leading-18px'>
           {errors.join(' / ')}
         </div>
       )}

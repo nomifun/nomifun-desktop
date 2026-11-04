@@ -21,6 +21,11 @@ const PRESETS_DIR = join(
   '..',
   'ui/src/renderer/pages/settings/DisplaySettings/presets'
 );
+const DEFAULT_SCHEME_FILE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'ui/src/renderer/styles/themes/default-color-scheme.css'
+);
 
 const range = (prefix, from, to) => Array.from({ length: to - from + 1 }, (_, i) => `${prefix}${from + i}`);
 
@@ -28,10 +33,12 @@ const range = (prefix, from, to) => Array.from({ length: to - from + 1 }, (_, i)
 const APP_VARS = [
   'color-primary',
   'primary',
+  'on-primary',
   ...range('color-primary-light-', 1, 3),
   'color-primary-dark-1',
   'primary-rgb',
   'brand',
+  'on-brand',
   'brand-light',
   'brand-hover',
   'color-brand-fill',
@@ -54,11 +61,15 @@ const APP_VARS = [
   'border-base',
   'border-light',
   'success',
+  'on-success',
   'warning',
+  'on-warning',
   'danger',
+  'on-danger',
   'info',
   'message-tips-bg',
   'feedback-bubble-bg',
+  'tooltip-fg',
   'color-guid-agent-bar',
   'terminal-surface-bg',
   'terminal-border',
@@ -84,10 +95,12 @@ const ARCO_VARS = [
   ...range('color-border-', 1, 4),
   'color-primary-light-4',
   ...range('primary-', 1, 7),
+  ...range('arcoblue-', 5, 7),
   'color-secondary',
   'color-secondary-hover',
   'color-secondary-active',
   'color-secondary-disabled',
+  'button-primary-text',
   'color-tooltip-bg',
   'color-mask-bg',
   'color-spin-layer-bg',
@@ -197,6 +210,104 @@ const isOpaqueLiteralColor = (value) => {
   );
 };
 
+const resolveOpaqueHex = (name, vars, seen = new Set()) => {
+  if (seen.has(name)) return null;
+  const value = vars.get(name)?.replace(/\s*!important\s*/gi, '').trim();
+  if (!value) return null;
+  const alias = /^var\(--([\w-]+)\)$/.exec(value);
+  if (alias) return resolveOpaqueHex(alias[1], vars, new Set([...seen, name]));
+  const short = /^#([0-9a-f]{3})$/i.exec(value);
+  if (short) return [...short[1]].map((digit) => parseInt(digit + digit, 16));
+  const full = /^#([0-9a-f]{6})$/i.exec(value);
+  if (full) return [0, 2, 4].map((offset) => parseInt(full[1].slice(offset, offset + 2), 16));
+  return null;
+};
+
+const luminance = (color) => {
+  const [red, green, blue] = color.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+};
+
+const contrastRatio = (left, right) => {
+  const a = luminance(left);
+  const b = luminance(right);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+};
+
+const resolveRgbTriplet = (value) => {
+  const channels = value?.replace(/\s*!important\s*/gi, '').split(',').map((part) => Number(part.trim()));
+  return channels?.length === 3 && channels.every((channel) => Number.isInteger(channel) && channel >= 0 && channel <= 255)
+    ? channels
+    : null;
+};
+
+const ACCENT_PAIRS = [
+  ['primary', 'on-primary'],
+  ['brand', 'on-brand'],
+  ['success', 'on-success'],
+  ['warning', 'on-warning'],
+  ['danger', 'on-danger'],
+  ['control-selected-bg', 'control-selected-fg'],
+];
+
+const checkForegroundPairs = (mode, vars, problems, { preset = true } = {}) => {
+  for (const [backgroundName, foregroundName] of [
+    ...ACCENT_PAIRS,
+    ...(preset ? [['primary', 'button-primary-text'], ['color-tooltip-bg', 'tooltip-fg']] : []),
+  ]) {
+    const background = resolveOpaqueHex(backgroundName, vars);
+    const foreground = resolveOpaqueHex(foregroundName, vars);
+    if (!background || !foreground) {
+      problems.push(`${mode}色块 --${backgroundName} / --${foregroundName} 必须解析到不透明十六进制颜色`);
+      continue;
+    }
+    const ratio = contrastRatio(background, foreground);
+    if (ratio < 4.5) {
+      problems.push(`${mode}色块 --${backgroundName} / --${foregroundName} 对比度 ${ratio.toFixed(2)}:1，需 >= 4.5:1`);
+    }
+  }
+  if (!preset) return;
+  for (const level of [6, 7]) {
+    const background = resolveRgbTriplet(vars.get(`primary-${level}`));
+    const foreground = resolveOpaqueHex('on-primary', vars);
+    if (!background || !foreground) {
+      problems.push(`${mode}色块 --primary-${level} / --on-primary 无法解析颜色`);
+      continue;
+    }
+    const ratio = contrastRatio(background, foreground);
+    if (ratio < 4.5) {
+      problems.push(`${mode}色块 --primary-${level} / --on-primary 对比度 ${ratio.toFixed(2)}:1，需 >= 4.5:1`);
+    }
+  }
+  if (vars.get('button-primary-text') !== 'var(--on-primary)') {
+    problems.push(`${mode}色块 --button-primary-text 应别名到 --on-primary，避免按钮前景色漂移`);
+  }
+  for (const level of [5, 6, 7]) {
+    if (vars.get(`arcoblue-${level}`) !== `var(--primary-${level})`) {
+      problems.push(`${mode}色块 --arcoblue-${level} 应别名到 --primary-${level}，避免 Arco 链接色漂移`);
+    }
+  }
+};
+
+const checkDefaultFallback = (css) => {
+  const problems = [];
+  const blocks = topLevelBlocks(stripComments(css));
+  const lightBlock = blocks.find(
+    (block) => block.selector.includes(':root') && block.selector.includes("[data-color-scheme='default']")
+  );
+  const darkBlock = blocks.find((block) =>
+    block.selector.includes("[data-color-scheme='default'][data-theme='dark']")
+  );
+  if (!lightBlock) problems.push('默认色系缺少亮色块');
+  if (!darkBlock) problems.push('默认色系缺少暗色块');
+  if (lightBlock) checkForegroundPairs('默认亮', collectVars(lightBlock.body), problems, { preset: false });
+  if (darkBlock) checkForegroundPairs('默认暗', collectVars(darkBlock.body), problems, { preset: false });
+  return problems;
+};
+
 const checkTheme = (file, css) => {
   const problems = [];
   const cleaned = stripComments(css);
@@ -231,6 +342,9 @@ const checkTheme = (file, css) => {
     if (!lightVars.has(v)) problems.push(`亮色块缺变量 --${v}`);
     if (!darkVars.has(v)) problems.push(`暗色块缺变量 --${v}`);
   }
+
+  if (lightBlocks.length) checkForegroundPairs('亮', lightVars, problems);
+  if (darkBlocks.length) checkForegroundPairs('暗', darkVars, problems);
 
   for (const variable of OPAQUE_BUBBLE_VARS) {
     const lightValue = lightVars.get(variable);
@@ -306,6 +420,14 @@ for (const file of files) {
   } else {
     console.log(`✓ ${file}`);
   }
+}
+const fallbackProblems = checkDefaultFallback(readFileSync(DEFAULT_SCHEME_FILE, 'utf8'));
+if (fallbackProblems.length) {
+  failed = true;
+  console.log('✗ default-color-scheme.css');
+  for (const problem of fallbackProblems) console.log(`   - ${problem}`);
+} else {
+  console.log('✓ default-color-scheme.css');
 }
 if (!files.length) {
   console.log('（presets 目录下没有非 default 主题）');

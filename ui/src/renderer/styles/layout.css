@@ -67,7 +67,7 @@
   border: 0;
   border-radius: 999px;
   background: rgb(var(--primary-6));
-  color: #fff;
+  color: var(--on-primary);
   cursor: pointer;
   box-shadow: 0 3px 8px rgba(var(--primary-6), 0.2);
   animation: sidebar-update-arrive 240ms cubic-bezier(0.22, 1, 0.36, 1);

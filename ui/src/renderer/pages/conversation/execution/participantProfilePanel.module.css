@@ -122,7 +122,7 @@
   align-items: center;
   justify-content: center;
   margin-top: 1px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .candidateCopy {
@@ -152,7 +152,7 @@
 }
 
 .candidateCopy small {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 10px;
   line-height: 14px;
 }
@@ -181,7 +181,7 @@
 }
 
 .detailGroup b {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 10px;
 }
 

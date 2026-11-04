@@ -303,10 +303,10 @@
 
 .warning {
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--color-warning-6) 30%, var(--color-border-2));
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--color-border-2));
   border-radius: 9px;
   color: var(--color-text-2);
-  background: color-mix(in srgb, var(--color-warning-1) 68%, var(--color-bg-2));
+  background: color-mix(in srgb, var(--warning) 10%, var(--color-bg-2));
   font-size: 11px;
 }
 

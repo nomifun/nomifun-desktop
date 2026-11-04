@@ -75,7 +75,7 @@ const getStatusPopoverContent = (
         {checkedAt ? (
           <div className='text-12px leading-18px text-t-secondary'>{`${t?.('settings.mcpCheckedAtLabel') || 'Checked at:'} ${checkedAt}`}</div>
         ) : null}
-        <div className='text-12px leading-18px text-t-secondary opacity-80'>
+        <div className='text-12px leading-18px text-t-secondary'>
           {t?.('settings.mcpCheckPurposeHint') ||
             'Used to verify whether the MCP configuration is available. It does not represent the real-time status in the current conversation.'}
         </div>
@@ -153,7 +153,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
       })
     : getStatusText(server.last_test_status, isTestingConnection, t);
   const statusIcon = needsConfiguration ? (
-    <span className='text-16px font-bold leading-none text-orange-500'>!</span>
+    <span className={`text-16px font-bold leading-none ${styles.warningIcon}`}>!</span>
   ) : (
     getStatusIcon(server.last_test_status, isTestingConnection)
   );
@@ -286,7 +286,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
                   </div>
                 </Menu.Item>}
                 {!server.builtin && <Menu.Item key='delete' onClick={() => onDeleteServer(server.mcp_server_id)}>
-                  <div className='flex items-center gap-2 text-red-500'>
+                  <div className={`flex items-center gap-2 ${styles.dangerAction}`}>
                     <DeleteFour size={'14'} />
                     {t('settings.mcpDeleteServer')}
                   </div>

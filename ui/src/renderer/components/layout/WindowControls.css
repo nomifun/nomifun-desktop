@@ -36,10 +36,10 @@
 
 .app-window-controls__button--close:hover {
   background-color: var(--window-close-danger);
-  color: #fff;
+  color: var(--on-danger, #fff);
 }
 
 .app-window-controls__button--close:active {
   background-color: var(--window-close-danger-active);
-  color: #fff;
+  color: var(--on-danger, #fff);
 }

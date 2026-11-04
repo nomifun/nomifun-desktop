@@ -7,6 +7,7 @@ import { Button, Tag } from '@arco-design/web-react';
 import { Plus, Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import './skill-theme.css';
 
 type SkillMarketCardProps = {
   item: ISkillMarketItem;
@@ -24,12 +25,12 @@ const MAX_VISIBLE_TAGS = 3;
 const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ source }) => {
   const label = marketSourceLabel(source);
   const className = {
-    clawhub: '!bg-primary-1 !text-primary-6',
-    loophub: '!bg-[rgba(var(--warning-6),0.12)] !text-warning-7',
-    skillhub: '!bg-[rgba(var(--success-6),0.1)] !text-success-6',
-    skillhub_mcp: '!bg-[rgba(var(--arcoblue-6),0.1)] !text-[rgba(var(--arcoblue-6),1)]',
-    mcpworld: '!bg-[rgba(var(--purple-6),0.1)] !text-[rgba(var(--purple-6),1)]',
-    clawhub_plugins: '!bg-[rgba(var(--orange-6),0.12)] !text-[rgba(var(--orange-7),1)]',
+    clawhub: 'skill-source-tone',
+    loophub: 'skill-source-tone skill-source-tone--warning',
+    skillhub: 'skill-source-tone skill-source-tone--success',
+    skillhub_mcp: 'skill-source-tone skill-source-tone--info',
+    mcpworld: 'skill-source-tone skill-source-tone--purple',
+    clawhub_plugins: 'skill-source-tone skill-source-tone--warning',
   }[source];
 
   return (
@@ -104,7 +105,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
           <Tag
             size='small'
             bordered={false}
-            className='!flex-shrink-0 !bg-[rgba(var(--warning-6),0.12)] !text-warning-7 !rounded-6px !text-10px'
+            className='!flex-shrink-0 skill-source-tone skill-source-tone--warning !rounded-6px !text-10px'
           >
             {t('settings.market.requiresApi', { defaultValue: 'Needs API' })}
           </Tag>
@@ -113,7 +114,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
           <Tag
             size='small'
             bordered={false}
-            className='!flex-shrink-0 !bg-[rgba(var(--success-6),0.1)] !text-success-6 !rounded-6px !text-10px'
+            className='!flex-shrink-0 skill-source-tone skill-source-tone--success !rounded-6px !text-10px'
           >
             {t('settings.market.noApi', { defaultValue: 'No API' })}
           </Tag>

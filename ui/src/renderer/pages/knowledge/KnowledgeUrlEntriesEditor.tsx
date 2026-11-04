@@ -81,7 +81,7 @@ const KnowledgeUrlEntriesEditor: React.FC<KnowledgeUrlEntriesEditorProps> = ({
             </div>
             <button
               type='button'
-              className='flex size-34px cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-danger-light-1)] hover:text-danger-6 focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--danger-6),0.12)] disabled:cursor-not-allowed disabled:opacity-45'
+              className='flex size-34px cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[rgba(var(--danger-6),0.1)] hover:text-danger-6 focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--danger-6),0.12)] disabled:cursor-not-allowed disabled:opacity-45'
               onClick={() => removeEntry(index)}
               disabled={disabled || safeEntries.length <= 1}
               aria-label={t('knowledge.detail.docs.removeWebUrl', {

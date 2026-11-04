@@ -132,10 +132,10 @@ function CodeBlock(props: CodeBlockProps) {
       });
   };
 
-  const iconFill = isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
-  const footerTextColor = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.35)';
-  const borderColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
-  const bgColor = isDark ? 'rgba(255,255,255,0.04)' : 'var(--bg-2)';
+  const iconFill = 'var(--text-secondary)';
+  const footerTextColor = 'var(--text-secondary)';
+  const borderColor = 'var(--border-base)';
+  const bgColor = 'var(--bg-2)';
   const syntaxContainerStyle: React.CSSProperties = {
     margin: 0,
     padding: '0 12px 8px',
@@ -175,9 +175,8 @@ function CodeBlock(props: CodeBlockProps) {
           <span style={{ color: footerTextColor, fontSize: '12px', lineHeight: '16px' }}>
             {language.toLocaleLowerCase()}
           </span>
-          {/* Buttons: always visible on touch devices, hover-only on pointer devices */}
+          {/* Keep code actions visible in either theme and with keyboard navigation. */}
           <div
-            className='opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity'
             style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
           >
             {canCollapse && (

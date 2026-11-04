@@ -17,6 +17,7 @@ const requirementSourceCardSource = readFileSync(
 const knowledgeEmptyStateSource = readFileSync(new URL('../pages/knowledge/KnowledgeEmptyState.tsx', import.meta.url), 'utf8');
 const diff2HtmlSource = readFileSync(new URL('../components/media/Diff2Html.tsx', import.meta.url), 'utf8');
 const loginCheckboxCss = readFileSync(new URL('../pages/login/LoginPage.css', import.meta.url), 'utf8');
+const loginSource = readFileSync(new URL('../pages/login/index.tsx', import.meta.url), 'utf8');
 
 const CONTROL_TOKENS = [
   '--control-selected-bg',
@@ -64,7 +65,11 @@ describe('theme control contract', () => {
     expect(controlCss.includes('.arco-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask')).toBe(true);
     expect(controlCss.includes('.arco-checkbox:hover .arco-checkbox-mask')).toBe(false);
     expect(loginCheckboxCss.includes('appearance: none;')).toBe(true);
-    expect(loginCheckboxCss.includes('var(--enhanced-checkbox-selected-bg, var(--control-selected-bg, #667eea))')).toBe(true);
+    expect(loginCheckboxCss.includes(".login-page__checkbox input[type='checkbox']:checked {")).toBe(true);
+    expect(loginCheckboxCss.includes('background-color: rgb(var(--primary-6));')).toBe(true);
+    expect(loginCheckboxCss.includes('border-right: 2px solid var(--on-primary);')).toBe(true);
+    expect(loginCheckboxCss.includes("input[type='checkbox']:checked + .login-page__checkbox-mark")).toBe(true);
+    expect(loginSource.includes("<span className='login-page__checkbox-mark' aria-hidden='true' />")).toBe(true);
   });
 
   test('keeps a visual regression matrix for the core interactive controls', () => {
@@ -89,10 +94,18 @@ describe('theme control contract', () => {
     }
   });
 
-  test('uses a green track and white thumb for checked switches in dark themes', () => {
+  test('pairs dark checked switch labels with the themed success track', () => {
     expect(controlCss.includes("body[arco-theme='dark'] .arco-switch-checked")).toBe(true);
-    expect(controlCss.includes('background-color: #1f9d55')).toBe(true);
+    expect(controlCss.includes('background-color: var(--success) !important;')).toBe(true);
     expect(controlCss.includes("body[arco-theme='dark'] .arco-switch-checked .arco-switch-dot")).toBe(true);
-    expect(controlCss.includes('background-color: #ffffff')).toBe(true);
+    expect(controlCss.includes('background-color: var(--on-success) !important;')).toBe(true);
+    expect(controlCss.includes('color: var(--on-success) !important;')).toBe(true);
+  });
+
+  test('keeps scoped migration and capability checkmarks paired with their selected fill', () => {
+    expect(controlCss.includes('.migrate-events-checkbox .arco-checkbox-mask-icon')).toBe(true);
+    expect(controlCss.includes('.open-capabilities-domain-checkbox .arco-checkbox-mask-icon')).toBe(true);
+    expect(controlCss.includes('color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--on-primary))) !important;')).toBe(true);
+    expect(controlCss.includes('background-color: var(--enhanced-checkbox-selected-fg, var(--control-selected-fg, var(--on-primary))) !important;')).toBe(true);
   });
 });

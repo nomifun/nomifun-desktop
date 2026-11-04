@@ -20,7 +20,7 @@ import { supportsPreviewHistory } from '../../constants';
  */
 const PREVIEW_TOOLBAR_BTN_CLASS =
   'flex items-center gap-2px px-8px py-3px rd-4px cursor-pointer transition-colors duration-150 text-12px font-medium text-t-secondary hover:text-t-primary hover:bg-3';
-const PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS = '!text-white bg-brand hover:!text-white hover:bg-brand-hover';
+const PREVIEW_TOOLBAR_BTN_ACTIVE_CLASS = '!text-[var(--on-brand)] bg-brand hover:!text-[var(--on-brand)] hover:bg-brand';
 
 /**
  * PreviewToolbar 组件属性
@@ -288,7 +288,7 @@ const PreviewToolbar: React.FC<PreviewToolbarProps> = ({
                 fill='none'
                 stroke='currentColor'
                 strokeWidth='1.8'
-                className={isEditMode ? 'text-white' : 'text-t-secondary'}
+                className={isEditMode ? 'text-[var(--on-brand)]' : 'text-t-secondary'}
               >
                 <path d='M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7' />
                 <path d='M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z' />

@@ -39,10 +39,27 @@
 
   /* Semantic Colors - Light Mode */
   --primary: #165dff;
+  --color-primary: var(--primary);
+  --primary-rgb: 22, 93, 255;
+  --on-primary: #ffffff; /* 主色实体填充上的文字/图标 */
   --success: #00b42a;
+  --on-success: #111018;
   --warning: #ff7d00;
+  --on-warning: #111018;
   --danger: #f53f3f;
+  --on-danger: #111018; /* 危险色实体填充上的文字/图标 */
   --info: #165dff;
+
+  /* Controls before the runtime preset is injected (including login). */
+  --control-selected-bg: var(--primary);
+  --control-selected-fg: var(--on-primary);
+  --enhanced-checkbox-selected-bg: var(--control-selected-bg);
+  --enhanced-checkbox-selected-fg: var(--control-selected-fg);
+  --control-idle-bg: var(--bg-1);
+  --control-idle-border: var(--bg-6);
+  --control-hover-bg: var(--bg-hover);
+  --control-disabled-selected-bg: var(--bg-4);
+  --control-focus-ring: rgba(var(--primary-rgb), 0.28);
 
   /* Border Colors - Light Mode */
   --border-base: #e5e6eb; /* 基础边框 */
@@ -50,6 +67,7 @@
 
   /* Brand Colors - Light Mode */
   --brand: #7583b2; /* 品牌色 */
+  --on-brand: #111018; /* 品牌色实体填充上的文字/图标 */
   --brand-light: #eff0f6; /* 品牌浅色背景 */
   --brand-hover: #b5bcd6; /* 品牌色悬停 */
 
@@ -57,6 +75,7 @@
   --message-user-bg: #e9efff; /* 用户消息背景（浅蓝） */
   --message-tips-bg: #f0f4ff; /* 提示信息背景（浅蓝） */
   --feedback-bubble-bg: #ffffff; /* Toast / Notification 实体背景 */
+  --tooltip-fg: #ffffff; /* Arco 深色 tooltip 的前景色 */
   --workspace-btn-bg: #eff0f1; /* 工作区按钮背景 */
   --terminal-surface-bg: #1b1d23; /* 终端卡片背景（恒深色，与 xterm 画布一致） */
   --terminal-border: rgba(0, 0, 0, 0.12); /* 终端卡片边框 - 亮色 */
@@ -114,10 +133,26 @@
 
   /* Semantic Colors - Dark Mode */
   --primary: #4d9fff;
+  --color-primary: var(--primary);
+  --primary-rgb: 77, 159, 255;
+  --on-primary: #111018;
   --success: #23c343;
+  --on-success: #111018;
   --warning: #ff9a2e;
+  --on-warning: #111018;
   --danger: #f76560;
+  --on-danger: #111018;
   --info: #4d9fff;
+
+  --control-selected-bg: var(--primary);
+  --control-selected-fg: var(--on-primary);
+  --enhanced-checkbox-selected-bg: var(--control-selected-bg);
+  --enhanced-checkbox-selected-fg: var(--control-selected-fg);
+  --control-idle-bg: var(--bg-1);
+  --control-idle-border: var(--bg-8);
+  --control-hover-bg: var(--bg-hover);
+  --control-disabled-selected-bg: var(--bg-8);
+  --control-focus-ring: rgba(var(--primary-rgb), 0.28);
 
   /* Border Colors - Dark Mode */
   --border-base: #333333; /* 基础边框 */
@@ -125,6 +160,7 @@
 
   /* Brand Colors - Dark Mode */
   --brand: #a1aacb; /* 品牌色 */
+  --on-brand: #111018;
   --brand-light: #3d4150; /* 品牌深色背景 */
   --brand-hover: #6a749b; /* 品牌色悬停 */
 
@@ -132,6 +168,7 @@
   --message-user-bg: #1e2a3a; /* 用户消息背景（深蓝灰） */
   --message-tips-bg: #1a2333; /* 提示信息背景（深蓝灰） */
   --feedback-bubble-bg: #262626; /* Toast / Notification 实体背景 */
+  --tooltip-fg: #ffffff;
   --workspace-btn-bg: #1f1f1f; /* 工作区按钮背景 */
   --terminal-surface-bg: #1b1d23; /* 终端卡片背景（恒深色） */
   --terminal-border: rgba(255, 255, 255, 0.08); /* 终端卡片边框 - 暗色 */

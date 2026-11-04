@@ -67,7 +67,7 @@ const ConversationTitleMinimap: React.FC<ConversationTitleMinimapProps> = ({
           color: normalizedKeyword
             ? filteredItems.length > 0
               ? 'rgb(var(--primary-6))'
-              : 'var(--color-danger)'
+              : 'var(--danger)'
             : 'var(--color-text-2)',
         }}
       >

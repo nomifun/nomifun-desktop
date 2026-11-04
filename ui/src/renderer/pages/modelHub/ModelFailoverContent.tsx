@@ -115,7 +115,7 @@ const ModelFailoverContent: React.FC = () => {
         <div className='text-t-secondary text-12px leading-18px'>{t('modelFailover.queueHint')}</div>
 
         {config.queue.length === 0 ? (
-          <div className='rounded-8px border border-dashed border-[rgba(var(--primary-6),0.25)] px-12px py-14px text-center text-12px text-t-secondary'>
+          <div className={`${styles.failoverEmpty} rounded-8px border border-dashed px-12px py-14px text-center text-12px text-t-secondary`}>
             {t('modelFailover.empty')}
           </div>
         ) : (
@@ -123,7 +123,7 @@ const ModelFailoverContent: React.FC = () => {
             {config.queue.map((cand, index) => (
               <div
                 key={`${cand.provider_id}::${cand.model}`}
-                className='flex items-center gap-10px rounded-8px border border-solid border-[rgba(var(--primary-6),0.15)] bg-[rgba(var(--primary-6),0.04)] px-10px py-8px'
+                className={`${styles.failoverRow} flex items-center gap-10px rounded-8px border border-solid px-10px py-8px`}
               >
                 <span className='w-20px shrink-0 text-center text-12px text-t-secondary'>{index + 1}</span>
                 <div className='min-w-0 flex-1'>
@@ -133,7 +133,8 @@ const ModelFailoverContent: React.FC = () => {
                 <div
                   role='button'
                   aria-label={t('modelFailover.moveUp')}
-                  className={`flex h-24px w-24px shrink-0 items-center justify-center rounded-6px ${index === 0 ? 'cursor-not-allowed text-t-disabled' : 'cursor-pointer text-t-secondary hover:bg-[rgba(var(--primary-6),0.1)]'}`}
+                  aria-disabled={index === 0}
+                  className={`${styles.failoverAction} flex h-24px w-24px shrink-0 items-center justify-center rounded-6px ${index === 0 ? 'cursor-not-allowed text-t-disabled' : 'cursor-pointer text-t-secondary'}`}
                   onClick={() => index > 0 && moveCandidate(index, -1)}
                 >
                   <Up theme='outline' size='14' fill='currentColor' />
@@ -141,7 +142,8 @@ const ModelFailoverContent: React.FC = () => {
                 <div
                   role='button'
                   aria-label={t('modelFailover.moveDown')}
-                  className={`flex h-24px w-24px shrink-0 items-center justify-center rounded-6px ${index === config.queue.length - 1 ? 'cursor-not-allowed text-t-disabled' : 'cursor-pointer text-t-secondary hover:bg-[rgba(var(--primary-6),0.1)]'}`}
+                  aria-disabled={index === config.queue.length - 1}
+                  className={`${styles.failoverAction} flex h-24px w-24px shrink-0 items-center justify-center rounded-6px ${index === config.queue.length - 1 ? 'cursor-not-allowed text-t-disabled' : 'cursor-pointer text-t-secondary'}`}
                   onClick={() => index < config.queue.length - 1 && moveCandidate(index, 1)}
                 >
                   <Down theme='outline' size='14' fill='currentColor' />
@@ -149,7 +151,7 @@ const ModelFailoverContent: React.FC = () => {
                 <div
                   role='button'
                   aria-label={t('modelFailover.remove')}
-                  className='flex h-24px w-24px shrink-0 cursor-pointer items-center justify-center rounded-6px text-t-secondary hover:bg-[rgba(var(--primary-6),0.1)] hover:text-danger'
+                  className={`${styles.failoverAction} flex h-24px w-24px shrink-0 cursor-pointer items-center justify-center rounded-6px text-t-secondary hover:text-danger`}
                   onClick={() => removeCandidate(index)}
                 >
                   <Close theme='outline' size='14' fill='currentColor' />

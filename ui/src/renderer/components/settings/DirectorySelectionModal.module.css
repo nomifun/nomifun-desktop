@@ -204,7 +204,7 @@
 }
 
 .folderIcon {
-  color: #f6ad2f;
+  color: color-mix(in srgb, rgb(var(--warning-6)) 68%, var(--text-primary));
 }
 
 .fileIcon {
