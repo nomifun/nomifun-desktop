@@ -84,17 +84,16 @@ pub struct Requirement {
     pub status: RequirementStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_note: Option<String>,
-    /// Executing session id: a conversation OR a terminal, discriminated by
-    /// `owner_kind`. Replaces the former `conversation_id` (which assumed a
-    /// single conversation domain).
+    /// Conversation source of the last accepted claim. Retained through
+    /// review and settlement, including after that Session retires.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
     )]
     pub owner_conversation_id: Option<String>,
-    /// `'conversation'` | `'terminal'` | None (when unowned). Paired with
-    /// `owner_session_id` — both null together, both set together.
+    /// Terminal source of the last accepted claim. Mutually exclusive with
+    /// `owner_conversation_id`; historical ownership grants no execution right.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

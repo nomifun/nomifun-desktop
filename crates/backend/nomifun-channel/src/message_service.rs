@@ -908,7 +908,7 @@ impl ChannelMessageService {
         // Model resolution for a companion-owned Nomi conversation prefers
         // the companion profile, then the platform default. ACP CLIs own their
         // model configuration and only receive a platform model when present.
-        let mut model = if agent_type == AgentType::Nomi
+        let model = if agent_type == AgentType::Nomi
             && let Some(profile) = self.channel_agent_profile.as_ref()
             && let Some(companion_id) = channel_companion_id.as_deref()
             && let Some(companion_model) = profile.companion_model(companion_id).await
@@ -917,10 +917,6 @@ impl ChannelMessageService {
         } else {
             resolved_model_to_provider(model_config.as_ref())
         };
-
-        if model.is_none() {
-            model = resolved_model_to_provider(model_config.as_ref());
-        }
 
         let mut extra = Self::build_channel_extra(agent_config.backend.as_deref());
         apply_channel_agent_context(&mut extra, agent_type, platform, channel_companion_id.as_deref());

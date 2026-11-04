@@ -1194,9 +1194,6 @@ impl ITerminalRepository for SqliteTerminalRepository {
                      WHEN status = 'in_progress' THEN NULL \
                      ELSE lease_expires_at \
                  END, \
-                 owner_terminal_id = CASE \
-                     WHEN status IN ('in_progress', 'needs_review') \
-                     THEN owner_terminal_id ELSE NULL END, \
                  updated_at = ?2 \
              WHERE owner_terminal_id = ?3",
         )
@@ -1272,9 +1269,6 @@ impl ITerminalRepository for SqliteTerminalRepository {
                      WHEN status = 'in_progress' THEN NULL \
                      ELSE lease_expires_at \
                  END, \
-                 owner_terminal_id = CASE \
-                     WHEN status IN ('in_progress', 'needs_review') \
-                     THEN owner_terminal_id ELSE NULL END, \
                  updated_at = ?2 \
              WHERE owner_terminal_id IS NOT NULL",
         )

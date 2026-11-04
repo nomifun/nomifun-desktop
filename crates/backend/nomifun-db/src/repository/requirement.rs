@@ -8,14 +8,10 @@ use crate::models::{NewRequirementRow, RequirementRow, RequirementRowUpdate, Req
 pub struct ListRequirementsParams {
     pub tag: Option<String>,
     pub status: Option<String>,
-    /// Filter by the executing session (a conversation or terminal id). Matches
-    /// the `owner_session_id` column (`idx_requirements_owner`).
+    /// Filter by the conversation source of the last accepted claim.
     pub owner_conversation_id: Option<String>,
-    /// Filter by the owner domain (`"conversation"` | `"terminal"`). Paired with
-    /// `owner_session_id` it disambiguates the dual-domain owner column — after
-    /// integerization a conversation and a terminal can share a numeric id, so a
-    /// session-scoped query (e.g. clearing a deleted session's requirements) MUST
-    /// constrain `owner_kind` too, or it crosses domains (spec §2.2).
+    /// Filter by the terminal source of the last accepted claim. The two
+    /// source columns remain domain-specific even after their owner retires.
     pub owner_terminal_id: Option<String>,
     /// Substring search over title + content (case-insensitive).
     pub q: Option<String>,
@@ -110,10 +106,9 @@ pub trait IRequirementRepository: Send + Sync {
     ///
     /// Single `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *` — SQLite's
     /// single-writer guarantee makes this the entire idempotent allocator.
-    /// Records the executing session as `owner_session_id` + `owner_kind`
-    /// (`'conversation'` | `'terminal'`), set together to satisfy the table's
-    /// paired-NULL CHECK. Returns the claimed row, or `None` when the tag has
-    /// no pending requirements.
+    /// Records exactly one conversation or terminal source in its typed
+    /// column. Returns the claimed row, or `None` when the tag has no pending
+    /// requirements.
     #[cfg(test)]
     async fn claim_next(
         &self,
@@ -156,8 +151,8 @@ pub trait IRequirementRepository: Send + Sync {
         ))
     }
 
-    /// Renew the lease for a requirement currently claimed by `owner` (matched
-    /// against `owner_session_id`). Returns true if a row was renewed.
+    /// Renew the lease for the exact owner domain, generation and token.
+    /// Returns true if a row was renewed.
     async fn renew_lease(
         &self,
         requirement_id: &str,
@@ -215,8 +210,8 @@ pub trait IRequirementRepository: Send + Sync {
     ) -> Result<Option<RequirementRow>, DbError>;
 
     /// Atomically process every row owned by one typed session during aggregate
-    /// deletion. Active/parked execution evidence retains its typed owner;
-    /// inactive rows are detached.
+    /// deletion. Active work is parked for review; every accepted claim keeps
+    /// its source identity and capability for exact verdict confirmation.
     async fn detach_owner_for_session(
         &self,
         owner_conversation_id: Option<&str>,
@@ -228,13 +223,9 @@ pub trait IRequirementRepository: Send + Sync {
     /// Fail closed any `in_progress` requirements whose lease expired and whose
     /// owning session is no longer active. Lease expiry cannot prove that model,
     /// tool, or PTY side effects never began, so the sweep parks the row in
-    /// `needs_review` while retaining its owner and claim generation. Each
-    /// active entry is a `(owner_kind,
-    /// owner_session_id)` pair — both are matched together, because the
-    /// integer owner id is dual-domain (a conversation and a terminal can share
-    /// a number), so a kind-less match would wrongly treat an active `conv#5`
-    /// as keeping a stale `term#5` claim alive (spec §2.2). Returns the count
-    /// parked for review.
+    /// `needs_review` while retaining its owner and claim generation. Active
+    /// conversation and terminal identities are supplied separately and match
+    /// only their own source column. Returns the count parked for review.
     async fn sweep_expired_leases(
         &self,
         active_conversation_ids: &[String],

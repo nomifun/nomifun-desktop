@@ -491,6 +491,9 @@ struct PartialUniqueIndexContract {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LogicalReferenceKind {
     Text,
+    /// A canonical message spans events sharing its correlation ID. Its
+    /// completed event is scoped to the product's exact bound Session.
+    CanonicalMessage,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -849,19 +852,35 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
     text_ref!("creative_studio_template_runs", "template_id" => "creative_studio_templates", "template_id", false, KeepHistory),
     text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, Cascade),
-    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "agent_events", "event_id", false, Restrict),
+    LogicalReference {
+        child_table: "creative_studio_agent_proposal_receipts",
+        child_column: "assistant_message_id",
+        parent_table: Some("agent_events"),
+        parent_column: Some("correlation_id"),
+        kind: LogicalReferenceKind::CanonicalMessage,
+        value_contract: LogicalReferenceValueContract::CanonicalUuidV7,
+        nullable: false,
+        delete_policy: DeletePolicy::Restrict,
+        rebuild_policy: RebuildPolicy::PreserveBusinessId,
+        orphan_audit_policy: OrphanAuditPolicy::RequireParent,
+        child_predicate: None,
+        frozen_projection_authority: None,
+        parent_predicate: Some("parent.kind = 'message/completed'"),
+        aggregate_scope_predicate: Some(
+            "parent.session_id IN (SELECT binding.conversation_id \
+             FROM creative_studio_agent_sessions binding \
+             WHERE binding.project_id = child.project_id)",
+        ),
+    },
     text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, Restrict),
-    text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, Restrict),
+    text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, Cascade),
     text_ref!("creative_studio_agent_sessions", "conversation_id" => "agent_sessions", "agent_session_id", false, Restrict)
         .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_id"),
-    // Inactive Requirements follow SET_NULL when their aggregate is deleted.
-    // Active/NeedsReview rows deliberately retain the typed owner as immutable
-    // execution-history evidence after the parent is gone, so the live-parent
-    // orphan audit applies only to rows for which deletion must clear it.
-    text_ref!("requirements", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, SetNull)
-        .with_child_predicate("child.status NOT IN ('in_progress', 'needs_review')"),
-    text_ref!("requirements", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, SetNull)
-        .with_child_predicate("child.status NOT IN ('in_progress', 'needs_review')"),
+    // Owners identify the last accepted claim, including its exact terminal
+    // acknowledgement. Retiring an owner does not erase that history or grant
+    // execution authority; claim admission validates live owners separately.
+    text_ref!("requirements", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, KeepHistory),
+    text_ref!("requirements", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, KeepHistory),
     text_ref!("requirement_pre_effect_abandon_guards", "requirement_id" => "requirements", "requirement_id", false, Restrict),
     text_ref!("requirement_pre_effect_abandon_guards", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, Restrict),
     text_ref!("requirement_pre_effect_abandon_guards", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, Restrict),
@@ -1205,8 +1224,8 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
 }
 
 /// Validate the complete durable v3 ID data contract. Any failure identifies
-/// the current managed dataset as incompatible; callers must quarantine/reset
-/// the dataset rather than rewrite IDs.
+/// a broken current dataset. Startup preserves it for explicit repair; this
+/// audit never grants authority to reset data or rewrite identifiers.
 pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError> {
     validate_id_value_contract(pool).await?;
     validate_workshop_asset_origin_values(pool).await?;
@@ -1958,7 +1977,9 @@ async fn validate_logical_reference_registry(pool: &SqlitePool) -> Result<(), Db
             (reference.parent_table, reference.parent_column)
         {
             require_column(pool, parent_table, parent_column, expected_type, true).await?;
-            require_unique_parent_identity(pool, parent_table, parent_column).await?;
+            if reference.kind == LogicalReferenceKind::Text {
+                require_unique_parent_identity(pool, parent_table, parent_column).await?;
+            }
         }
     }
     Ok(())

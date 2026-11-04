@@ -246,6 +246,24 @@ mod tests {
         let pool = database.pool();
         let owner_before = crate::installation_owner_id(pool).await.unwrap();
         let cron_before=cron_definition(pool).await;
+        let knowledge_binding = nomifun_common::KnowledgeBindingId::new().into_string();
+        sqlx::query("INSERT INTO knowledge_bindings(knowledge_binding_id,target_kind,target_conversation_id,updated_at) VALUES(?,'conversation',?,1)")
+            .bind(&knowledge_binding).bind(SESSION).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_binding_bases(knowledge_binding_id,knowledge_base_id) VALUES(?,'0190f5fe-7c00-7a00-8000-000000000213')")
+            .bind(&knowledge_binding).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO client_preferences(key,value,updated_at) VALUES(?,'opaque retired Session preference',1)")
+            .bind(format!("agent_session.idmm.{SESSION}")).execute(pool).await.unwrap();
+        let mut requirement_ids = Vec::new();
+        for (index, status) in ["done", "cancelled"].into_iter().enumerate() {
+            let id = nomifun_common::RequirementId::new().into_string();
+            sqlx::query("INSERT INTO requirements(requirement_id,display_no,title,tag,completion_note,created_at,updated_at) VALUES(?,?,'Retained completed task','clean-cut','Original business verdict',1,1)")
+                .bind(&id).bind(index as i64 + 1).execute(pool).await.unwrap();
+            sqlx::query("UPDATE requirements SET status='in_progress',owner_conversation_id=?,active_turn_started_at=10,lease_expires_at=100,started_at=10,attempt_count=1,claim_generation=1,claim_token=? WHERE requirement_id=?")
+                .bind(SESSION).bind("a".repeat(64)).bind(&id).execute(pool).await.unwrap();
+            sqlx::query("UPDATE requirements SET status=? WHERE requirement_id=?")
+                .bind(status).bind(&id).execute(pool).await.unwrap();
+            requirement_ids.push((id, status));
+        }
         assert!(requires_agent_store_clean_cut(pool).await.unwrap());
         let mut conn = pool.acquire().await.unwrap();
         clean_cut_agent_store(&mut conn, &MIGRATOR).await.unwrap();
@@ -264,6 +282,16 @@ mod tests {
         crate::validate_current_migration_lineage(pool).await.unwrap();
         crate::validate_id_schema_contract(pool).await.unwrap();
         crate::validate_id_data_contract(pool).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM knowledge_binding_bases WHERE knowledge_binding_id=?")
+            .bind(&knowledge_binding).fetch_one(pool).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM client_preferences WHERE key GLOB 'agent_session.idmm.*'")
+            .fetch_one(pool).await.unwrap(), 0);
+        for (id, expected_status) in requirement_ids {
+            let retained: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT status,completion_note,owner_conversation_id,claim_token FROM requirements WHERE requirement_id=?"
+            ).bind(id).fetch_one(pool).await.unwrap();
+            assert_eq!(retained, (expected_status.into(), "Original business verdict".into(), None, None));
+        }
         assert_eq!(crate::installation_owner_id(pool).await.unwrap(), owner_before);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions").fetch_one(pool).await.unwrap();
         assert_eq!(rows, 0, "no retired Session or value was imported");

@@ -197,6 +197,14 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
             .execute(&mut *tx)
             .await?;
         // Private notes cascade; shared notes (NULL owner) survive.
+        let indexed_notes: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, search_text FROM cs_notes WHERE cs_agent_id = ?")
+                .bind(cs_agent_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        for (rowid, search_text) in indexed_notes {
+            fts_index_delete(&mut tx, rowid, &search_text).await?;
+        }
         sqlx::query("DELETE FROM cs_notes WHERE cs_agent_id = ?")
             .bind(cs_agent_id)
             .execute(&mut *tx)
@@ -1779,6 +1787,60 @@ mod tests {
         let remaining = repo.list_notes(None).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].content, "shared");
+    }
+
+    #[tokio::test]
+    async fn delete_agent_removes_private_note_fts_entries_and_keeps_other_notes() {
+        let (_db, repo) = repo().await;
+        let deleted_agent = repo.create_agent(&new_agent("Deleted")).await.unwrap();
+        let retained_agent = repo.create_agent(&new_agent("Retained")).await.unwrap();
+        for (cs_agent_id, content) in [
+            (Some(deleted_agent.cs_agent_id.clone()), "retiredknowledge"),
+            (Some(retained_agent.cs_agent_id.clone()), "retainedknowledge"),
+            (None, "sharedknowledge"),
+        ] {
+            repo.create_note(&CsNoteRow {
+                cs_note_id: generate_id(),
+                cs_agent_id,
+                kind: "faq".into(),
+                content: content.into(),
+                aliases: String::new(),
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        }
+        let private_matches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cs_notes_fts WHERE cs_notes_fts MATCH 'retiredknowledge'",
+        )
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(private_matches, 1);
+
+        repo.delete_agent(&deleted_agent.cs_agent_id).await.unwrap();
+
+        let private_matches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cs_notes_fts WHERE cs_notes_fts MATCH 'retiredknowledge'",
+        )
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(private_matches, 0, "deleted notes must leave no FTS entries");
+        sqlx::query("INSERT INTO cs_notes_fts(cs_notes_fts, rank) VALUES('integrity-check', 1)")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        for content in ["retainedknowledge", "sharedknowledge"] {
+            let hits = repo
+                .search_notes(&retained_agent.cs_agent_id, &expand_query(content), 10)
+                .await
+                .unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].note.content, content);
+        }
     }
 
     #[tokio::test]

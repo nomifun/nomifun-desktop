@@ -1,8 +1,30 @@
 # Agent 生命周期验证记录
 
-更新时间：2026-10-24。稳定行为合同属于 [Agent Execution](../architecture/agent-execution.zh.md#生命周期约束) 和 [Agent Session](../architecture/agent-session.zh.md)，资源与退出边界同时遵守 [Browser](../architecture/browser-platform.zh.md)、[全局 OS](../architecture/global-os-capabilities.zh.md) 和 [Computer Use](../architecture/computer-use.zh.md)。本页仅记录验证范围、构建证据和未验项，不是施工计划，也不授予安装、提权、提交、推送、发布或修改真实数据的权限。
+更新时间：2026-11-04。稳定行为合同属于 [Agent Execution](../architecture/agent-execution.zh.md#生命周期约束) 和 [Agent Session](../architecture/agent-session.zh.md)，资源与退出边界同时遵守 [Browser](../architecture/browser-platform.zh.md)、[全局 OS](../architecture/global-os-capabilities.zh.md) 和 [Computer Use](../architecture/computer-use.zh.md)。本页仅记录验证范围、构建证据和未验项，不是施工计划，也不授予安装、提权、提交、推送、发布或修改真实数据的权限。
 
 原 lifecycle 施工计划与启动 prompt 已由上述正式合同及本验证页替代，历史设计可查 Git。U01–U13 长期约束保存在 Execution 架构；Computer 专项的实施阶段、授权和新 worker 验证继续由其[现役专项](../handoffs/computer-use-rebuild.zh.md#12-单份执行进展)管理，不继承旧 Computer 的原生通过记录。
+
+## 2026-11-04 数据关联删除与消息身份
+
+本轮基于 `2ee4f9b11` 的本地工作区，在 macOS 隔离临时数据上验证；未操作真实用户数据，
+未安装、打包或发布。普通产品表继续使用现有逻辑关联与事务，不新增外键框架、运行账本或并发锁。
+
+| 范围 | 结果 | 证明范围 |
+| --- | --- | --- |
+| DB 单元测试 | 323 通过；末轮提案仓库定向 2 通过 | 正常 owner 退休保留 claim 来源；待核验转 done/failed/cancelled 后完整 ID 审计通过；客服私有笔记及 FTS 一起删除，其他笔记保留。 |
+| Reset／ID 合同 | 4／6 通过 | 当前 reset 与生产 PreservedBaseline clean-cut 清知识关联明细、IDMM、画布消息/待执行引用；保留业务终态、备注、模型和草稿壳，重复清理无额外变化。 |
+| Workshop | 139 全量通过；typed ID 收口后 9 项定向及末轮消息审计回归通过 | 真实 Store/projector 文本进入提案；正确 MessageId 接受，用户消息及异 Session 身份拒绝；删除画布清领域关系并逐字保留 canonical 历史。 |
+| Requirement | 59 通过 | 普通 owner 退休后原终态仍能精确确认，保留的历史身份不能重新取得执行权。 |
+| App HTTP／native journal | 5 项定向通过 | 通用删除拒绝画布所属 Session；删除画布后数据库正常重开；脚本化本地供应商驱动真实 Runtime/journal 产提案，应用、重放和完整审计通过；空正文失败回合重开保留原错误和身份。 |
+| Provider | 1 项删除路由回归通过 | 删除旧兼容 hook 后，现役 clone/delete 事务路径继续工作。 |
+
+首轮新 HTTP 夹具因 macOS `/var` 别名及存储 `projectId` 与公开 `canvasId` 混用而失败，已改为
+真实临时路径和公开文档响应；未放宽生产校验。原 Skill 负例沿用旧错误码，现按既有 native
+类型合同校验唯一 `NOMIFUN_RUNTIME_FAILED`、`turn_execution`、零模型步骤及确切拒绝原因。
+该负例同时暴露空正文失败展示遗漏，已在原终态投影循环修复，不写补造的消息事实。
+
+本轮未新增低概率并发处置，也未声明 Windows／Linux 原生验收或真实云端模型验证通过。
+已存在的损坏用户库继续保留并拒绝正常启动，不因本轮修复获得自动清库权限。
 
 ## 2026-10-24 完整工具结果与后继回合
 

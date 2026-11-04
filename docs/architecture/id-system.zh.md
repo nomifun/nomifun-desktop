@@ -219,6 +219,14 @@ Repository/Service 必须在显式事务中校验父记录、写入关联数据�
 批量 restore/import 后必须运行完整 orphan audit。业务代码不得绕过这一边界
 直接写逻辑关联列。
 
+MessageId 标识一条消息，EventId 标识一个事件；同一消息的正文片段和完成事件共享 correlation，
+不要求它们的 EventId 等于 MessageId。画布提案回执按确切绑定 Session 中的完成消息校验，
+不为 correlation 增加全局唯一约束或另存 EventId 镜像。
+
+Requirement 的 owner 字段记录最后一代已受理 claim 的来源，随待核验和终态一致保留。
+Session 或终端正常退休后允许原来源不存在；该引用不授予执行权。新 claim 在现有写事务内
+验证活对象，结果确认继续比较原 generation、token 和 owner，显式 requeue 才清除旧执行能力。
+
 ## 自然键、外部 ID 与 Token
 
 Skill 名、Extension slug、模型名、URL、locale、tag 和 singleton key 等自然键

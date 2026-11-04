@@ -1383,7 +1383,7 @@ async fn serve_file(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use nomifun_common::{CreativeStudioNodeId, MessageId, ProviderId, UserId};
+    use nomifun_common::{CreativeStudioNodeId, ProviderId, UserId};
     use nomifun_db::{IWorkshopRepository, SqliteWorkshopRepository};
     use serde_json::Value;
     use tower::ServiceExt;
@@ -1734,102 +1734,30 @@ mod tests {
         project_id: &str,
         assistant_texts: &[String],
     ) -> Vec<String> {
-        let owner_id = nomifun_db::installation_owner_id(database.pool())
-            .await
-            .unwrap();
+        let owner_id = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
         let session_id = nomifun_common::generate_id();
-        let conversation_id = nomifun_common::ConversationId::new().into_string();
         let provider_id = ProviderId::new().into_string();
-        let mut message_ids = Vec::with_capacity(assistant_texts.len() * 2);
-        let mut assistant_ids = Vec::with_capacity(assistant_texts.len());
-        for _ in assistant_texts {
-            message_ids.push(MessageId::new().into_string());
-            let assistant_id = MessageId::new().into_string();
-            message_ids.push(assistant_id.clone());
-            assistant_ids.push(assistant_id);
-        }
+        let (conversation_id, message_ids) = crate::test_support::completed_agent_history(database, assistant_texts).await;
+        let assistant_ids = message_ids.iter().skip(1).step_by(2).cloned().collect();
         let document_json: String = nomifun_db::sqlx::query_scalar(
             "SELECT document_json FROM creative_studio_projects WHERE project_id = ?",
-        )
-        .bind(project_id)
-        .fetch_one(database.pool())
-        .await
-        .unwrap();
+        ).bind(project_id).fetch_one(database.pool()).await.unwrap();
         let mut document: Value = serde_json::from_str(&document_json).unwrap();
         document["chatSessions"] = serde_json::json!([{
-            "id": session_id,
-            "title": "Agent",
-            "messageIds": message_ids,
+            "id": session_id, "title": "Agent", "messageIds": message_ids,
             "model": { "providerId": provider_id, "model": "chat-model" },
-            "pendingTurn": null,
-            "createdAt": 1,
-            "updatedAt": 1
+            "pendingTurn": null, "createdAt": 1, "updatedAt": 1
         }]);
         document["activeChatId"] = Value::String(session_id.clone());
         nomifun_db::sqlx::query(
             "UPDATE creative_studio_projects SET document_json = ? WHERE project_id = ?",
-        )
-        .bind(document.to_string())
-        .bind(project_id)
-        .execute(database.pool())
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO agent_sessions \
-                (agent_session_id, owner_ref_json, state, title, archived, pinned, \
-                 agent_binding_json, next_seq, created_at) \
-             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
-                     'live', 'Creative Studio Agent', 0, 0, '{}', 1, 1)",
-        )
-        .bind(&conversation_id)
-        .bind(&owner_id)
-        .execute(database.pool())
-        .await
-        .unwrap();
+        ).bind(document.to_string()).bind(project_id).execute(database.pool()).await.unwrap();
         nomifun_db::sqlx::query(
             "INSERT INTO creative_studio_agent_sessions \
                 (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
              VALUES (?, ?, ?, ?, 1, 1)",
-        )
-        .bind(&owner_id)
-        .bind(project_id)
-        .bind(&session_id)
-        .bind(&conversation_id)
-        .execute(database.pool())
-        .await
-        .unwrap();
-        for (index, message_id) in message_ids.iter().enumerate() {
-            let (position, content) = if index % 2 == 0 {
-                ("right", serde_json::json!({ "content": "request" }))
-            } else {
-                (
-                    "left",
-                    serde_json::json!({
-                        "content": assistant_texts[index / 2],
-                        "turn_id": MessageId::new().into_string()
-                    }),
-                )
-            };
-            nomifun_db::sqlx::query(
-                "INSERT INTO agent_messages \
-                    (session_id, projection_id, first_seq, last_seq, presentation_intent, \
-                     projection_json, semantic_digest) \
-                 VALUES (?, ?, ?, ?, 'message', \
-                         json_object('correlation_id', ?, 'state', 'completed', \
-                                     'position', ?, 'content', json(?)), ?)",
-            )
-            .bind(&conversation_id)
-            .bind(message_id)
-            .bind(i64::try_from(index + 1).unwrap())
-            .bind(i64::try_from(index + 1).unwrap())
-            .bind(message_id)
-            .bind(position)
-            .bind(content.to_string())
-            .bind(format!("{:064x}", index + 1))
-            .execute(database.pool())
-            .await
-            .unwrap();
-        }
+        ).bind(&owner_id).bind(project_id).bind(&session_id).bind(&conversation_id)
+            .execute(database.pool()).await.unwrap();
         assistant_ids
     }
 

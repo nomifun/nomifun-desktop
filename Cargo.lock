@@ -6663,6 +6663,8 @@ dependencies = [
  "hex",
  "image",
  "mime_guess",
+ "nomifun-agent-contracts",
+ "nomifun-agent-session",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",

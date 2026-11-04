@@ -12092,14 +12092,24 @@ async fn canonical_creative_studio_history(
             _ => {}
         }
     }
-    for (source, (_, _, request, seq)) in outcomes {
-        if !last_assistants.contains_key(&source) && let Some(request) = request {
-            history.push((seq, CreativeStudioAgentHistoryMessage {
-                id: super::engine_journal::canonical_assistant_message_id(&source)?,
-                role: CreativeStudioAgentHistoryRole::Assistant, status: CreativeStudioAgentHistoryStatus::InputRequired,
-                text: String::new(), activity_label: None, error_message: None, user_input_request: Some(request),
-            }));
-        }
+    for (source, (state, error, request, seq)) in outcomes {
+        if last_assistants.contains_key(&source) { continue; }
+        // A Turn can fail or stop before producing assistant text. Present its
+        // original terminal outcome without writing a synthetic message fact.
+        let status = if request.is_some() {
+            CreativeStudioAgentHistoryStatus::InputRequired
+        } else {
+            match state.as_str() {
+                "failed" | "interrupted" => CreativeStudioAgentHistoryStatus::Failed,
+                "cancelled" => CreativeStudioAgentHistoryStatus::Stopped,
+                _ => continue,
+            }
+        };
+        history.push((seq, CreativeStudioAgentHistoryMessage {
+            id: super::engine_journal::canonical_assistant_message_id(&source)?,
+            role: CreativeStudioAgentHistoryRole::Assistant, status,
+            text: String::new(), activity_label: None, error_message: error, user_input_request: request,
+        }));
     }
     history.sort_by_key(|(seq, _)| *seq);
     Ok(history.into_iter().map(|(_, message)| message).collect())
@@ -17114,6 +17124,22 @@ async fn execute_nomi_core_agent_session_delete(
         .await.map_err(agent_session_store_error)?.is_some() {
         return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "APP_PROJECT_SESSION_MANAGED_BY_APP",
             "This Session belongs to an application project; delete the application to remove its project Sessions"));
+    }
+    let canvas_bound: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM creative_studio_agent_sessions \
+         WHERE owner_id = ? AND conversation_id = ?)",
+    )
+    .bind(owner.as_ref())
+    .bind(session_id.as_ref())
+    .fetch_one(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if canvas_bound {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "CANVAS_SESSION_MANAGED_BY_CANVAS",
+            "This Session belongs to a canvas; delete the canvas before removing its conversation history",
+        ));
     }
     if state.session_owner.is_companion_associated_task(owner.as_ref(), &session_id).await? {
         return Err(NomiCoreApiError::new(StatusCode::CONFLICT, "AGENT_EXECUTION_ATTEMPT_READ_ONLY",

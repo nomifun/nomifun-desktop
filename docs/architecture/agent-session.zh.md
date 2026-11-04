@@ -52,6 +52,14 @@ Host 只从该 canonical 输入及对应启动事实解析操作 ID，复核成�
 同目录普通会话和其他应用会话保留，不能为物理删除关闭它们；其活动资源和未知效果仍保护真实目录。
 普通会话的创建、上下文、工作区、切换及删除合同保持原样。
 
+画布通过现有领域映射把本地聊天槽位关联到同一 canonical Session。通用会话删除拒绝仍被画布
+管理的 Session；删除画布在原事务内清除映射、提案回执和画布，不连带清除 canonical 会话历史。
+画布提案直接消费现役消息投影的文本正文，不再解码旧正文包装；回执记录 MessageId，按确切
+画布绑定 Session 的 `message/completed` correlation 校验，不能把它当作 EventId。
+画布的模型选择、未确认输入及幂等 key 仍由原草稿合同保存，已提交历史继续从 Session 读取。
+尚无助手正文的失败、停止或待输入回合，从原 Turn 终态派生画布展示及稳定消息身份；
+不为填补展示追加助手消息事实，也不把失败回合当作已完成提案。
+
 | 数据 | 所有者与用途 |
 | --- | --- |
 | `agent_sessions` 和 binding transitions | Session 身份、冻结的 Agent Revision 与 Snapshot、资源及明确的 Agent 切换边界 |
@@ -1144,6 +1152,10 @@ Agent 不展示这些工具，连接指南正文按需读取。提前展示不�
 尚未准入输入的 Attempt 创建会话，使用现役删除生命周期中的专用 Store 准入：在与输入、link 共用的 SQLite writer 内证明原 owner、Attempt、opening key、领域持久终局／替代裁决，并且只存在原 opening、generation-zero activation 与可选 ready 的确切身份和因果链。任何历史 link、输入、Turn、Effect 或后续事件都会保留会话。仍由新 owner 准备的 Queued 预留等待原领域裁决，不能因旧调用方失去 lease 而删除。落围栏后，原生命周期 owner 在最终 purge 之前完成确切 warm Runtime／进程资源、托管工作区和 IDMM 清理；Busy、调用方退出均保留此责任。重启从原 Attempt／opening 发现围栏前候选，围栏后复用 `deleting` 恢复，不另建账本。
 
 重构采用同库 Agent 数据 clean cut：旧 Agent Session、消息、日志、Execution、Preset 与绑定不迁移、不展示、不兼容读取；非 Agent 配置按它们的 owner 和明确的数据切换合同保留。清理代码与文件不能直接操作开发者或用户正在使用的数据目录。
+
+Agent clean cut 同时清除 Session 专属 IDMM 偏好、知识挂载及其关联明细，以及画布中的消息、
+待提交 Turn 和生成任务引用。画布几何、聊天标题、模型选择和当前聊天槽位保留；原业务需求的
+已结算状态与备注保留，只有失去执行来源的活动工作转入待核验，不改写已完成或已取消的结果。
 
 本次破坏性版本升级由应用启动的数据集协调器负责：可读但不属于当前 canonical migration chain 的历史数据库（包括保留 v3 身份表的 87 条旧迁移库）整体退出活动数据集，数据库及产品托管的旁路存储按受锁保护、可恢复的计划重建；不导入任何旧行，也不保留旧库里的模型或其他配置。旧文件隔离到 `retired-datasets`，不会被新版本读取。此流程不受之前一次性 legacy retirement 标记阻断，新的 installation owner 与 storage generation 在全服务初始化成功后才完成提交；正常二次启动保留新数据。数据库读取失败及现役 schema/data 损坏仍拒绝启动并保留原数据；迁移条数更多不代表应用版本较新，不能用它阻断 0.8.0/0.8.1 的破坏性升级。独立数据库初始化及备份恢复保持严格校验，不继承启动重建权限。
 

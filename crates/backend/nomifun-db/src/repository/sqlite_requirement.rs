@@ -300,20 +300,6 @@ impl IRequirementRepository for SqliteRequirementRepository {
         params: &RequirementRowUpdate,
     ) -> Result<RequirementRow, DbError> {
         let requirement_id = parse_requirement_id(requirement_id)?;
-        if params.status.is_some()
-            || params.owner_conversation_id.is_some()
-            || params.owner_terminal_id.is_some()
-            || params.active_turn_started_at.is_some()
-            || params.lease_expires_at.is_some()
-            || params.started_at.is_some()
-            || params.completed_at.is_some()
-            || params.attempt_count.is_some()
-        {
-            return Err(DbError::Conflict(
-                "generic Requirement update cannot mutate execution authority fields; use an exact repository transition"
-                    .into(),
-            ));
-        }
         let mut set_parts: Vec<String> = Vec::new();
         let mut binds: Vec<BindValue> = Vec::new();
 
@@ -333,14 +319,6 @@ impl IRequirementRepository for SqliteRequirementRepository {
                 }
             };
         }
-        macro_rules! push_opt_i64 {
-            ($field:ident) => {
-                if let Some(ref v) = params.$field {
-                    set_parts.push(concat!(stringify!($field), " = ?").to_string());
-                    binds.push(BindValue::OptI64(*v));
-                }
-            };
-        }
         macro_rules! push_i64 {
             ($field:ident) => {
                 if let Some(v) = params.$field {
@@ -355,16 +333,8 @@ impl IRequirementRepository for SqliteRequirementRepository {
         push_str!(tag);
         push_str!(order_key);
         push_str!(sort_seq);
-        push_str!(status);
         push_i64!(priority);
         push_opt_str!(completion_note);
-        push_opt_str!(owner_conversation_id);
-        push_opt_str!(owner_terminal_id);
-        push_opt_i64!(active_turn_started_at);
-        push_opt_i64!(lease_expires_at);
-        push_opt_i64!(started_at);
-        push_opt_i64!(completed_at);
-        push_i64!(attempt_count);
         push_str!(extra);
 
         if set_parts.is_empty() {
@@ -977,12 +947,6 @@ impl IRequirementRepository for SqliteRequirementRepository {
                      THEN COALESCE(completion_note, ?1) ELSE completion_note END, \
                  lease_expires_at=CASE WHEN status='in_progress' \
                      THEN NULL ELSE lease_expires_at END, \
-                 owner_conversation_id=CASE \
-                     WHEN status IN ('in_progress', 'needs_review') \
-                     THEN owner_conversation_id ELSE NULL END, \
-                 owner_terminal_id=CASE \
-                     WHEN status IN ('in_progress', 'needs_review') \
-                     THEN owner_terminal_id ELSE NULL END, \
                  updated_at=?2 \
              WHERE owner_conversation_id IS ?3 AND owner_terminal_id IS ?4 \
              RETURNING *",
@@ -2190,6 +2154,121 @@ mod tests {
         );
         assert_eq!(parked.active_turn_started_at, claim.active_turn_started_at);
         assert!(parked.lease_expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn owner_retirement_preserves_claim_sources_and_manual_verdicts_remain_valid() {
+        use crate::{ITerminalRepository, SqliteTerminalRepository};
+
+        for retirement in ["conversation", "terminal", "all_terminals"] {
+            let (repo, db, conversation_id, terminal_id) = setup().await;
+            let (conversation_owner, terminal_owner) = if retirement == "conversation" {
+                (Some(conversation_id.as_str()), None)
+            } else {
+                (None, Some(terminal_id.as_str()))
+            };
+            let mut claims = Vec::new();
+            for (index, status) in [
+                "done", "failed", "cancelled", "needs_review", "needs_review", "needs_review",
+                "in_progress",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let tag = format!("retirement-{index}");
+                repo.insert(&make_row(&tag, "1")).await.unwrap();
+                let claim = repo
+                    .claim_next_for_runner(&tag, conversation_owner, terminal_owner, 60_000, 100)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .row;
+                if status != "in_progress" {
+                    let note = Some(format!("original {status}"));
+                    let resolution = match status {
+                        "done" => RequirementClaimResolution::Done { completion_note: note },
+                        "failed" => RequirementClaimResolution::Failed { completion_note: note },
+                        "cancelled" => {
+                            RequirementClaimResolution::Cancelled { completion_note: note }
+                        }
+                        _ => RequirementClaimResolution::NeedsReview { completion_note: note },
+                    };
+                    repo.resolve_claim_exact(
+                        &claim.requirement_id,
+                        claim.claim_generation,
+                        claim.claim_token.as_deref().unwrap(),
+                        conversation_owner,
+                        terminal_owner,
+                        &resolution,
+                        200,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                }
+                claims.push((claim, status));
+            }
+
+            if retirement == "conversation" {
+                repo.detach_owner_for_session(conversation_owner, None, "owner retired", 300)
+                    .await
+                    .unwrap();
+                // The fixture Session has no runtime/content. Exercise the
+                // durable post-retirement contract after its owner row is gone.
+                sqlx::query("DELETE FROM agent_sessions WHERE agent_session_id = ?")
+                    .bind(&conversation_id)
+                    .execute(db.pool())
+                    .await
+                    .unwrap();
+            } else {
+                let terminals = SqliteTerminalRepository::new(db.pool().clone());
+                if retirement == "all_terminals" {
+                    terminals.delete_all().await.unwrap();
+                } else {
+                    terminals.delete(&terminal_id).await.unwrap();
+                }
+            }
+
+            for (index, (claim, previous_status)) in claims.into_iter().enumerate() {
+                let retained = repo
+                    .get_by_requirement_id(&claim.requirement_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(retained.owner_conversation_id, claim.owner_conversation_id);
+                assert_eq!(retained.owner_terminal_id, claim.owner_terminal_id);
+                assert_eq!(retained.claim_generation, claim.claim_generation);
+                assert_eq!(retained.claim_token, claim.claim_token);
+                assert_eq!(
+                    retained.status,
+                    if previous_status == "in_progress" { "needs_review" } else { previous_status }
+                );
+                if previous_status != "in_progress" {
+                    assert_eq!(retained.completion_note, Some(format!("original {previous_status}")));
+                }
+                if retained.status == "needs_review" {
+                    let verdict = ["done", "failed", "cancelled"][index % 3];
+                    let reviewed = repo
+                        .transition_status_if_current(
+                            &claim.requirement_id,
+                            "needs_review",
+                            verdict,
+                            true,
+                            Some("manually reviewed"),
+                            false,
+                            verdict == "done",
+                            400,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(reviewed.owner_conversation_id, claim.owner_conversation_id);
+                    assert_eq!(reviewed.owner_terminal_id, claim.owner_terminal_id);
+                    assert_eq!(reviewed.claim_token, claim.claim_token);
+                }
+            }
+            crate::validate_id_data_contract(db.pool()).await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -244,6 +244,17 @@ application transaction policy, never a SQLite cascade or trigger. Bulk
 restore/import is followed by a complete orphan audit. Business code must not
 bypass this boundary and write logical-reference columns directly.
 
+A MessageId identifies a message; an EventId identifies one event. Content parts and
+completion share a message correlation without sharing its EventId. Canvas proposal
+receipts resolve the completed message in the exact bound Session, without a global
+correlation uniqueness constraint or a mirrored EventId.
+
+Requirement owner fields retain the source of the last accepted claim through review
+and terminal states. A normally retired Session or terminal may be absent; this
+historical reference grants no execution authority. Existing claim admission validates
+live owners in its write transaction, and verdict acknowledgement still compares the
+original generation, token and owner. Explicit requeue clears the previous capability.
+
 ## Natural keys, external IDs, and tokens
 
 Natural keys such as skill names, extension slugs, model names, URLs, locales,

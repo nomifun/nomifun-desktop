@@ -394,7 +394,6 @@ impl RequirementService {
             title: req.title,
             content: req.content,
             tag: req.tag,
-            status: None,
             completion_note: if requested_status.is_none() {
                 requested_note.clone().map(Some)
             } else {
@@ -1394,23 +1393,16 @@ impl RequirementService {
 
     /// Reconcile every Requirement bound to a now-deleted session.
     ///
-    /// The owner columns intentionally have no cross-table FK, so a deleted
-    /// conversation/terminal does not cascade-clear them. Without this hook a requirement claimed by a
-    /// since-deleted session would keep a dangling owner and, if it was
-    /// `in_progress`, sit orphaned until the lease sweeper happened to run.
-    ///
-    /// Inactive rows are detached. An `in_progress` or already parked
-    /// `needs_review` row retains its typed owner as durable evidence and is
+    /// The owner columns identify the last accepted claim, so they remain
+    /// readable after the source Session retires. An `in_progress` row is
     /// parked in `needs_review`, preserving its capability, claim generation
     /// and effects-start timestamp: deletion cannot prove that the prior
     /// model/PTY turn had not already crossed its irreversible boundary. It
     /// must never make that work claimable again.
     ///
-    /// CALL SITE (Phase 3/4 wiring): invoke from the conversations + terminal
-    /// deletion paths (`nomifun-conversation` / `nomifun-terminal` delete) with
-    /// the deleted session id AND its domain. Exposed here so the deletion path
-    /// can call it without the DB layer (the FK that would have cascaded does
-    /// not exist).
+    /// Canonical Session and terminal deletion pass the exact retired identity
+    /// and domain here. Settled verdicts retain their original claim source so
+    /// a lost completion ACK can still be confirmed without executing again.
     ///
     /// SECURITY (spec §2.2): the query is scoped to the owner column for the
     /// requested domain. Clearing a conversation can never release terminal
@@ -1709,6 +1701,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resolved.status, RequirementStatus::Done);
+        service
+            .clear_owner_for_session(&session_id, AutoWorkTargetKind::Conversation)
+            .await
+            .unwrap();
         assert!(
             service
                 .confirm_claim_verdict_exact(
@@ -1721,6 +1717,19 @@ mod tests {
                 )
                 .await
                 .unwrap()
+        );
+        assert!(
+            !service
+                .verify_active_claim_exact(
+                    &requirement.requirement_id,
+                    claim.claim_generation,
+                    &claim.claim_token,
+                    Some(&session_id),
+                    None,
+                )
+                .await
+                .unwrap(),
+            "retained source identity confirms the old verdict without granting execution"
         );
         assert!(
             service

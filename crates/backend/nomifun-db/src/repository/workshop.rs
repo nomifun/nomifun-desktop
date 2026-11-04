@@ -1,3 +1,5 @@
+use nomifun_common::{CreativeStudioProjectId, MessageId, UserId};
+
 use crate::error::DbError;
 use crate::models::{
     CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow, CreativeStudioTemplateRow,
@@ -9,12 +11,12 @@ use crate::models::{
 /// identity: a response-loss replay remains valid after the project advances.
 #[derive(Debug)]
 pub struct ApplyCreativeAgentProposalParams<'a> {
-    pub owner_id: &'a str,
-    pub project_id: &'a str,
-    pub assistant_message_id: &'a str,
-    /// Exact raw `messages.content` JSON read before artifact parsing. The
-    /// atomic proof rechecks byte equality to fence concurrent message edits.
-    pub assistant_message_content_json: &'a str,
+    pub owner_id: &'a UserId,
+    pub project_id: &'a CreativeStudioProjectId,
+    pub assistant_message_id: &'a MessageId,
+    /// Exact canonical assistant text read before artifact parsing. The atomic
+    /// proof rechecks byte equality against the current message projection.
+    pub assistant_text: &'a str,
     pub ops_fingerprint: &'a str,
     pub ops_json: &'a str,
     pub results_json: &'a str,
@@ -125,9 +127,9 @@ pub trait IWorkshopRepository: Send + Sync {
     /// Read an existing durable Canvas Agent proposal receipt.
     async fn get_creative_agent_proposal_receipt(
         &self,
-        owner_id: &str,
-        project_id: &str,
-        assistant_message_id: &str,
+        owner_id: &UserId,
+        project_id: &CreativeStudioProjectId,
+        assistant_message_id: &MessageId,
     ) -> Result<Option<CreativeStudioAgentProposalReceiptRow>, DbError> {
         let _ = (owner_id, project_id, assistant_message_id);
         Err(DbError::Init(
@@ -135,13 +137,13 @@ pub trait IWorkshopRepository: Send + Sync {
         ))
     }
 
-    /// Read the exact persisted `messages.content` JSON for a completed,
-    /// visible assistant message in the owner-bound project chat session.
+    /// Read the canonical text of a completed, visible assistant message in
+    /// the owner-bound project chat session.
     async fn get_creative_agent_proposal_message_content(
         &self,
-        owner_id: &str,
-        project_id: &str,
-        assistant_message_id: &str,
+        owner_id: &UserId,
+        project_id: &CreativeStudioProjectId,
+        assistant_message_id: &MessageId,
     ) -> Result<Option<String>, DbError> {
         let _ = (owner_id, project_id, assistant_message_id);
         Err(DbError::Init(
@@ -151,7 +153,7 @@ pub trait IWorkshopRepository: Send + Sync {
 
     /// Whether this canonical user is the installation owner authorized to
     /// operate the private Creative Studio surface.
-    async fn is_creative_studio_owner(&self, owner_id: &str) -> Result<bool, DbError> {
+    async fn is_creative_studio_owner(&self, owner_id: &UserId) -> Result<bool, DbError> {
         let _ = owner_id;
         Err(DbError::Init(
             "creative studio owner validation is unavailable in this repository".into(),

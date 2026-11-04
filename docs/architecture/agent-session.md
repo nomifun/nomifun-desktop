@@ -81,6 +81,18 @@ applications remain untouched; their active resources or unresolved outcomes can
 still protect the physical directory. Ordinary creation, context, workspace, switches
 and deletion retain their contracts.
 
+Canvas chat slots use the existing domain mapping to the same canonical Session.
+Generic Session deletion rejects a Session still managed by a canvas. Canvas deletion
+removes mappings, proposal receipts and the canvas in its existing transaction while
+preserving canonical Session history. Proposals consume the current projection's text
+directly, without a legacy content envelope. A receipt's MessageId resolves to a
+`message/completed` correlation in that canvas's exact bound Session, not an EventId.
+Model choices, unacknowledged inputs and idempotency keys retain their draft contract;
+committed history continues to come from the Session.
+Failures, stops and input requests without assistant text derive their canvas
+presentation and stable message identity from the original Turn outcome. They do
+not append synthetic assistant facts or qualify as completed proposals.
+
 Creation distinguishes released templates from saved Agents. A `kind:template` selection uses the current release seed and live capability catalog for admission, resource preview and compilation. It never reads an owner's saved official Revision or inherits defaults from a hidden compilation. The model comes from the explicit selection or current installation default; template capabilities follow the released definition.
 
 Stable owner-scoped official Presets, personal Presets and immutable Revisions remain intact. A `kind:preset` selection uses that saved configuration. Workbench launch preserves its Preset identity, and selectors distinguish saved official customizations from current templates. An untouched official editor without a Revision may prepare the current baseline on first use without requiring an extra save. Saving does not overwrite the seed or existing Sessions; an invalid explicit saved configuration cannot borrow a template's permissions.
@@ -913,6 +925,12 @@ Cancellation fixes its target Turn in the canonical owner's transaction. Runtime
 Empty Attempt-created Session retirement uses a dedicated Store admission within the existing deletion lifecycle. Under the same SQLite writer as input and link admission, it proves the exact owner, original Attempt and opening key, a durable terminal or superseded domain disposition, and only the original opening, generation-zero activation and optional ready facts with their exact identities and causes. Any historical link, input, Turn, Effect or later event preserves the Session. A still-owned Queued reservation waits for its domain disposition instead of being deleted because an old caller lost its lease. Once fenced, the original lifecycle owner retires the exact warm Runtime/process resources, managed workspace and IDMM state before the final purge. Busy handling and caller loss retain cleanup responsibility; restart derives pre-fence candidates from the original Attempt/opening and resumes fenced work through `deleting`, without another ledger.
 
 The refactor uses an Agent-only clean cut in the same database. Retired Agent sessions, messages, logs, Execution, presets and bindings are neither imported nor read. Non-Agent configuration follows its explicit owner and cutover contract. Repository cleanup must not operate on a developer's or user's live data directory.
+
+The clean cut also retires Session-specific IDMM preferences, knowledge bindings
+and their membership rows, plus canvas message, pending-input and task references.
+Canvas geometry, chat titles, model choices and the active chat slot remain. Settled
+Requirement states and notes remain; only active work losing its Agent source is
+parked for review, without rewriting completed or cancelled business outcomes.
 
 The destructive upgrade is owned by the application dataset coordinator. A readable historical database outside the current canonical migration chain, including an 87-migration database with v3 identity tables, is retired together with managed side stores through a locked, resumable reset plan. No historical rows or configuration are imported. Files are isolated under `retired-datasets` and never read by the replacement dataset. A previous one-time legacy retirement does not block this upgrade. The new installation owner and storage generation are finalized only after all services bootstrap; subsequent starts preserve the new data. Failed database inspection and damage to a supported schema/data contract still fail closed. More migration rows do not identify a newer application version and must not block the destructive upgrade from 0.8.0/0.8.1. Direct database initialization and backup/restore retain strict validation without startup rebuild authority.
 

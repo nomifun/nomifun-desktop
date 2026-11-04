@@ -79,12 +79,6 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
         Ok(())
     }
 
-    async fn cleanup_soft_references(&self, provider_id: &str) -> Result<(), AppError> {
-        self.workshop
-            .clear_provider_references_under_lifecycle_write_guard(provider_id)
-            .await
-    }
-
     async fn prepare_soft_model_cleanup(
         &self,
         provider_id: &str,

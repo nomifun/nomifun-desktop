@@ -18,11 +18,12 @@ pub struct RequirementRow {
     pub status: String,
     pub priority: i64,
     pub completion_note: Option<String>,
-    /// Executing session: a conversation id OR a terminal id, discriminated by
-    /// `owner_kind`. No FK (dual-domain). Replaces the former `conversation_id`
-    /// + redundant `claimed_by` columns.
+    /// Conversation that accepted the last claim generation. Retained after
+    /// settlement and Session retirement for exact verdict confirmation.
+    /// Mutually exclusive with `owner_terminal_id`; not execution authority.
     pub owner_conversation_id: Option<String>,
-    /// `'conversation'` | `'terminal'` | NULL (when unowned).
+    /// Terminal that accepted the last claim generation, with the same
+    /// historical-source contract as `owner_conversation_id`.
     pub owner_terminal_id: Option<String>,
     pub active_turn_started_at: Option<TimestampMs>,
     pub lease_expires_at: Option<TimestampMs>,
@@ -106,7 +107,7 @@ pub struct NewRequirementRow {
     pub updated_at: TimestampMs,
 }
 
-/// Partial update for a requirement row.
+/// Partial metadata update. Claim and status changes use exact transitions.
 ///
 /// All fields are optional; `None` means "keep the current value".
 /// Nullable columns use `Option<Option<T>>`: outer = "change?", inner = "set value or NULL".
@@ -117,16 +118,8 @@ pub struct RequirementRowUpdate {
     pub tag: Option<String>,
     pub order_key: Option<String>,
     pub sort_seq: Option<String>,
-    pub status: Option<String>,
     pub priority: Option<i64>,
     pub completion_note: Option<Option<String>>,
-    pub owner_conversation_id: Option<Option<String>>,
-    pub owner_terminal_id: Option<Option<String>>,
-    pub active_turn_started_at: Option<Option<TimestampMs>>,
-    pub lease_expires_at: Option<Option<TimestampMs>>,
-    pub started_at: Option<Option<TimestampMs>>,
-    pub completed_at: Option<Option<TimestampMs>>,
-    pub attempt_count: Option<i64>,
     pub extra: Option<String>,
 }
 

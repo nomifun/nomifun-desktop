@@ -396,12 +396,12 @@ impl WorkshopService {
         &self,
         owner_id: &str,
     ) -> Result<(), AppError> {
-        UserId::parse(owner_id).map_err(|error| {
+        let owner = UserId::parse(owner_id).map_err(|error| {
             AppError::Forbidden(format!(
                 "Creative Studio owner is not canonical: {error}"
             ))
         })?;
-        if !self.repo.is_creative_studio_owner(owner_id).await? {
+        if !self.repo.is_creative_studio_owner(&owner).await? {
             return Err(AppError::Forbidden(
                 "Creative Studio is restricted to the installation owner".to_owned(),
             ));
@@ -773,29 +773,34 @@ impl WorkshopService {
         ops: Vec<CreativeAgentOp>,
         source: &str,
     ) -> Result<CreativeAgentProposalApplyResult, AppError> {
-        UserId::parse(owner_id).map_err(|error| {
+        let owner = UserId::parse(owner_id).map_err(|error| {
             AppError::Forbidden(format!(
                 "Creative Studio proposal owner is not canonical: {error}"
             ))
         })?;
+        let owner_id = &owner;
         if !self.repo.is_creative_studio_owner(owner_id).await? {
             return Err(AppError::Forbidden(
                 "Creative Studio proposals are restricted to the installation owner".to_owned(),
             ));
         }
-        validate_creative_project_id(project_id)?;
-        MessageId::parse(assistant_message_id).map_err(|error| {
+        let project = CreativeStudioProjectId::parse(project_id).map_err(|error| {
+            AppError::BadRequest(format!("creative studio project id must be a canonical UUIDv7: {error}"))
+        })?;
+        let project_id = &project;
+        let message = MessageId::parse(assistant_message_id).map_err(|error| {
             AppError::BadRequest(format!(
                 "assistantMessageId must be a canonical MessageId UUIDv7: {error}"
             ))
         })?;
+        let assistant_message_id = &message;
         let expected_revision = parse_creative_project_revision(expected_revision)?;
         let ops_json = serde_json::to_string(&ops).map_err(|error| {
             AppError::BadRequest(format!(
                 "Creative Studio operations could not be serialized: {error}"
             ))
         })?;
-        let assistant_message_content_json = self
+        let assistant_text = self
             .repo
             .get_creative_agent_proposal_message_content(
                 owner_id,
@@ -808,11 +813,6 @@ impl WorkshopService {
                     "assistantMessageId '{assistant_message_id}' is not a completed visible assistant message in this owner-bound project session"
                 ))
             })?;
-        let assistant_text = persisted_creative_agent_message_text(
-            project_id,
-            assistant_message_id,
-            &assistant_message_content_json,
-        )?;
         let artifact = parse_creative_canvas_agent_artifact(&assistant_text)
             .map_err(|error| {
                 AppError::BadRequest(format!(
@@ -825,12 +825,6 @@ impl WorkshopService {
                     CREATIVE_CANVAS_AGENT_ARTIFACT_KIND
                 ))
             })?;
-        if artifact.kind != CREATIVE_CANVAS_AGENT_ARTIFACT_KIND || artifact.summary.is_empty() {
-            return Err(AppError::Internal(
-                "validated Canvas operations artifact lost its kind or summary invariant"
-                    .to_owned(),
-            ));
-        }
         let artifact_ops_json = serde_json::to_string(&artifact.ops).map_err(|error| {
             AppError::Internal(format!(
                 "validated Canvas operations artifact could not be serialized: {error}"
@@ -855,8 +849,8 @@ impl WorkshopService {
                 assistant_message_id,
             )
             .await?;
-        let current = self.get_creative_project(project_id).await?;
-        validate_completed_assistant_message(&current.document, assistant_message_id)?;
+        let current = self.get_creative_project(project_id.as_str()).await?;
+        validate_completed_assistant_message(&current.document, assistant_message_id.as_str())?;
         if let Some(receipt) = receipt {
             if receipt.ops_fingerprint != ops_fingerprint || receipt.ops_json != ops_json {
                 return Err(AppError::Conflict(format!(
@@ -870,7 +864,7 @@ impl WorkshopService {
                     owner_id,
                     project_id,
                     assistant_message_id,
-                    assistant_message_content_json: &assistant_message_content_json,
+                    assistant_text: &assistant_text,
                     ops_fingerprint: &ops_fingerprint,
                     ops_json: &ops_json,
                     results_json: &receipt.results_json,
@@ -883,8 +877,8 @@ impl WorkshopService {
                 .await
                 .map_err(map_creative_agent_proposal_db_error)?;
             let committed_results = parse_stored_creative_agent_results(
-                project_id,
-                assistant_message_id,
+                project_id.as_str(),
+                assistant_message_id.as_str(),
                 &committed.receipt.results_json,
             )?;
             return Ok(CreativeAgentProposalApplyResult {
@@ -925,7 +919,7 @@ impl WorkshopService {
                 owner_id,
                 project_id,
                 assistant_message_id,
-                assistant_message_content_json: &assistant_message_content_json,
+                assistant_text: &assistant_text,
                 ops_fingerprint: &ops_fingerprint,
                 ops_json: &ops_json,
                 results_json: &results_json,
@@ -938,13 +932,13 @@ impl WorkshopService {
             .await
             .map_err(map_creative_agent_proposal_db_error)?;
         let committed_results = parse_stored_creative_agent_results(
-            project_id,
-            assistant_message_id,
+            project_id.as_str(),
+            assistant_message_id.as_str(),
             &committed.receipt.results_json,
         )?;
         tracing::info!(
-            project_id,
-            assistant_message_id,
+            project_id = %project_id,
+            assistant_message_id = %assistant_message_id,
             source,
             revision = committed.project.revision,
             applied_revision = committed.receipt.applied_revision,
@@ -1902,41 +1896,6 @@ impl WorkshopService {
             origin,
         })
         .await
-    }
-
-    /// Remove one Provider selection from every canonical Creative Studio
-    /// config node and template generation step. Full Provider deletion keeps
-    /// its existing coordinator contract; exact model deletion uses the atomic
-    /// plan below instead.
-    pub async fn clear_provider_references_under_lifecycle_write_guard(
-        &self,
-        provider_id: &str,
-    ) -> Result<(), AppError> {
-        let cleanup = self
-            .build_provider_model_cleanup_plan(provider_id, None)
-            .await?;
-        for project in cleanup.projects {
-            self.repo
-                .save_creative_project(
-                    &project.project_id,
-                    project.expected_revision,
-                    &project.document_json,
-                    project.node_count,
-                    project.connection_count,
-                    project.updated_at,
-                )
-                .await?;
-        }
-        for template in cleanup.templates {
-            self.repo
-                .save_creative_template(
-                    &template.template_id,
-                    template.expected_revision,
-                    &template.replacement,
-                )
-                .await?;
-        }
-        Ok(())
     }
 
     /// Build, validate, and serialize every soft-reference replacement for one
@@ -2940,28 +2899,6 @@ fn validate_completed_assistant_message(
     }
 }
 
-fn persisted_creative_agent_message_text(
-    project_id: &str,
-    assistant_message_id: &str,
-    content_json: &str,
-) -> Result<String, AppError> {
-    let content: Value = serde_json::from_str(content_json).map_err(|error| {
-        AppError::Internal(format!(
-            "persisted Creative Studio assistant message {project_id}/{assistant_message_id} has invalid content JSON: {error}"
-        ))
-    })?;
-    content
-        .as_object()
-        .and_then(|object| object.get("content"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            AppError::Internal(format!(
-                "persisted Creative Studio assistant message {project_id}/{assistant_message_id} has no text content"
-            ))
-        })
-}
-
 fn map_creative_agent_proposal_db_error(error: DbError) -> AppError {
     match error {
         DbError::Conflict(message) if message.contains("revision conflict") => {
@@ -3146,9 +3083,9 @@ mod tests {
         CreativeTemplateRunStatus,
     };
     use nomifun_common::{
-        ConversationId, CreativeStudioNodeId, MessageId, ProviderLifecycleBarrier,
+        CreativeStudioNodeId, MessageId, ProviderLifecycleBarrier,
     };
-    use nomifun_db::{IProviderRepository, SqliteProviderRepository, SqliteWorkshopRepository};
+    use nomifun_db::SqliteWorkshopRepository;
 
     async fn service() -> (Arc<WorkshopService>, tempfile::TempDir) {
         let db = nomifun_db::init_database_memory().await.unwrap();
@@ -4045,60 +3982,6 @@ mod tests {
             .await
             .unwrap();
         let session_id = nomifun_common::generate_id();
-        let user_message_id = MessageId::new().into_string();
-        let assistant_message_id = MessageId::new().into_string();
-        let provider_id = ProviderId::new().into_string();
-        let mut document = svc
-            .get_creative_project(&created.project_id)
-            .await
-            .unwrap()
-            .document;
-        document
-            .chat_sessions
-            .push(crate::creative_studio::CreativeChatSession {
-                id: session_id.clone(),
-                title: "Agent".into(),
-                message_ids: vec![user_message_id, assistant_message_id.clone()],
-                model: Some(crate::creative_studio::CreativeChatModel {
-                    provider_id,
-                    model: "chat-model".into(),
-                }),
-                pending_turn: None,
-                created_at: 1,
-                updated_at: 1,
-            });
-        document.active_chat_id = Some(session_id.clone());
-        let saved = svc
-            .save_creative_project(&created.project_id, "1", &document)
-            .await
-            .unwrap();
-        assert_eq!(saved.revision, "2");
-
-        let conversation_id = ConversationId::new().into_string();
-        nomifun_db::sqlx::query(
-            "INSERT INTO agent_sessions \
-                (agent_session_id, owner_ref_json, state, title, archived, pinned, \
-                 agent_binding_json, next_seq, created_at) \
-             VALUES (?, json_object('principal_kind', 'user', 'principal_id', ?), \
-                     'live', 'Creative Studio Agent', 0, 0, '{}', 1, 1)",
-        )
-        .bind(&conversation_id)
-        .bind(&owner_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        nomifun_db::sqlx::query(
-            "INSERT INTO creative_studio_agent_sessions \
-                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, 1, 1)",
-        )
-        .bind(&owner_id)
-        .bind(&created.project_id)
-        .bind(&session_id)
-        .bind(&conversation_id)
-        .execute(db.pool())
-        .await
-        .unwrap();
         let assistant_text = format!(
             "```json\n{}\n```",
             serde_json::json!({
@@ -4118,25 +4001,49 @@ mod tests {
                 }]
             })
         );
-        let assistant_content_json =
-            serde_json::json!({ "content": assistant_text }).to_string();
+        let (conversation_id, message_ids) = crate::test_support::completed_agent_history(
+            &db, &[assistant_text],
+        ).await;
+        let assistant_message_id = message_ids[1].clone();
+        let provider_id = ProviderId::new().into_string();
+        let mut document = svc
+            .get_creative_project(&created.project_id)
+            .await
+            .unwrap()
+            .document;
+        document
+            .chat_sessions
+            .push(crate::creative_studio::CreativeChatSession {
+                id: session_id.clone(),
+                title: "Agent".into(),
+                message_ids: message_ids.clone(),
+                model: Some(crate::creative_studio::CreativeChatModel {
+                    provider_id,
+                    model: "chat-model".into(),
+                }),
+                pending_turn: None,
+                created_at: 1,
+                updated_at: 1,
+            });
+        document.active_chat_id = Some(session_id.clone());
+        let saved = svc
+            .save_creative_project(&created.project_id, "1", &document)
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, "2");
+
         nomifun_db::sqlx::query(
-            "INSERT INTO agent_messages \
-                (session_id, projection_id, first_seq, last_seq, presentation_intent, \
-                 projection_json, semantic_digest) \
-             VALUES (?, ?, 1, 1, 'message', \
-                     json_object('correlation_id', ?, 'state', 'completed', \
-                                 'content', json(?)), ?)",
+            "INSERT INTO creative_studio_agent_sessions \
+                (owner_id, project_id, session_id, conversation_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1)",
         )
+        .bind(&owner_id)
+        .bind(&created.project_id)
+        .bind(&session_id)
         .bind(&conversation_id)
-        .bind(&assistant_message_id)
-        .bind(&assistant_message_id)
-        .bind(&assistant_content_json)
-        .bind("a".repeat(64))
         .execute(db.pool())
         .await
         .unwrap();
-
         let ops = vec![crate::creative_agent_ops::CreativeAgentOp::AddNode {
             node_type: crate::creative_studio::CreativeNodeType::Text,
             x: 10.0,
@@ -4165,6 +4072,29 @@ mod tests {
         assert!(!first.replayed);
         assert_eq!(first.applied_revision, "3");
         assert_eq!(first.project.node_count, 1);
+        nomifun_db::validate_id_data_contract(db.pool()).await.unwrap();
+        let event_identity_matches: i64 = nomifun_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_events WHERE event_id = ?",
+        ).bind(&assistant_message_id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(event_identity_matches, 0, "assistant MessageId is not an EventId");
+
+        let (_, foreign_message_ids) = crate::test_support::completed_agent_history(
+            &db, &["A different Session's answer".into()],
+        ).await;
+        let foreign_assistant = &foreign_message_ids[1];
+        for invalid_source in [&message_ids[0], foreign_assistant] {
+            nomifun_db::sqlx::query(
+                "UPDATE creative_studio_agent_proposal_receipts SET assistant_message_id = ? \
+                 WHERE project_id = ?",
+            ).bind(invalid_source).bind(&created.project_id).execute(db.pool()).await.unwrap();
+            let error = nomifun_db::validate_id_data_contract(db.pool()).await.unwrap_err();
+            assert!(error.to_string().contains("creative_studio_agent_proposal_receipts.assistant_message_id"));
+        }
+        nomifun_db::sqlx::query(
+            "UPDATE creative_studio_agent_proposal_receipts SET assistant_message_id = ? \
+             WHERE project_id = ?",
+        ).bind(&assistant_message_id).bind(&created.project_id).execute(db.pool()).await.unwrap();
+        nomifun_db::validate_id_data_contract(db.pool()).await.unwrap();
 
         let replay = svc
             .apply_creative_agent_proposal(
@@ -4229,6 +4159,25 @@ mod tests {
         let current = svc.get_creative_project(&created.project_id).await.unwrap();
         assert_eq!(current.project.revision, "3");
         assert_eq!(current.document.nodes.len(), 1);
+        let history_before: Vec<(String, Option<String>)> = nomifun_db::sqlx::query_as(
+            "SELECT event_id, inline_json FROM agent_events WHERE session_id = ? ORDER BY seq",
+        ).bind(&conversation_id).fetch_all(db.pool()).await.unwrap();
+        svc.delete_creative_project(&created.project_id).await.unwrap();
+        let remaining: (i64, i64, i64) = nomifun_db::sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM creative_studio_projects WHERE project_id = ?1), \
+                    (SELECT COUNT(*) FROM creative_studio_agent_sessions WHERE project_id = ?1), \
+                    (SELECT COUNT(*) FROM creative_studio_agent_proposal_receipts WHERE project_id = ?1)",
+        ).bind(&created.project_id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(remaining, (0, 0, 0));
+        let history_after: Vec<(String, Option<String>)> = nomifun_db::sqlx::query_as(
+            "SELECT event_id, inline_json FROM agent_events WHERE session_id = ? ORDER BY seq",
+        ).bind(&conversation_id).fetch_all(db.pool()).await.unwrap();
+        assert_eq!(history_after, history_before, "Canvas deletion preserves canonical Session history");
+        let session_state: String = nomifun_db::sqlx::query_scalar(
+            "SELECT state FROM agent_sessions WHERE agent_session_id = ?",
+        ).bind(&conversation_id).fetch_one(db.pool()).await.unwrap();
+        assert_eq!(session_state, "live");
+        nomifun_db::validate_id_data_contract(db.pool()).await.unwrap();
     }
 
     #[tokio::test]
@@ -5182,235 +5131,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_cleanup_cas_clears_only_target_canonical_pairs_and_is_idempotent() {
-        let barrier = Arc::new(ProviderLifecycleBarrier::new());
-        let (svc, _dir, db) =
-            service_with_database_and_lifecycle(Some(barrier.clone())).await;
-        let target_provider_id = "0190f5fe-7c00-7a00-8000-000000000086";
-        let other_provider_id = "0190f5fe-7c00-7a00-8000-000000000087";
-        insert_provider(&db, target_provider_id).await;
-        insert_provider(&db, other_provider_id).await;
-        insert_provider_model(&db, target_provider_id, "delete-me").await;
-        insert_provider_model(&db, other_provider_id, "keep-me").await;
-        insert_provider_model_capability(
-            &db,
-            target_provider_id,
-            "delete-me",
-            "image_generation",
-        )
-        .await;
-        insert_provider_model_capability(
-            &db,
-            other_provider_id,
-            "keep-me",
-            "image_generation",
-        )
-        .await;
-        insert_provider_model_capability(&db, target_provider_id, "delete-me", "chat").await;
-        insert_provider_model_capability(&db, other_provider_id, "keep-me", "chat").await;
-        let project = svc.create_creative_project(Some("provider cleanup".into())).await.unwrap();
-        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
-        document.nodes.push(creative_config_node(
-            "target-config",
-            Some(target_provider_id),
-            Some("delete-me"),
-        ));
-        document.nodes.push(creative_config_node(
-            "surviving-config",
-            Some(other_provider_id),
-            Some("keep-me"),
-        ));
-        document.nodes.push(creative_image_node(
-            "target-image",
-            Some(target_provider_id),
-            Some("delete-me"),
-        ));
-        document.nodes.push(creative_image_node(
-            "surviving-image",
-            Some(other_provider_id),
-            Some("keep-me"),
-        ));
-        document.nodes.push(creative_video_node(
-            "target-video",
-            Some(target_provider_id),
-            Some("delete-me"),
-        ));
-        document.nodes.push(creative_video_node(
-            "surviving-video",
-            Some(other_provider_id),
-            Some("keep-me"),
-        ));
-        document.nodes.push(creative_audio_node(
-            "target-audio",
-            Some(target_provider_id),
-            Some("delete-me"),
-        ));
-        document.nodes.push(creative_audio_node(
-            "surviving-audio",
-            Some(other_provider_id),
-            Some("keep-me"),
-        ));
-        svc.save_creative_project(&project.project_id, "1", &document)
-            .await
-            .unwrap();
-
-        let mut target_template = template_definition();
-        if let CreativeTemplateStep::GenerateImages { generation, .. } =
-            &mut target_template.steps[1]
-        {
-            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
-                provider_id: target_provider_id.into(),
-                model: "delete-me".into(),
-                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
-            });
-        }
-        let target_template = svc
-            .create_creative_template(target_template)
-            .await
-            .unwrap();
-        let mut surviving_template = template_definition();
-        if let CreativeTemplateStep::GenerateImages { generation, .. } =
-            &mut surviving_template.steps[1]
-        {
-            generation.model = Some(crate::template::CreativeTemplateImageModelBinding {
-                provider_id: other_provider_id.into(),
-                model: "keep-me".into(),
-                task: crate::template::CreativeTemplateImageTask::ImageGeneration,
-            });
-        }
-        let surviving_template = svc
-            .create_creative_template(surviving_template)
-            .await
-            .unwrap();
-        let target_planning_template = svc
-            .create_creative_template(series_template_definition(
-                target_provider_id,
-                "delete-me",
-            ))
-            .await
-            .unwrap();
-        let surviving_planning_template = svc
-            .create_creative_template(series_template_definition(
-                other_provider_id,
-                "keep-me",
-            ))
-            .await
-            .unwrap();
-
-        let _write_guard = barrier.write().await;
-        svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
-            .await
-            .unwrap();
-        let cleaned_once = svc
-            .get_creative_template(&target_template.id)
-            .await
-            .unwrap();
-        assert_eq!(cleaned_once.revision, 2);
-        assert_eq!(cleaned_once.image_model_bindings().count(), 0);
-        let cleaned_planning = svc
-            .get_creative_template(&target_planning_template.id)
-            .await
-            .unwrap();
-        assert_eq!(cleaned_planning.revision, 2);
-        assert_eq!(cleaned_planning.text_model_bindings().count(), 0);
-        svc.clear_provider_references_under_lifecycle_write_guard(target_provider_id)
-            .await
-            .unwrap();
-
-        let cleaned = svc.get_creative_project(&project.project_id).await.unwrap();
-        assert_eq!(cleaned.project.revision, "3");
-        let CreativeNodeData::Config(target) = &cleaned.document.nodes[0].data else {
-            panic!("expected target config node")
-        };
-        assert_eq!(target.provider_id, None);
-        assert_eq!(target.model, None);
-        let CreativeNodeData::Config(surviving) = &cleaned.document.nodes[1].data else {
-            panic!("expected surviving config node")
-        };
-        assert_eq!(surviving.provider_id.as_deref(), Some(other_provider_id));
-        assert_eq!(surviving.model.as_deref(), Some("keep-me"));
-        let CreativeNodeData::Image(target_image) = &cleaned.document.nodes[2].data else {
-            panic!("expected target image node")
-        };
-        let target_composer = target_image.composer.as_ref().unwrap();
-        assert_eq!(target_composer.model, None);
-        assert_eq!(target_composer.prompt, "draft");
-        assert_eq!(target_composer.aspect_ratio, "1:1");
-        assert_eq!(target_composer.count, 1);
-        let CreativeNodeData::Image(surviving_image) = &cleaned.document.nodes[3].data else {
-            panic!("expected surviving image node")
-        };
-        let surviving_image_model = surviving_image
-            .composer
-            .as_ref()
-            .and_then(|composer| composer.model.as_ref())
-            .expect("unrelated image composer model must survive provider cleanup");
-        assert_eq!(surviving_image_model.provider_id, other_provider_id);
-        assert_eq!(surviving_image_model.model, "keep-me");
-        let CreativeNodeData::Video(target_video) = &cleaned.document.nodes[4].data else {
-            panic!("expected target video node")
-        };
-        assert_eq!(target_video.composer.as_ref().unwrap().model, None);
-        let CreativeNodeData::Video(surviving_video) = &cleaned.document.nodes[5].data else {
-            panic!("expected surviving video node")
-        };
-        let surviving_video_model = surviving_video
-            .composer
-            .as_ref()
-            .and_then(|composer| composer.model.as_ref())
-            .expect("unrelated video composer model must survive provider cleanup");
-        assert_eq!(surviving_video_model.provider_id, other_provider_id);
-        assert_eq!(surviving_video_model.model, "keep-me");
-        let CreativeNodeData::Audio(target_audio) = &cleaned.document.nodes[6].data else {
-            panic!("expected target audio node")
-        };
-        let target_audio_composer = target_audio.composer.as_ref().unwrap();
-        assert_eq!(target_audio_composer.model, None);
-        assert_eq!(target_audio_composer.prompt, "literal narration");
-        assert_eq!(target_audio_composer.voice, "alloy");
-        assert_eq!(target_audio_composer.format, "mp3");
-        let CreativeNodeData::Audio(surviving_audio) = &cleaned.document.nodes[7].data else {
-            panic!("expected surviving audio node")
-        };
-        let surviving_audio_model = surviving_audio
-            .composer
-            .as_ref()
-            .and_then(|composer| composer.model.as_ref())
-            .expect("unrelated audio composer model must survive provider cleanup");
-        assert_eq!(surviving_audio_model.provider_id, other_provider_id);
-        assert_eq!(surviving_audio_model.model, "keep-me");
-
-        let cleaned_twice = svc
-            .get_creative_template(&target_template.id)
-            .await
-            .unwrap();
-        assert_eq!(cleaned_twice.revision, 2);
-        assert_eq!(cleaned_twice.image_model_bindings().count(), 0);
-        let surviving_template = svc
-            .get_creative_template(&surviving_template.id)
-            .await
-            .unwrap();
-        assert_eq!(surviving_template.revision, 1);
-        let surviving_binding = surviving_template
-            .image_model_bindings()
-            .next()
-            .expect("unrelated template binding must survive provider cleanup");
-        assert_eq!(surviving_binding.provider_id, other_provider_id);
-        assert_eq!(surviving_binding.model, "keep-me");
-        let surviving_planning_template = svc
-            .get_creative_template(&surviving_planning_template.id)
-            .await
-            .unwrap();
-        assert_eq!(surviving_planning_template.revision, 1);
-        let surviving_planning_binding = surviving_planning_template
-            .text_model_bindings()
-            .next()
-            .expect("unrelated template planning binding must survive provider cleanup");
-        assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
-        assert_eq!(surviving_planning_binding.model, "keep-me");
-    }
-
-    #[tokio::test]
     async fn exact_model_cleanup_accepts_long_saved_keys_but_rejects_empty_keys() {
         let barrier = Arc::new(ProviderLifecycleBarrier::new());
         let (svc, _dir, _db) = service_with_database_and_lifecycle(Some(barrier.clone())).await;
@@ -5731,67 +5451,6 @@ mod tests {
                 .revision,
             "2"
         );
-    }
-
-    #[tokio::test]
-    async fn canonical_save_cannot_resurrect_provider_during_deletion() {
-        let barrier = Arc::new(ProviderLifecycleBarrier::new());
-        let (svc, _dir, db) =
-            service_with_database_and_lifecycle(Some(barrier.clone())).await;
-        let provider_id = "0190f5fe-7c00-7a00-8000-000000000089";
-        insert_provider(&db, provider_id).await;
-        insert_provider_model(&db, provider_id, "image-model").await;
-        let project = svc.create_creative_project(Some("delete race".into())).await.unwrap();
-        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
-        document.nodes.push(creative_config_node(
-            "config-node",
-            Some(provider_id),
-            Some("image-model"),
-        ));
-        svc.save_creative_project(&project.project_id, "1", &document)
-            .await
-            .unwrap();
-
-        let write_guard = barrier.write().await;
-        let service = svc.clone();
-        let project_id = project.project_id.clone();
-        let blocked_document = document.clone();
-        let mut save = tokio::spawn(async move {
-            service
-                .save_creative_project(&project_id, "2", &blocked_document)
-                .await
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut save)
-                .await
-                .is_err(),
-            "canonical save must wait while Provider deletion owns the lifecycle write guard"
-        );
-
-        svc.clear_provider_references_under_lifecycle_write_guard(provider_id)
-            .await
-            .unwrap();
-        SqliteProviderRepository::new(db.pool().clone())
-            .delete(provider_id)
-            .await
-            .unwrap();
-        drop(write_guard);
-
-        let error = save.await.unwrap().unwrap_err();
-        assert!(
-            matches!(
-                error,
-                AppError::Conflict(ref message) if message.contains("missing provider-model")
-            ),
-            "save resumed with an unexpected error after Provider deletion: {error:?}"
-        );
-        let cleaned = svc.get_creative_project(&project.project_id).await.unwrap();
-        assert_eq!(cleaned.project.revision, "3");
-        let CreativeNodeData::Config(config) = &cleaned.document.nodes[0].data else {
-            panic!("expected config node")
-        };
-        assert_eq!(config.provider_id, None);
-        assert_eq!(config.model, None);
     }
 
     #[tokio::test]

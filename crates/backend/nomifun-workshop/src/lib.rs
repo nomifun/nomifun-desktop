@@ -7,6 +7,8 @@ mod fsio;
 mod imagemeta;
 mod prompt_catalog;
 mod thumbnail;
+#[cfg(test)]
+mod test_support;
 
 mod archive;
 mod canvas_agent_artifact;

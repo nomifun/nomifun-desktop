@@ -129,6 +129,11 @@ InitialInput 是准入 outbox：同 writer 核实确切 accepted＋started、稳
 
 ## 生命周期与恢复
 
+Requirement 的 owner、claim generation 与 token 标识最后一次已受理执行。普通 Session／终端
+退休保留这些原值，待核验转为完成、失败或取消后仍可确认同一结果；它们不因 owner 已退休
+而授予新执行权。新 claim 复用现有活对象准入，显式 requeue 清除旧能力，通用内容更新不再
+暴露这些执行字段。受权 Agent clean cut 可清除被退役代际的来源，但不改写已结算业务终态。
+
 `planning`、`running`、`paused`、`waiting_input` 和终态由 Engine 的状态机与 optimistic version 共同控制。Scheduler 每次派发前在事务内复核依赖、Step 版本、活动 Attempt 与重试时间；同一 Execution 只保留一个活动调度循环，同一 Session 仍串行接收 Turn。
 
 Execution 暂停只关闭新派发；已准入 Attempt 保留原 Session、Turn、活动 Link、预约和运行 owner，调度接管时也保持同一责任。暂停调度有原活 job、却没有本地完成观察者时应停车等待，不能对空通知流反复读库。暂停不冻结原生操作，不制造 review 或取消。已准入工作结算后可释放调度租约，聚合仍保持暂停，直到用户继续调度。恢复不新建已完成 Attempt，也不重放已执行效果；未回答问题继续保留。原 Turn 的安全停车与无损继续使用 Session 的 native pause、checkpoint 和明确 resume 合同，与调度暂停分别表达。

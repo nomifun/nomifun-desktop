@@ -2692,16 +2692,16 @@ async fn started_agent_session_switches_model_then_agent_in_place_with_segmented
     services.database.close().await;
 }
 
-async fn wait_knowledge_turn_terminal_and_native_idle(services:&AppServices,session_id:&str,accepted_turn:&Value) {
+async fn wait_turn_terminal_and_native_idle(services:&AppServices,session_id:&str,accepted_turn:&Value) {
     let session=nomifun_agent_contracts::AgentSessionId::from(session_id.to_owned());
     let operation=nomifun_agent_contracts::OperationId::from(accepted_turn["data"]["operation_id"]
-        .as_str().expect("the accepted Knowledge input returns its exact canonical operation").to_owned());
+        .as_str().expect("the accepted input returns its exact canonical operation").to_owned());
     let store=nomifun_agent_session::AgentSessionStore::from_pool(services.database.pool().clone()).await.unwrap();
     let settled=tokio::time::timeout(std::time::Duration::from_secs(15),async {loop {
         let receipt=store.read_turn_receipt(&session,&operation).await.unwrap();
         if receipt.terminal_event.is_some() {
             assert_eq!(receipt.status,nomifun_agent_session::TurnReceiptStatus::Completed,
-                "the exact Knowledge Turn failed before its idle boundary: {receipt:?}");
+                "the exact Turn failed before its idle boundary: {receipt:?}");
         }
         let head=store.head(&session).await.unwrap();
         let native_idle=services.agent_runtime_sessions.active_turn_generation(session_id).is_none()
@@ -2713,7 +2713,7 @@ async fn wait_knowledge_turn_terminal_and_native_idle(services:&AppServices,sess
         if receipt.terminal_event.is_some()&&head.status=="ready"&&head.active_turn_id.is_none()&&native_idle {break;}
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }}).await;
-    assert!(settled.is_ok(),"exact Knowledge Turn {operation:?} did not release its canonical/native owner: receipt={:?}, head={:?}, native_generation={:?}, runtime_status={:?}",
+    assert!(settled.is_ok(),"exact Turn {operation:?} did not release its canonical/native owner: receipt={:?}, head={:?}, native_generation={:?}, runtime_status={:?}",
         store.read_turn_receipt(&session,&operation).await.unwrap(),store.head(&session).await.unwrap(),
         services.agent_runtime_sessions.active_turn_generation(session_id),
         services.agent_runtime_sessions.get_runtime(session_id).and_then(|runtime|runtime.status()));
@@ -3349,7 +3349,7 @@ async fn canonical_session_updates_knowledge_retrieves_on_demand_and_writes_back
     .expect("automatic write-back must publish a durable Knowledge file");
     assert!(written.content.contains(WRITEBACK_MARKER));
 
-    wait_knowledge_turn_terminal_and_native_idle(&services,session_id,&turn).await;
+    wait_turn_terminal_and_native_idle(&services,session_id,&turn).await;
     let (status, disabled_after_runtime) = client.call(
         router.clone(),
         "PUT",
@@ -3397,7 +3397,7 @@ async fn canonical_session_updates_knowledge_retrieves_on_demand_and_writes_back
     })
     .await
     .expect("Knowledge-disabled reply must become durable");
-    wait_knowledge_turn_terminal_and_native_idle(&services,session_id,&disabled_turn).await;
+    wait_turn_terminal_and_native_idle(&services,session_id,&disabled_turn).await;
     let requests = model_requests.lock().unwrap();
     let disabled_request = requests.last().unwrap();
     assert!(!disabled_request.to_string().contains("nomifun_knowledge_retrieval"));
@@ -3456,7 +3456,7 @@ async fn canonical_session_updates_knowledge_retrieves_on_demand_and_writes_back
     })
     .await
     .expect("read-only Knowledge reply must become durable");
-    wait_knowledge_turn_terminal_and_native_idle(&services,session_id,&read_only_turn).await;
+    wait_turn_terminal_and_native_idle(&services,session_id,&read_only_turn).await;
     let requests = model_requests.lock().unwrap();
     let read_only_request = requests.last().unwrap();
     assert!(!read_only_request.to_string().contains("nomifun_knowledge_retrieval"));
@@ -4345,6 +4345,152 @@ async fn http_execution_freezes_the_lead_session_snapshot_and_projects_its_link(
 }
 
 #[tokio::test]
+async fn canvas_delete_detaches_its_sessions_and_database_reopens_without_retiring_history() {
+    const TRUST: &str = "canvas-delete-lifecycle";
+    let client = LocalJsonClient(TRUST);
+    let root = tempfile::tempdir().unwrap();
+    let fixture_root = nomifun_common::paths::canonicalize_simplified(root.path()).unwrap();
+    let config = AppConfig {
+        data_dir: fixture_root.join("data"),
+        work_dir: fixture_root.join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken,
+        local_trust_secret: Some(TRUST.into()),
+        ..Default::default()
+    };
+    fs::create_dir_all(&config.data_dir).unwrap();
+    fs::create_dir_all(&config.work_dir).unwrap();
+    let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let services = AppServices::from_config(database, &config).await.unwrap();
+    let router = create_router(&services).await;
+    let provider = create_chat_provider(&router, TRUST, "Canvas lifecycle", "test-chat", 1).await;
+    let provider_id = provider["provider_id"].as_str().unwrap();
+    let (status, created) = client.call(router.clone(), "POST", "/api/creative-studio/canvases", json!({
+        "title": "Canvas lifecycle",
+        "agentKickoff": {"prompt": "Draft a canvas", "model": {"providerId": provider_id, "model": "test-chat"}}
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let canvas_id = created["data"]["canvas"]["canvasId"].as_str().unwrap();
+    let document: String = sqlx::query_scalar(
+        "SELECT document_json FROM creative_studio_projects WHERE project_id = ?",
+    ).bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+    let document: Value = serde_json::from_str(&document).unwrap();
+    let chat = &document["chatSessions"][0];
+    let (status, resolved) = client.call(router.clone(), "POST", "/api/creative-studio/canvas-agent-sessions/resolve", json!({
+        "canvas_id": canvas_id, "session_id": chat["id"],
+        "model": {"provider_id": provider_id, "model": "test-chat"},
+        "pending_turn_idempotency_key": chat["pendingTurn"]["idempotencyKey"]
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{resolved}");
+    let session_id = resolved["data"]["binding"]["conversation_id"].as_str().unwrap();
+    let before: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT event_id, inline_json FROM agent_events WHERE session_id = ? ORDER BY seq",
+    ).bind(session_id).fetch_all(services.database.pool()).await.unwrap();
+    assert!(!before.is_empty());
+
+    let (status, rejected) = client.call_with_idempotency(router.clone(), "DELETE",
+        &format!("/api/agent-sessions/{session_id}"), Value::Null, "canvas-session-delete").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert!(rejected.to_string().contains("CANVAS_SESSION_MANAGED_BY_CANVAS"));
+    let (status, deleted) = client.call(router.clone(), "DELETE",
+        &format!("/api/creative-studio/canvases/{canvas_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
+    nomifun_db::validate_id_data_contract(services.database.pool()).await.unwrap();
+    let after: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT event_id, inline_json FROM agent_events WHERE session_id = ? ORDER BY seq",
+    ).bind(session_id).fetch_all(services.database.pool()).await.unwrap();
+    assert_eq!(after, before, "deleting a canvas preserves canonical Session history");
+    let bindings: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM creative_studio_agent_sessions WHERE project_id = ?",
+    ).bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(bindings, 0);
+    drop(router);
+    services.cleanup_after_startup_failure(anyhow::anyhow!("canvas lifecycle fixture finished")).await;
+    services.database.close().await;
+    drop(services);
+
+    let reopened = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    nomifun_agent_session::AgentSessionStore::from_pool(reopened.pool().clone()).await.unwrap();
+    let state: String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id = ?")
+        .bind(session_id).fetch_one(reopened.pool()).await.unwrap();
+    assert_eq!(state, "live");
+    reopened.close().await;
+}
+
+#[tokio::test]
+async fn canvas_native_proposal_applies_with_message_identity_and_passes_integrity_audit() {
+    const TRUST: &str = "canvas-native-proposal";
+    let client = LocalJsonClient(TRUST);
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = client.call(router.clone(), "POST", "/api/providers", json!({
+        "platform":"openai", "name":"Canvas native proposal", "base_url":format!("{}/v1", upstream.uri()),
+        "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
+        "initial_model":{"model":"test-chat", "enabled":true, "capabilities":[{
+            "task":"chat", "traits":[], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
+        }]}
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, created) = client.call(router.clone(), "POST", "/api/creative-studio/canvases", json!({
+        "title":"Native proposal", "agentKickoff":{"prompt":"Propose a text node", "model":{"providerId":provider_id,"model":"test-chat"}}
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let canvas_id = created["data"]["canvas"]["canvasId"].as_str().unwrap();
+    let (status, detail) = client.call(router.clone(), "GET", &format!("/api/creative-studio/canvases/{canvas_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let chat = &detail["data"]["document"]["chatSessions"][0];
+    let resolve_request = json!({
+        "canvas_id":canvas_id, "session_id":chat["id"], "model":{"provider_id":provider_id,"model":"test-chat"},
+        "pending_turn_idempotency_key":chat["pendingTurn"]["idempotencyKey"]
+    });
+    let (status, resolved) = client.call(router.clone(), "POST", "/api/creative-studio/canvas-agent-sessions/resolve", resolve_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{resolved}");
+    let session_id = resolved["data"]["binding"]["conversation_id"].as_str().unwrap();
+    let ops = json!([{"type":"add_node","node_type":"text","x":10,"y":20,
+        "data":{"text":"Native text","format":"plain","fontSize":16,"textAlign":"left"}}]);
+    let proposal = format!("```json\n{}\n```", json!({
+        "kind":"nomifun.creative-studio.canvas-ops/v1", "summary":"Add one text node", "ops":ops
+    }));
+    let stream = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"id":"canvas","choices":[{"index":0,"delta":{"content":proposal},"finish_reason":null}]}),
+        json!({"id":"canvas","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}));
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(wiremock::ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(stream))
+        .mount(&upstream).await;
+    let (status, turn) = client.call(router.clone(), "POST", &format!("/api/agent-sessions/{session_id}/turns"), json!({
+        "idempotency_key":chat["pendingTurn"]["idempotencyKey"], "input":{"content":"Propose a text node", "inject_skills":["creative-studio-canvas"]}
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    wait_turn_terminal_and_native_idle(&services, session_id, &turn).await;
+    let (status, restored) = client.call(router.clone(), "POST", "/api/creative-studio/canvas-agent-sessions/resolve", resolve_request).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    let history = restored["data"]["history"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    let assistant = history[1]["id"].as_str().unwrap();
+    let event_id: String = sqlx::query_scalar(
+        "SELECT event_id FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='message/completed'",
+    ).bind(session_id).bind(assistant).fetch_one(services.database.pool()).await.unwrap();
+    assert_ne!(event_id, assistant);
+    let mut document = detail["data"]["document"].clone();
+    document["chatSessions"][0]["messageIds"] = Value::Array(history.iter().map(|message| message["id"].clone()).collect());
+    document["chatSessions"][0]["pendingTurn"] = Value::Null;
+    let (status, saved) = client.call(router.clone(), "PUT", &format!("/api/creative-studio/canvases/{canvas_id}/document"),
+        json!({"expectedRevision":detail["data"]["canvas"]["revision"],"document":document})).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let apply = json!({"assistantMessageId":assistant,"expectedRevision":saved["data"]["canvas"]["revision"],"ops":ops});
+    let (status, applied) = client.call(router.clone(), "POST", &format!("/api/creative-studio/canvases/{canvas_id}/agent-ops"), apply.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["data"]["replayed"], false);
+    let (status, replay) = client.call(router.clone(), "POST", &format!("/api/creative-studio/canvases/{canvas_id}/agent-ops"), apply).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["data"]["replayed"], true);
+    nomifun_db::validate_id_data_contract(services.database.pool()).await.unwrap();
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    services.cleanup_after_startup_failure(anyhow::anyhow!("native canvas proposal fixture finished")).await;
+}
+
+#[tokio::test]
 async fn creative_studio_entry_uses_its_official_agent() {
     let client = LocalJsonClient(TRUST);
     const TRUST: &str = "creative-product-agent";
@@ -4441,7 +4587,10 @@ async fn creative_studio_entry_uses_its_official_agent() {
         assert_eq!(terminal.0, expected_state, "{terminal:?}");
         if expected_state == "failed" {
             let error: Value = serde_json::from_str(terminal.1.as_deref().unwrap()).unwrap();
-            assert_eq!(error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
+            assert_eq!(error["error"]["code"], "NOMIFUN_RUNTIME_FAILED", "{error}");
+            assert_eq!(error["error"]["failureStage"], "turn_execution");
+            assert_eq!(error["model_steps"], 0);
+            assert_eq!(error["error"]["detail"], "Conflict: Agent Skills: requested Skill is not in this Agent Snapshot");
             assert_eq!(error["error"]["ownership"], "nomifun");
             assert_eq!(error["error"]["retryable"], false);
             let (status, restored) = client.call(router.clone(), "POST",
@@ -4461,12 +4610,8 @@ async fn creative_studio_entry_uses_its_official_agent() {
                 "SELECT source_message_id FROM agent_turns WHERE session_id = ? AND operation_id = ?")
                 .bind(conversation_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
             assert_eq!(history[2]["id"], source);
-            let assistant: String = sqlx::query_scalar(
-                "SELECT json_extract(projection_json, '$.correlation_id') FROM agent_messages \
-                 WHERE session_id = ? AND presentation_intent = 'message' \
-                   AND json_extract(projection_json, '$.state') = 'completed' ORDER BY first_seq DESC LIMIT 1")
-                .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
-            assert_eq!(history[3]["id"], assistant, "reload must preserve the original assistant identity");
+            let assistant = nomifun_agent_contracts::canonical_assistant_step_message_id(&source, 1).unwrap();
+            assert_eq!(history[3]["id"], assistant, "failure presentation keeps the exact accepted input's assistant identity");
         }
     }
     let requests = upstream.received_requests().await.unwrap();

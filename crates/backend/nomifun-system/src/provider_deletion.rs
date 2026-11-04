@@ -16,18 +16,11 @@ pub trait ProviderDeletionCoordinator: Send + Sync {
 
     /// Clear side-store selections while the lifecycle write guard is held.
     /// Immutable Session/Turn/history records are never cleanup targets.
-    async fn cleanup_external_references(&self, provider_id: &str, model: Option<&str>) -> Result<(), AppError> {
-        if model.is_none() { self.cleanup_soft_references(provider_id).await?; }
+    async fn cleanup_external_references(&self, _provider_id: &str, _model: Option<&str>) -> Result<(), AppError> {
         Ok(())
     }
 
     fn catalog_deleted(&self, _provider_id: &str, _model: Option<&str>) {}
-
-    /// Compatibility hook for external configuration owners.
-    /// The service holds the lifecycle write guard while this hook runs.
-    async fn cleanup_soft_references(&self, _provider_id: &str) -> Result<(), AppError> {
-        Ok(())
-    }
 
     /// Build validated soft-reference replacements for one exact
     /// provider/model pair. The model repository applies this plan together

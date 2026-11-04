@@ -153,6 +153,14 @@ pub(crate) async fn reset_agent_data_in_transaction(
     } else {
         0
     };
+    let removed_session_preferences = if existing_tables.contains("client_preferences") {
+        sqlx::query("DELETE FROM client_preferences WHERE key GLOB 'agent_session.idmm.*'")
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+    } else {
+        0
+    };
     if existing_tables.contains("requirement_pre_effect_abandon_guards") {
         sqlx::query("DELETE FROM requirement_pre_effect_abandon_guards")
             .execute(&mut **tx)
@@ -160,8 +168,11 @@ pub(crate) async fn reset_agent_data_in_transaction(
     }
     let requirements_released = if existing_tables.contains("requirements") {
         sqlx::query(
-            "UPDATE requirements SET status = 'needs_review', \
-                completion_note = 'Agent history was cleared; review before retrying.', \
+            "UPDATE requirements SET \
+                status = CASE WHEN status = 'in_progress' THEN 'needs_review' ELSE status END, \
+                completion_note = CASE WHEN status = 'in_progress' \
+                    THEN COALESCE(NULLIF(completion_note, ''), 'Agent history was cleared; review before retrying.') \
+                    ELSE completion_note END, \
                 owner_conversation_id = NULL, active_turn_started_at = NULL, \
                 lease_expires_at = NULL, claim_token = NULL \
              WHERE owner_conversation_id IS NOT NULL",
@@ -207,10 +218,44 @@ pub(crate) async fn reset_agent_data_in_transaction(
             .execute(&mut **tx).await?;
     }
     let knowledge_session_bindings = if existing_tables.contains("knowledge_bindings") {
+        sqlx::query(
+            "DELETE FROM knowledge_binding_bases WHERE knowledge_binding_id IN (\
+                SELECT knowledge_binding_id FROM knowledge_bindings WHERE target_kind = 'conversation'\
+             )",
+        )
+        .execute(&mut **tx)
+        .await?;
         sqlx::query("DELETE FROM knowledge_bindings WHERE target_kind = 'conversation'")
             .execute(&mut **tx)
             .await?
             .rows_affected()
+    } else {
+        0
+    };
+    // Canvas geometry, chat titles and model choices survive an Agent clean
+    // cut. Message and pending-work references cannot outlive the Session,
+    // proposal and creation-task rows retired below.
+    let canvas_agent_projections = if existing_tables.contains("creative_studio_projects") {
+        sqlx::query(
+            "UPDATE creative_studio_projects SET document_json = json_set(\
+                document_json, '$.chatSessions', json((\
+                    SELECT json_group_array(json_set(chat.value, \
+                        '$.messageIds', json('[]'), '$.pendingTurn', NULL)) \
+                    FROM json_each(document_json, '$.chatSessions') chat\
+                )), \
+                '$.pendingTaskIds', json('[]')), revision = revision + 1, \
+                updated_at = MAX(updated_at, ?) \
+             WHERE EXISTS (\
+                    SELECT 1 FROM json_each(document_json, '$.chatSessions') chat \
+                    WHERE COALESCE(json_array_length(chat.value, '$.messageIds'), 0) > 0 \
+                       OR json_extract(chat.value, '$.pendingTurn') IS NOT NULL\
+                ) \
+                OR COALESCE(json_array_length(document_json, '$.pendingTaskIds'), 0) > 0",
+        )
+        .bind(nomifun_common::now_ms())
+        .execute(&mut **tx)
+        .await?
+        .rows_affected()
     } else {
         0
     };
@@ -219,6 +264,10 @@ pub(crate) async fn reset_agent_data_in_transaction(
     deleted_rows.insert(
         "client_preferences.agent_selections".to_owned(),
         removed_agent_selections,
+    );
+    deleted_rows.insert(
+        "client_preferences.agent_session_rows".to_owned(),
+        removed_session_preferences,
     );
     deleted_rows.insert(
         "requirements.agent_claims_released".to_owned(),
@@ -235,6 +284,10 @@ pub(crate) async fn reset_agent_data_in_transaction(
     deleted_rows.insert(
         "knowledge_bindings.session_rows".to_owned(),
         knowledge_session_bindings,
+    );
+    deleted_rows.insert(
+        "creative_studio_projects.agent_projections_cleared".to_owned(),
+        canvas_agent_projections,
     );
     for table in SESSION_BOUND_RESET_ORDER {
         if !existing_tables.contains(*table) {
@@ -295,7 +348,8 @@ async fn table_counts(
     let mut counts = BTreeMap::new();
     for table in tables {
         let sql = if table == "client_preferences" {
-            "SELECT COUNT(*) FROM client_preferences WHERE key NOT IN (?,?)".to_owned()
+            "SELECT COUNT(*) FROM client_preferences \
+             WHERE key NOT IN (?,?) AND key NOT GLOB 'agent_session.idmm.*'".to_owned()
         } else {
             format!("SELECT COUNT(*) FROM {table}")
         };

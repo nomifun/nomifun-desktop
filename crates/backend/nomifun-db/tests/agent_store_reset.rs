@@ -156,3 +156,128 @@ async fn reset_preserves_cron_definitions_and_author_model_but_retires_agent_aut
         "a retained non-Agent model choice is not runtime data to reset repeatedly"
     );
 }
+
+#[tokio::test]
+async fn reset_retires_session_references_and_preserves_business_state_and_configuration() {
+    use nomifun_common::{ConversationId, CreativeStudioProjectId, KnowledgeBaseId, KnowledgeBindingId, MessageId, ProviderId, RequirementId, TerminalId};
+    use serde_json::{Value, json};
+
+    let db = init_database_memory().await.unwrap();
+    let pool = db.pool();
+    let owner = nomifun_db::installation_owner_id(pool).await.unwrap();
+    let session = ConversationId::new().into_string();
+    let terminal = TerminalId::new().into_string();
+    let base = KnowledgeBaseId::new().into_string();
+    let session_binding = KnowledgeBindingId::new().into_string();
+    let workpath_binding = KnowledgeBindingId::new().into_string();
+    let canvas = CreativeStudioProjectId::new().into_string();
+    let provider = ProviderId::new().into_string();
+    let chat = ConversationId::new().into_string();
+    let pending_chat = ConversationId::new().into_string();
+    sqlx::query("INSERT INTO agent_sessions(agent_session_id,owner_ref_json,state,title,archived,pinned,agent_binding_json,next_seq,created_at) VALUES(?,'{}','live','Reset source',0,0,'{}',1,1)")
+        .bind(&session).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO terminal_sessions(terminal_id,name,cwd,command,user_id,created_at,updated_at) VALUES(?,'Retained terminal','/tmp','shell',?,1,1)")
+        .bind(&terminal).bind(&owner).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO providers(provider_id,platform,name,base_url,auth_scheme,credentials_encrypted,created_at,updated_at) VALUES(?,'openai','Retained canvas model','https://example.invalid','bearer','retained credential',1,1)")
+        .bind(&provider).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO knowledge_bases(knowledge_base_id,name,root_path,created_at,updated_at) VALUES(?,'Retained knowledge','/tmp/retained-knowledge',1,1)")
+        .bind(&base).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO knowledge_bindings(knowledge_binding_id,target_kind,target_conversation_id,enabled,updated_at) VALUES(?,'conversation',?,1,1)")
+        .bind(&session_binding).bind(&session).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO knowledge_bindings(knowledge_binding_id,target_kind,target_workpath,enabled,updated_at) VALUES(?,'workpath','/tmp/retained-workpath',1,1)")
+        .bind(&workpath_binding).execute(pool).await.unwrap();
+    for binding in [&session_binding, &workpath_binding] {
+        sqlx::query("INSERT INTO knowledge_binding_bases(knowledge_binding_id,knowledge_base_id,position) VALUES(?,?,0)")
+            .bind(binding).bind(&base).execute(pool).await.unwrap();
+    }
+    for (key, value) in [
+        (format!("agent_session.idmm.{session}"), json!({"session_id":session,"config":{"enabled":true}}).to_string()),
+        ("guid.defaultAgentSelection".into(), "retired selection".into()),
+        ("retained-user-setting".into(), "exact retained value".into()),
+    ] {
+        sqlx::query("INSERT INTO client_preferences(key,value,updated_at) VALUES(?,?,1)")
+            .bind(key).bind(value).execute(pool).await.unwrap();
+    }
+
+    let mut requirements = Vec::new();
+    for (index, status) in ["pending", "done", "failed", "cancelled", "needs_review", "in_progress"]
+        .into_iter().enumerate()
+    {
+        let id = RequirementId::new().into_string();
+        let note = format!("original {status} note");
+        sqlx::query("INSERT INTO requirements(requirement_id,display_no,title,tag,completion_note,created_at,updated_at) VALUES(?,?,'Retained business task','reset',?,1,1)")
+            .bind(&id).bind(index as i64 + 1).bind(&note).execute(pool).await.unwrap();
+        if status != "pending" {
+            sqlx::query("UPDATE requirements SET status='in_progress',owner_conversation_id=?,active_turn_started_at=10,lease_expires_at=100,started_at=10,attempt_count=1,claim_generation=1,claim_token=? WHERE requirement_id=?")
+                .bind(&session).bind("a".repeat(64)).bind(&id).execute(pool).await.unwrap();
+            if status != "in_progress" {
+                sqlx::query("UPDATE requirements SET status=? WHERE requirement_id=?")
+                    .bind(status).bind(&id).execute(pool).await.unwrap();
+            }
+        }
+        requirements.push((id, status, note));
+    }
+    let terminal_requirement = RequirementId::new().into_string();
+    sqlx::query("INSERT INTO requirements(requirement_id,display_no,title,tag,created_at,updated_at) VALUES(?,7,'Retained terminal task','terminal-reset',1,1)")
+        .bind(&terminal_requirement).execute(pool).await.unwrap();
+    sqlx::query("UPDATE requirements SET status='in_progress',owner_terminal_id=?,active_turn_started_at=10,lease_expires_at=100,started_at=10,attempt_count=1,claim_generation=1,claim_token=? WHERE requirement_id=?")
+        .bind(&terminal).bind("b".repeat(64)).bind(&terminal_requirement).execute(pool).await.unwrap();
+
+    let document = json!({
+        "schema":"nomifun.creative-studio/v1", "projectId":canvas,
+        "viewport":{"x":12,"y":34,"zoom":1.5}, "background":"dots",
+        "nodes":[], "connections":[], "panels":{
+            "left":{"open":true,"width":280,"activeView":"canvas"},
+            "right":{"open":true,"width":390,"activeView":"assistant"},
+            "bottom":{"open":false,"height":240,"activeView":"history"}
+        },
+        "chatSessions":[
+            {"id":chat,"title":"Retain history title","model":{"providerId":provider,"model":"retained-model"},
+             "messageIds":[MessageId::new().into_string(),MessageId::new().into_string()],
+             "pendingTurn":null,"createdAt":1,"updatedAt":2},
+            {"id":pending_chat,"title":"Retain pending title","model":{"providerId":provider,"model":"pending-model"},
+             "messageIds":[],"pendingTurn":{"idempotencyKey":ConversationId::new().into_string(),"prompt":"retired pending input","createdAt":2},
+             "createdAt":1,"updatedAt":2}
+        ],
+        "activeChatId":pending_chat,"pendingTaskIds":[ConversationId::new().into_string()]
+    });
+    sqlx::query("INSERT INTO creative_studio_projects(project_id,title,document_json,revision,created_at,updated_at) VALUES(?,'Retained canvas',?,2,1,2)")
+        .bind(&canvas).bind(document.to_string()).execute(pool).await.unwrap();
+
+    let report = reset_agent_data(pool).await.unwrap();
+    assert_eq!(report.deleted_rows["knowledge_bindings.session_rows"], 1);
+    assert_eq!(report.deleted_rows["client_preferences.agent_session_rows"], 1);
+    assert_eq!(report.deleted_rows["creative_studio_projects.agent_projections_cleared"], 1);
+    assert_eq!(sqlx::query_scalar::<_,String>("SELECT value FROM client_preferences WHERE key='retained-user-setting'").fetch_one(pool).await.unwrap(), "exact retained value");
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM knowledge_bindings").fetch_one(pool).await.unwrap(), 1);
+    let retained_binding: String = sqlx::query_scalar("SELECT knowledge_binding_id FROM knowledge_binding_bases").fetch_one(pool).await.unwrap();
+    assert_eq!(retained_binding, workpath_binding);
+    for (id, previous_status, note) in requirements {
+        let row: (String, Option<String>, Option<String>, Option<String>, i64) = sqlx::query_as(
+            "SELECT status,completion_note,owner_conversation_id,claim_token,attempt_count FROM requirements WHERE requirement_id=?"
+        ).bind(id).fetch_one(pool).await.unwrap();
+        assert_eq!(row.0, if previous_status == "in_progress" { "needs_review" } else { previous_status });
+        assert_eq!(row.1, Some(note));
+        assert!(row.2.is_none());
+        assert!(row.3.is_none());
+        assert_eq!(row.4, i64::from(previous_status != "pending"));
+    }
+    let terminal_state: (String, String, String) = sqlx::query_as("SELECT status,owner_terminal_id,claim_token FROM requirements WHERE requirement_id=?")
+        .bind(terminal_requirement).fetch_one(pool).await.unwrap();
+    assert_eq!(terminal_state, ("in_progress".into(), terminal, "b".repeat(64)));
+    let (stored, revision): (String, i64) = sqlx::query_as("SELECT document_json,revision FROM creative_studio_projects WHERE project_id=?")
+        .bind(&canvas).fetch_one(pool).await.unwrap();
+    let mut expected = document;
+    for chat in expected["chatSessions"].as_array_mut().unwrap() {
+        chat["messageIds"] = json!([]);
+        chat["pendingTurn"] = Value::Null;
+    }
+    expected["pendingTaskIds"] = json!([]);
+    assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), expected);
+    assert_eq!(revision, 3);
+    nomifun_db::validate_id_data_contract(pool).await.unwrap();
+    let second = reset_agent_data(pool).await.unwrap();
+    assert_eq!(second.deleted_rows["creative_studio_projects.agent_projections_cleared"], 0);
+    assert_eq!(second.deleted_rows["knowledge_bindings.session_rows"], 0);
+    assert_eq!(second.deleted_rows["client_preferences.agent_session_rows"], 0);
+}

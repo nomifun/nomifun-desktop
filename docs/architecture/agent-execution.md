@@ -144,6 +144,14 @@ InitialInput acknowledges admission: the writer verifies the exact accepted/star
 
 ## Lifecycle, controls and retirement
 
+Requirement owner, claim generation and token identify the last accepted execution.
+Ordinary Session/terminal retirement preserves them so review and terminal verdicts
+can acknowledge that same result; they grant no new execution authority after owner
+retirement. Existing admission validates live owners, explicit requeue clears the old
+capability, and generic content updates expose no execution fields. An authorized
+Agent clean cut may clear retired-generation sources without changing settled
+business outcomes.
+
 Planning, running, paused, waiting-input and terminal states use the Engine state machine and optimistic versions. Each dispatch rechecks dependencies, Step version, active Attempts and retry time under the admission writer. One Execution has one active scheduling loop.
 
 Execution Pause stops new dispatch. Already admitted Attempts retain their Sessions, Turns, links, reservations and original runtime owners for observation and settlement, including across scheduler takeover. A paused scheduler with live retained jobs but no local completion observer parks rather than repeatedly polling an empty notification stream. Pause neither freezes native operations nor fabricates review failures or cancellation. Resume does not replay completed Attempts or settled effects. Native Turn pause/checkpoint/resume remains a separate exact-owner contract.
