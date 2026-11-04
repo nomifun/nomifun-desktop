@@ -37,6 +37,16 @@
 
 本次完整报告与原始日志位于私有临时目录 `/tmp/nomifun-keyboard-in-process-20261028/`，含 `native-streaming.json`、`native-platform.json`、`maintenance-macos-smoke.json`。首次失败的编译日志和测试记录与修复后结果分开保留。这些验证不包含签名、公证或安装替换；Git 交付状态以提交记录为准。
 
+## macOS 旧登录项升级启动回归（2026-11-04）
+
+旧键盘 LaunchAgent 的原生 `launchctl print` 输出在 `event triggers` 内使用 `=> {`。原解析器只计入 `= {` 的打开层级，却将两者的 `}` 都计入关闭，提前结束解析并返回归属不明；桌面初始化随后失败并关闭后端。本次只补齐两种块的层级计算，保持顶层身份、完整闭合、路径与参数归属、清理前再次核验等约束。
+
+新增脱敏原生输出 fixture 与三项回归，覆盖事件触发器及后续区段、嵌套身份不得替代顶层身份，以及未闭合、多余闭合、尾随输出、无效根、重复参数、缺少程序和 NUL 七类拒绝场景。直接编译仓库源函数与测试，旧实现三项新回归均失败，修复后连同既有 macOS 与 Windows 命令解析用例共五项通过；本机真实旧服务输出只读解析通过，没有卸载或修改真实登录项。
+
+原生桌面单元测试在 `TAURI_CONFIG='{"bundle":{"resources":[]}}'` 下执行 `cargo test --locked --offline -p nomifun-desktop --bin nomifun-desktop keyboard::platform::tests -- --test-threads=1`，11 项通过、0 失败，包含全部新增回归与既有登录登记归属、文件清理和命令边界测试。
+
+Windows 注册表清理与共享启动代码均未改动；修改的解析器仅编入 macOS 正式构建及测试。`bun run check:windows-installer` 通过；`bun test scripts/keyboard-packaging.test.mjs scripts/desktop-build-win.test.mjs` 共 11 项通过、5 项按平台跳过、0 失败。原样提取两个纯解析函数、五项现有及新增测试和同一 fixture，使用 `rustc --edition=2024 --target x86_64-pc-windows-gnu --test --emit=metadata` 编译通过；此项只检查 Windows 目标编译，不链接或运行。当前 macOS 环境没有 Windows 原生构建与执行工具链，未复测 Windows 原生安装或启动；上述检查不作为原生运行证据。本次没有替换正式安装、签名、公证或发布。
+
 ## AppImage 的明确限制
 
 当前不自动停止来自另一临时挂载目录的运行中 AppImage，即使其外部镜像路径相同。维护入口保持拒绝未能证明归属的进程，要求先手动退出旧 AppImage 实例，再执行更新或卸载；无活动参与者时正常继续。固定安装路径的 Linux 不涉及这一跨挂载限制。本次没有增加仅适用新内核的 FUSE 身份推断，亦不宣称已取得 Linux 原生证据。

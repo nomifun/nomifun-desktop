@@ -246,7 +246,9 @@ fn legacy_launchctl_registration(contents:&str)->Option<(String,Vec<String>)>{
             }
         }
         if line.trim_end()=="}"{depth=depth.checked_sub(1)?;if depth==0{closed=true;break;}}
-        else if line.trim_end().ends_with(" = {"){depth+=1;}
+        // launchctl uses `=>` for event-trigger maps as well as `=` for
+        // ordinary sections. Both open a block whose closing brace counts.
+        else if line.trim_end().ends_with(" = {")||line.trim_end().ends_with(" => {"){depth+=1;}
     }
     if !closed||lines.any(|line|!line.trim().is_empty()){return None;}
     Some((program?,arguments?))
@@ -482,6 +484,41 @@ pub fn position_subtitle(window:&tauri::WebviewWindow,initial:bool)->Result<()> 
         assert_eq!(legacy_launchctl_registration(&output.replacen("\targuments = {","\tprogram = /other/app\n\targuments = {",1)),None);
         assert_eq!(legacy_launchctl_registration(output.trim_end().trim_end_matches('}')),None);
         assert_eq!(legacy_launchctl_registration("job = {\n environment = {\n program = /other/app\n arguments = {\n /other/app\n --keyboard-service\n }\n }\n}\n"),None);
+    }
+
+    // Sanitized native `launchctl print` output from an old keyboard login job.
+    const LEGACY_LAUNCHCTL_PRINT:&str=include_str!("fixtures/legacy-launchctl-print.txt");
+    #[test]fn legacy_launchctl_accepts_native_event_triggers_and_following_sections(){
+        assert_eq!(legacy_launchctl_registration(LEGACY_LAUNCHCTL_PRINT),Some((
+            "/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),
+            vec!["/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),"--keyboard-service".to_owned()],
+        )));
+    }
+    #[test]fn legacy_launchctl_does_not_read_identity_from_arrow_nested_blocks(){
+        let nested=LEGACY_LAUNCHCTL_PRINT.replace("\t\t\tdescriptor = {",concat!(
+            "\t\t\tprogram = /other/app\n",
+            "\t\t\targuments = {\n\t\t\t\t/other/app\n\t\t\t\t--keyboard-service\n\t\t\t}\n",
+            "\t\t\tdescriptor = {",
+        ));
+        let expected=Some(("/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),
+            vec!["/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),"--keyboard-service".to_owned()]));
+        assert_eq!(legacy_launchctl_registration(&nested),expected);
+        let without_top_level=nested.replace(concat!(
+            "\tprogram = /Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n",
+            "\targuments = {\n\t\t/Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n\t\t--keyboard-service\n\t}\n",
+        ),"");
+        assert_eq!(legacy_launchctl_registration(&without_top_level),None);
+    }
+    #[test]fn legacy_launchctl_rejects_malformed_or_ambiguous_native_output(){
+        for (case,invalid) in [
+            ("unclosed trigger",LEGACY_LAUNCHCTL_PRINT.replace("\t\t}\n\t}\n\n\tevent channels", "\t}\n\n\tevent channels")),
+            ("extra closing brace",format!("{LEGACY_LAUNCHCTL_PRINT}}}\n")),
+            ("trailing output",format!("{LEGACY_LAUNCHCTL_PRINT}unexpected trailing output\n")),
+            ("invalid root",LEGACY_LAUNCHCTL_PRINT.replacen(" = {", " => {",1)),
+            ("duplicate arguments",LEGACY_LAUNCHCTL_PRINT.replacen("\tevent triggers = {", "\targuments = {\n\t\t/other/app\n\t\t--keyboard-service\n\t}\n\tevent triggers = {",1)),
+            ("missing program",LEGACY_LAUNCHCTL_PRINT.replace("\tprogram = /Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n", "")),
+            ("NUL",LEGACY_LAUNCHCTL_PRINT.replace("state = not running", "state = not\0running")),
+        ]{assert_eq!(legacy_launchctl_registration(&invalid),None,"{case}");}
     }
 
     #[test]fn legacy_registration_requires_the_actual_current_installation(){
