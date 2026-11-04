@@ -1,0 +1,80 @@
+gui/501/com.nomifun.desktop.keyboard = {
+	active count = 0
+	path = /Users/test/Library/LaunchAgents/com.nomifun.desktop.keyboard.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /Applications/Nomi Fun.app/Contents/MacOS/NomiFun
+	arguments = {
+		/Applications/Nomi Fun.app/Contents/MacOS/NomiFun
+		--keyboard-service
+	}
+
+	inherited environment = {
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.nomifun.desktop.keyboard
+	}
+
+	domain = gui/501 [100003]
+	asid = 100003
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	last exit code = 78: EX_CONFIG
+
+	event triggers = {
+		com.nomifun.desktop.keyboard => {
+			keepalive = 0
+			service = com.nomifun.desktop.keyboard
+			stream = com.apple.launchd.helper
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"Executable" => "/Applications/Nomi Fun.app/Contents/MacOS/NomiFun"
+				"SkipImmediatePoll" => false
+			}
+		}
+	}
+
+	event channels = {
+		"com.apple.launchd.helper" = {
+			port = 0x0
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 123
+		type = resource
+		state = active
+		active count = 1
+		name = com.nomifun.desktop.keyboard
+	}
+
+	jetsam coalition = {
+		ID = 124
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.nomifun.desktop.keyboard
+	}
+
+	spawn type = interactive (4)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = app
+	jetsam thread limit = 32
+	cpumon = default
+	properties = runatload | inferred program
+}
