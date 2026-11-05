@@ -5,6 +5,20 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.20 - 2026-11-05
+
+- Connect new SSH sessions immediately, add explicit connect/disconnect controls,
+  and test unsaved remote host settings without saving or changing existing links.
+- Preserve data lifecycle integrity across session/canvas deletion and Agent
+  resets, including canonical history, retained terminal state and typed message
+  identities; clean up dependent records consistently.
+- Improve light/dark theme contrast across previews, chat, settings and controls.
+- Fix macOS legacy keyboard LaunchAgent event-trigger detection during upgrades.
+- Refresh the help entry's WeChat group QR code.
+- Publish signed and notarized Apple Silicon and Intel macOS installers and
+  signed updater archives. Windows and Linux v0.8.20 artifacts are not part of
+  this initial publication.
+
 ## v0.8.19 - 2026-10-28
 
 - Add a guided keyboard setup with local microphone checks, readiness
