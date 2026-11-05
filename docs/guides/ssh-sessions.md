@@ -27,8 +27,8 @@ profile owned by the installation owner:
 
 All secret fields are encrypted at rest with AES-256-GCM. When you reopen a
 host, stored secrets show as `***`; leave them untouched to keep the stored
-value, or type a new value to replace it. Deleting a host is blocked while a
-session is still bound to it.
+value, or type a new value to replace it. Saving a profile does not connect to
+the host. Deleting a host closes its existing connections.
 
 **Test connection** dials the host and runs a trivial probe, reporting success
 or the exact failure.
@@ -37,7 +37,10 @@ or the exact failure.
 
 From a host row, click **New session**. NomiFun creates a chat session bound to
 that host and opens it. SSH sessions appear as their own kind in the session
-list, separate from ordinary local work.
+list, separate from ordinary local work. Once creation succeeds, the backend
+starts connecting immediately, without a message or model tool call. The page
+shows progress; a connection failure preserves the session and shows the reason.
+Use **Reconnect** in the host status panel to try again.
 
 The default SSH session enables `ssh/exec`. Filesystem and sudo actions require
 their corresponding Agent action grants and the bound host's exact resource
@@ -65,6 +68,16 @@ server's exit status and the next command uses a fresh, equally restricted shell
 One connection is held per session, by a backend pool that outlives the agent —
 switching models tears the agent down and rebuilds it, and your remote shell,
 its working directory and its environment all survive that untouched.
+
+The host status panel provides **Disconnect** and **Reconnect**. Disconnect
+closes the session's remote shell; reconnecting creates a new shell, so environment
+variables and virtualenv activation must be set again. Tools do not establish or
+reopen disconnected links; connect from the panel before operating a historical
+session. A failed initial connection
+is not automatically retried; an established link that drops uses the automatic
+reconnection below. Switching pages does not disconnect, and there is no idle
+disconnect timer. Quitting NomiFun or deleting the session actively closes the
+connection. Restarting the app or opening a historical session does not connect it.
 
 The session header carries a pill showing which host you are operating and the
 live state of its link. Click it for `user@host:port`, the host key

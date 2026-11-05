@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { IApiSshStatus } from '@/common/adapter/ipcBridge';
 import type { SshHostId } from '@/common/types/ids';
 
 /**
- * Live state of one conversation↔host SSH link, or `null` while nothing is
- * known yet (no link has been opened, or the snapshot has not answered).
+ * Live state of one conversation↔host SSH link. Snapshot loading and failure
+ * stay separate from a successful snapshot that contains no link.
  *
  * Same three-part shape every durable realtime projection in this renderer uses
  * (see `useTerminalSessions` and other realtime projections):
@@ -36,16 +36,28 @@ import type { SshHostId } from '@/common/types/ids';
 export function useSshLinkStatus(
   conversationId: string,
   sshHostId: SshHostId | undefined
-): IApiSshStatus | null {
+): {
+  status: IApiSshStatus | null;
+  loading: boolean;
+  error: string | null;
+  refresh: () => void;
+} {
   const [status, setStatus] = useState<IApiSshStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const refresh = useCallback(() => setRefreshVersion((version) => version + 1), []);
 
   useEffect(() => {
     if (!sshHostId) {
       setStatus(null);
+      setLoading(false);
+      setError(null);
       return;
     }
 
     let disposed = false;
+    let eventRevision = 0;
 
     const apply = (next: IApiSshStatus): void => {
       if (disposed) return;
@@ -56,6 +68,9 @@ export function useSshLinkStatus(
     };
 
     const resnapshot = (): void => {
+      const revisionBeforeRead = eventRevision;
+      setLoading(true);
+      setError(null);
       void (async () => {
         try {
           const rows = await ipcBridge.ssh.statuses.invoke();
@@ -63,10 +78,10 @@ export function useSshLinkStatus(
           const mine = rows.find(
             (row) => row.conversationId === conversationId && row.sshHostId === sshHostId
           );
-          // A link absent from the snapshot genuinely has no state: the pool
-          // forgets a link once it is closed, so clearing is the honest move.
+          // A status delivered after this read started is newer than an empty
+          // snapshot and must remain visible.
           if (mine == null) {
-            setStatus(null);
+            if (eventRevision === revisionBeforeRead) setStatus(null);
             return;
           }
           // Through `apply`, not straight into state: a re-fetch is a *read* of
@@ -74,9 +89,10 @@ export function useSshLinkStatus(
           // when the link changed), so an in-flight snapshot that answers after a
           // newer event must not walk the pill backwards.
           apply(mine);
-        } catch {
-          // A failed snapshot leaves whatever we already knew in place rather
-          // than blanking a link that is probably still up.
+        } catch (caught) {
+          if (!disposed) setError(caught instanceof Error ? caught.message : String(caught));
+        } finally {
+          if (!disposed) setLoading(false);
         }
       })();
     };
@@ -84,6 +100,7 @@ export function useSshLinkStatus(
     const offStatus = ipcBridge.ssh.onStatus.on((event) => {
       if (event.conversationId !== conversationId) return;
       if (event.sshHostId !== sshHostId) return;
+      eventRevision += 1;
       apply(event);
     });
     const offReconnected = ipcBridge.conversation.reconnected.on(() => {
@@ -97,9 +114,9 @@ export function useSshLinkStatus(
       offStatus();
       offReconnected();
     };
-  }, [conversationId, sshHostId]);
+  }, [conversationId, sshHostId, refreshVersion]);
 
-  return status;
+  return { status, loading, error, refresh };
 }
 
 export default useSshLinkStatus;

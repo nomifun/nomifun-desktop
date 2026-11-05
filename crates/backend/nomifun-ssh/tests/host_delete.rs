@@ -51,7 +51,7 @@ async fn deleting_a_host_withdraws_its_pooled_links() {
 
     let router = nomifun_ssh::ssh_host_routes(SshHostRouterState {
         service: harness.service(),
-        pool: Some(harness.pool.clone()),
+        pool: harness.pool.clone(),
     })
     .layer(Extension(CurrentUser {
         id: UserId::parse(harness.user_id.clone()).expect("seeded user id"),

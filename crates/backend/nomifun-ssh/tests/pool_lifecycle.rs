@@ -16,7 +16,6 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_ai_agent::{SshBackendProvider, SshLeaseRelease};
 use nomifun_ssh::dto::CreateSshHostRequest;
 use nomifun_ssh::{PoolTuning, SshDialError, SshLinkKey, SshLinkPhase, SshTeardown};
 
@@ -486,60 +485,48 @@ async fn concurrent_close_waiters_share_the_process_owned_receipt_after_cancella
     assert_eq!(harness.pool.active_link_count(), 0);
 }
 
-/// The seam the agent factory calls, against a real host: one pooled link, tools
-/// that work through it, and a lease that reports rather than closes.
+/// Tool backends borrow a Session's link; only an explicit pool close ends it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_released_lease_keeps_the_link_and_reports_the_close_only_afterwards() {
-    const NAME: &str = "a_released_lease_keeps_the_link_and_reports_the_close_only_afterwards";
+async fn releasing_a_backend_keeps_the_pooled_link_until_explicit_close() {
+    const NAME: &str = "releasing_a_backend_keeps_the_pooled_link_until_explicit_close";
     let sshd = sshd_or_skip!(NAME);
     let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
     let id = harness.add_fixture_host(&sshd).await;
     let link_key = key("conv-1", &id);
 
-    if harness.open_or_skip(NAME, "conv-1", &id, "/").await.is_none() {
+    let Some(first) = harness.open_or_skip(NAME, "conv-1", &id, "/").await else {
         return;
-    }
-    let provider: Arc<dyn SshBackendProvider> = Arc::new(harness.pool.clone());
-    let binding = provider
-        .connect(&harness.user_id, "conv-1", id.as_str(), "/")
+    };
+    let link = harness.pool
+        .acquire(&harness.user_id, "conv-1", &id, "/")
         .await
-        .expect("the seam must hand back the conversation's pooled link");
+        .expect("the Session must reuse its pooled link");
+    assert!(Arc::ptr_eq(&first, &link));
     assert_eq!(
         harness.pool.active_link_count(),
         1,
-        "the seam must reuse the link the session already had, not dial a second one"
+        "reusing a Session must not dial a second link"
     );
-    let echoed = binding
-        .backend
-        .run_command("echo lease_ok", 30_000)
+    let backend = harness.pool.backend_for(&link);
+    let echoed = backend
+        .run_command("echo pooled_ok", 30_000)
         .await
-        .expect("the seam's backend must reach the host");
-    assert!(echoed.stdout.contains("lease_ok"), "{:?}", echoed.stdout);
+        .expect("the pooled backend must reach the host");
+    assert!(echoed.stdout.contains("pooled_ok"), "{:?}", echoed.stdout);
 
-    // A model switch destroys the runtime and releases its lease. Releasing is not
-    // closing: the operator's shell — and its cwd — must still be there.
-    match binding.lease.release().await {
-        SshLeaseRelease::Retained { .. } => {}
-        other => panic!("releasing a live lease must retain the link, got {other:?}"),
-    }
+    drop(backend);
+    drop(first);
     assert!(
         harness.pool.is_pooled(&link_key),
-        "the released link must still belong to the conversation"
+        "releasing a backend must keep the link in the Session pool"
     );
 
-    // Only when the pool itself closes the link does the same lease report
-    // forensics — and then it reports the pool's proof, not a guess.
     match harness.pool.close_link(&link_key).await {
-        SshTeardown::Reaped { .. } => {}
+        SshTeardown::Reaped { detail } => assert!(detail.contains("exit")),
         other => panic!("a healthy link closes reaped, got {other:?}"),
     }
-    match binding.lease.release().await {
-        SshLeaseRelease::Reaped { detail } => assert!(
-            detail.contains("exit"),
-            "a reaped release must carry the pool's evidence: {detail}"
-        ),
-        other => panic!("a proven close must release as reaped, got {other:?}"),
-    }
+    assert!(matches!(link.state(), nomifun_ssh::SshLinkState::Closed { teardown: SshTeardown::Reaped { .. } }));
+    assert!(!harness.pool.is_pooled(&link_key));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -771,15 +758,11 @@ async fn close_for_host_drops_its_links_and_stops_redialling() {
     harness.pool.shutdown_all().await;
 }
 
-/// The ladder is finite: after `max_attempts` it publishes a retryable `Dropped`
-/// and its supervisor *exits*. From then on the only code that dials is
-/// `ensure_connected` via `acquire`, and `acquire` only runs when an agent runtime
-/// is built — so a runtime that stays hot holds a link nothing will ever revive,
-/// and the pill's "check your credentials" advice cannot take effect however
-/// thoroughly the operator fixes the host.
+/// Once the finite reconnect ladder gives up, only an explicit connect dials
+/// again. Using a tool must leave that decision to the operator.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_tool_call_revives_a_link_the_ladder_gave_up_on() {
-    const NAME: &str = "a_tool_call_revives_a_link_the_ladder_gave_up_on";
+async fn explicit_connect_revives_a_link_the_ladder_gave_up_on() {
+    const NAME: &str = "explicit_connect_revives_a_link_the_ladder_gave_up_on";
     let mut sshd = sshd_or_skip!(NAME);
     // A two-rung ladder, so the give-up lands in milliseconds rather than the
     // production five minutes. Everything else stays as the other tests have it.
@@ -818,15 +801,16 @@ async fn a_tool_call_revives_a_link_the_ladder_gave_up_on() {
     );
 
     sshd.restart().expect("restart the fixture sshd on the same port");
-    // Past the dial gate's cooldown from the failed call above. That cooldown is
-    // what keeps revive-on-tool-call from becoming a dial storm, so waiting it out
-    // here is honouring it, not working around it.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(backend.run_command("echo MUST_NOT_DIAL", 5_000).await.is_err(),
+        "a tool must not redial after the reconnect ladder gave up");
+    let reconnected = harness.pool.acquire(&harness.user_id, "conv-1", &id, "/").await
+        .expect("explicit connect must be able to reopen the link");
+    assert!(Arc::ptr_eq(&link, &reconnected));
 
     let out = backend
         .run_command("echo revived", 15_000)
         .await
-        .expect("a tool call must be able to revive a link the ladder abandoned");
+        .expect("tools can use the link after an explicit reconnect");
     assert!(out.stdout.contains("revived"), "{out:?}");
     assert_eq!(
         link.state().phase(),
@@ -857,8 +841,8 @@ async fn await_ladder_give_up(link: &Arc<nomifun_ssh::SshLink>, budget: Duration
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn probe_reports_the_fingerprint_of_a_reachable_host() {
-    const NAME: &str = "probe_reports_the_fingerprint_of_a_reachable_host";
+async fn probe_saves_the_fingerprint_of_a_reachable_host() {
+    const NAME: &str = "probe_saves_the_fingerprint_of_a_reachable_host";
     let sshd = sshd_or_skip!(NAME);
     let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
     let id = harness.add_fixture_host(&sshd).await;
@@ -870,7 +854,7 @@ async fn probe_reports_the_fingerprint_of_a_reachable_host() {
     }
     assert!(outcome.ok, "{outcome:?}");
     assert!(
-        outcome
+        harness.service().get(&harness.user_id, &id).await.unwrap()
             .host_fingerprint
             .as_deref()
             .is_some_and(|f| f.starts_with("SHA256:")),
@@ -884,7 +868,7 @@ async fn probe_reports_the_fingerprint_of_a_reachable_host() {
 }
 
 #[tokio::test]
-async fn mark_unreachable_walks_back_the_status_without_losing_last_connected_at() {
+async fn a_failed_dial_preserves_the_saved_host_fingerprint() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let harness = support::harness(tmp.path().join("known_hosts"), support::brisk_tuning()).await;
     let id = harness
@@ -903,27 +887,16 @@ async fn mark_unreachable_walks_back_the_status_without_losing_last_connected_at
         .await;
     let service = harness.service();
     service
-        .mark_connected(&harness.user_id, &id, Some("SHA256:seen"))
+        .record_fingerprint(&harness.user_id, &id, "SHA256:seen")
         .await
-        .expect("mark connected");
-    let connected_at = service
-        .get(&harness.user_id, &id)
-        .await
-        .expect("get")
-        .last_connected_at;
-    assert!(connected_at.is_some());
+        .expect("save fingerprint");
 
-    service
-        .mark_unreachable(&harness.user_id, &id, "connection refused")
+    harness.pool
+        .acquire(&harness.user_id, "fingerprint-preservation", &id, ".")
         .await
-        .expect("mark unreachable");
+        .expect_err("port 1 is not listening");
 
     let row = service.get(&harness.user_id, &id).await.expect("get");
-    assert_eq!(row.status, "disconnected");
-    assert_eq!(
-        row.last_connected_at, connected_at,
-        "the hint about when it last worked must survive the walk-back"
-    );
     assert_eq!(
         row.host_fingerprint.as_deref(),
         Some("SHA256:seen"),

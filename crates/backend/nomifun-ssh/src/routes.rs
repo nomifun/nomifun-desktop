@@ -1,6 +1,6 @@
 //! HTTP routes for the SSH host book: owner-scoped CRUD plus a test-connection
-//! probe. Mounted under the instance-owner guard by the app router (mirrors
-//! `remote_agent_routes`). Every handler scopes to `CurrentUser.id`, so a
+//! probe. Mounted under the instance-owner guard by the app router.
+//! Every handler scopes to `CurrentUser.id`, so a
 //! cross-owner id is indistinguishable from NotFound.
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
@@ -19,14 +19,12 @@ use crate::service::{SshHostService, SshServiceError};
 use crate::ssh_config::SshConfigScan;
 
 /// Router state: the host book plus the process connection pool (both cheap
-/// handles). The pool is the same one the agent factory dials through, so a probe
+/// handles). The pool is the same one SSH actions use, so a probe
 /// here and a session there cannot disagree about a host.
 #[derive(Clone)]
 pub struct SshHostRouterState {
     pub service: SshHostService,
-    /// `None` → this server has no SSH support wired, and test-connection is
-    /// refused rather than answered with a guess.
-    pub pool: Option<SshConnectionPool>,
+    pub pool: SshConnectionPool,
 }
 
 pub fn ssh_host_routes(state: SshHostRouterState) -> Router {
@@ -121,29 +119,18 @@ async fn delete_one(
     // host row happily, the supervisor's probe keeps succeeding, and the agent
     // goes on running commands on a machine the operator just deleted — with no
     // pill on screen, because the pill needs the row to render.
-    if let Some(pool) = &state.pool {
-        pool.close_for_host(&ssh_host_id).await;
-    }
+    state.pool.close_for_host(&ssh_host_id).await;
     Ok(Json(ApiResponse::ok(())))
 }
 
 /// Every live link the caller owns, in the *same* wire shape the realtime
 /// `ssh.status` event carries. A client that missed an event and re-fetches can
 /// therefore never be told a different story than the one it was pushed.
-///
-/// Unlike test-connection, a missing pool is answered with an empty list rather
-/// than an error: a build with no SSH support truthfully owns no links, and this
-/// route is polled whenever a session opens — turning "not configured" into a
-/// failed request would break screens that are merely uninterested in SSH.
 async fn statuses(
     State(state): State<SshHostRouterState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<Vec<SshStatusEvent>>>, AppError> {
-    let items = state
-        .pool
-        .as_ref()
-        .map(|pool| pool.snapshot(user.id.as_str()))
-        .unwrap_or_default();
+    let items = state.pool.snapshot(user.id.as_str());
     Ok(Json(ApiResponse::ok(items)))
 }
 
@@ -162,15 +149,10 @@ async fn test_connection(
     Extension(user): Extension<CurrentUser>,
     Path(ssh_host_id): Path<SshHostId>,
 ) -> Result<Json<ApiResponse<TestConnectionResult>>, AppError> {
-    let Some(pool) = &state.pool else {
-        return Err(AppError::BadRequest(
-            "SSH support is not configured on this server".into(),
-        ));
-    };
     // The pool's probe dials, runs one trivial command and closes with the same
     // forensics a session close uses — so "test" proves the connection instead of
     // leaving a socket behind for the runtime to trip over.
-    let outcome = pool.probe(user.id.as_str(), &ssh_host_id).await;
+    let outcome = state.pool.probe(user.id.as_str(), &ssh_host_id).await;
     Ok(Json(ApiResponse::ok(TestConnectionResult {
         ok: outcome.ok,
         message: outcome.detail,

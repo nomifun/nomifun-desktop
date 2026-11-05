@@ -3,12 +3,13 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { AGENT_FORWARD_MIGRATIONS, areKnownAgentMigrationPaths, officeHubMigrationErrors, officeCompactMigrationErrors, feishuConnectorRenameMigrationErrors } from './lib/agent-migration-boundary.mjs';
 
-test('the office extension is explicit and never authorizes an unknown forward migration', () => {
+test('published extensions are explicit and never authorize an unknown forward migration', () => {
   const known = Object.values(AGENT_FORWARD_MIGRATIONS);
-  assert.equal(known.length, 21);
+  assert.equal(known.length, 22);
   assert(areKnownAgentMigrationPaths(known));
   assert(known.includes('crates/backend/nomifun-db/migrations/016_office_hub.sql'));
   assert(known.includes('crates/backend/nomifun-db/migrations/021_feishu_connector_tables.sql'));
+  assert(known.includes('crates/backend/nomifun-db/migrations/022_retire_ssh_host_connection_status.sql'));
   assert(known.includes('crates/backend/nomifun-db/migrations/018_remove_office_activity.sql'));
   assert(known.includes('crates/backend/nomifun-db/migrations/019_remove_office_overview.sql'));
   assert(!areKnownAgentMigrationPaths(known.filter(path => path !== AGENT_FORWARD_MIGRATIONS.baseline)));

@@ -978,9 +978,11 @@ SSH 会话的主机身份直接来自当前 `agent_snapshot.canonical_binding.ty
 
 每个 owner 原有稳定可编辑的官方 Preset、个人 Preset 及不可变 Revision 仍保留。`kind:preset` 使用该明确身份的保存配置；工作台“开始对话”传递 Preset 身份，选择器将官方来源的保存定制与当前模板分别展示。没有 Revision 的官方编辑项首次明确使用时可准备当前发布基线，不增加先保存的前置步骤。保存不覆盖发布 seed，不改变已有 Session；失效的明确保存配置仍须由用户在工作台检查，不能靠模板替代其权限。
 
-隐藏的 `session_only` 配置只缓存宿主派生的编译结果，公开 authoring 保存接口不得编辑。复用须证明请求 payload 与当前完整执行合同等值；失效候选不演进、不改历史，直接从当前权威定义新编译。存储 I/O 与当前定义错误继续返回失败，缓存不能兜底。内部模板准备固定返回的精确 Revision/Snapshot，不通过可变 latest 指针再次选择权限。现有会话仍消费原冻结 binding；官方谱系只用于可信呈现，不证明它选择的是当前模板，界面也不能仅凭 `official_template_key` 跳过显式 Agent 切换。UI/API 契约版本为45。
+隐藏的 `session_only` 配置只缓存宿主派生的编译结果，公开 authoring 保存接口不得编辑。复用须证明请求 payload 与当前完整执行合同等值；失效候选不演进、不改历史，直接从当前权威定义新编译。存储 I/O 与当前定义错误继续返回失败，缓存不能兜底。内部模板准备固定返回的精确 Revision/Snapshot，不通过可变 latest 指针再次选择权限。现有会话仍消费原冻结 binding；官方谱系只用于可信呈现，不证明它选择的是当前模板，界面也不能仅凭 `official_template_key` 跳过显式 Agent 切换。UI/API 契约版本以根目录的 ui-api-contract-version.txt 为准。
 
 已保存 SSH 主机的启动入口由 Host 从当前 `chat.minimal` 与确切 `ssh/exec` 定义准备独立隐藏配置，经真实主机归属、资源和 canonical 新建围栏创建会话。客户端只提交主机身份与模型，不编辑模板缓存，不创建可见个人 Agent，也不使普通资源选择自动增加 SSH 权限。
+
+首次新建成功后，Host 使用现有后台任务与唯一 SSH pool 立即建链；创建请求重放不重新拨号，连接失败保留 Session 并从原 pool 发布诊断。连接不启动模型或 Turn。会话范围的 `POST /api/agent-sessions/{agent_session_id}/ssh/connect` 和 `/ssh/disconnect` 从当前 canonical binding 选择主机，断开沿原精确实例关闭事实链。SSH Actions 只使用已开启的池链接，不隐式建链或复活已关闭的链接；原监督器继续负责已建立连接的断线恢复。保存主机配置、读取历史和启动应用不拨号；没有闲置自动断开，退出应用由原 Host shutdown 主动关闭。实时状态只由 pool 的 `ssh.status` 和快照提供，主机簿不保存连接状态或最近连接时间，也不增加连接表。公开接口清理与连接控制使用 UI/API 合同 53。
 
 Agent 工作台的默认模型是可空的预设配置。选择器读取已启用的 Chat 模型目录，以供应商与模型身份向 Host 请求确切路由；解析候选不保存 Revision，也不改变 Session。选择或清空默认值通过原有 SaveRevision 与 CAS 保存，不把安装默认模型自动写入明确提交的空配置。新建会话明确选择 Preset 时，从该保存文档读取默认模型与资源需求，合法空字段不会被误判为读取失败；选择官方 Template 时只读发布 seed 的能力，使用本次模型或安装默认，不读取同名保存定制。默认值仅作用于当前选择，用户随后明确选择的模型优先。真正的保存配置读取失败提供显式只读重试，等待期间继续阻止该选择发送，不借模板或缓存补造其权限。创建时仍由原 Session 模型派生路径冻结选定模型，已有 Revision、Snapshot 与会话历史不改写。
 

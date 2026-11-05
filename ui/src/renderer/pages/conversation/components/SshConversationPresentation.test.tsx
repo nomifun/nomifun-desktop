@@ -1,5 +1,5 @@
 import '../../../../../test/setup-dom.ts';
-import { act, cleanup, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import type { ReactNode } from 'react';
@@ -24,7 +24,7 @@ await locale.use(initReactI18next).init({ lng: 'en', initImmediate: false,
 const host = (sshHostId: IApiSshHost['sshHostId'], name: string): IApiSshHost => ({
   sshHostId, name, host: 'example.test', port: 22, username: 'rika', authType: 'password',
   password: null, privateKey: null, passphrase: null, certificate: null, sudoPassword: null,
-  hostFingerprint: null, status: 'connected', lastConnectedAt: null, createdAt: 1000, updatedAt: 1000,
+  hostFingerprint: null, createdAt: 1000, updatedAt: 1000,
 });
 
 function Sidebar() {
@@ -103,7 +103,7 @@ test('canonical SSH binding drives the header and sidebar through host switches,
     const secondPill = view.getByTestId('ssh-host-status-pill');
     expect(secondPill.textContent).toBe('Ubuntu B');
     expect(secondPill.className).toContain('--inactive');
-    expect((secondPill as HTMLButtonElement).disabled).toBe(true);
+    expect((secondPill as HTMLButtonElement).disabled).toBe(false);
     await act(async () => {
       for (const listener of statusListeners) listener(firstStatus);
       resolveSnapshot([{ ...firstStatus, sshHostId: secondSshHostId, changedAt: 10 }]);
@@ -131,5 +131,113 @@ test('canonical SSH binding drives the header and sidebar through host switches,
     statuses.mockRestore();
     statusEvents.mockRestore();
     subscriptions.forEach((subscription) => subscription.mockRestore());
+  }
+});
+
+test('link controls distinguish loading, failed status reads and no link, then connect and disconnect the canonical session', async () => {
+  const conversation = makeSshConversation();
+  let rejectSnapshot!: (error: Error) => void;
+  const pending = new Promise<IApiSshStatus[]>((_, reject) => { rejectSnapshot = reject; });
+  let rows: IApiSshStatus[] = [];
+  const listeners = new Set<Parameters<typeof ipcBridge.ssh.onStatus.on>[0]>();
+  const statuses = spyOn(ipcBridge.ssh.statuses, 'invoke').mockImplementationOnce(() => pending)
+    .mockImplementation(async () => rows);
+  const events = spyOn(ipcBridge.ssh.onStatus, 'on').mockImplementation((callback) => {
+    listeners.add(callback);
+    return () => { listeners.delete(callback); };
+  });
+  const reconnected = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
+  const connect = spyOn(ipcBridge.agentPlatform.sessions.connectSsh, 'invoke').mockImplementation(async () => {
+    for (const listener of listeners) listener(rows[0]!);
+    return { accepted: true };
+  });
+  const disconnect = spyOn(ipcBridge.agentPlatform.sessions.disconnectSsh, 'invoke').mockImplementation(async () => {
+    const closed: IApiSshStatus = { ...rows[0]!, state: 'closed', reaped: false, changedAt: 3000 };
+    rows = [];
+    for (const listener of listeners) listener(closed);
+    return { accepted: true };
+  });
+  const wrapper = ({ children }: { children: ReactNode }) => <I18nextProvider i18n={locale}>
+    <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
+      fallback: { 'ssh-hosts.list': [host(firstSshHostId, 'Ubuntu A')] } }}>{children}</SWRConfig>
+  </I18nextProvider>;
+
+  try {
+    const view = render(<SshHostStatusPill conversation={conversation} />, { wrapper });
+    fireEvent.click(view.getByTestId('ssh-host-status-pill'));
+    await waitFor(() => expect(view.getByText('Loading link status…')).toBeTruthy());
+    expect(connect).not.toHaveBeenCalled();
+    expect(view.queryByText(sshLocale.pill.noLink)).toBeNull();
+    await act(async () => { rejectSnapshot(new Error('status service unavailable')); });
+    await waitFor(() => expect(view.getByText('Link status unavailable')).toBeTruthy());
+    expect(view.getByRole('alert').textContent).toContain('status service unavailable');
+    expect(view.queryByText(sshLocale.pill.noLink)).toBeNull();
+
+    fireEvent.click(view.getByText('Refresh status'));
+    await waitFor(() => expect(view.getByText(sshLocale.pill.noLink)).toBeTruthy());
+    expect((view.getByTestId('ssh-link-connect') as HTMLButtonElement).disabled).toBe(false);
+    rows = [{ conversationId: conversation.id, sshHostId: firstSshHostId, state: 'connecting', attempt: 1,
+      nextRetryInMs: null, hostFingerprint: null, detail: null, reaped: null, retryable: null, changedAt: 1000 }];
+    fireEvent.click(view.getByTestId('ssh-link-connect'));
+    await waitFor(() => expect(connect).toHaveBeenCalledWith({ agent_session_id: conversation.id }));
+    await waitFor(() => expect(view.getByText('Connecting…')).toBeTruthy());
+    await act(async () => {
+      rows = [{ ...rows[0]!, state: 'connected', attempt: 0, changedAt: 2000 }];
+      for (const listener of listeners) listener(rows[0]!);
+    });
+    await waitFor(() => expect(view.getByTestId('ssh-host-status-pill').className).toContain('--active'));
+    fireEvent.click(view.getByTestId('ssh-link-disconnect'));
+    await waitFor(() => expect(disconnect).toHaveBeenCalledWith({ agent_session_id: conversation.id }));
+    await waitFor(() => expect(view.getByText('Closed')).toBeTruthy());
+    expect(view.getByText(sshLocale.pill.unconfirmedExit)).toBeTruthy();
+    expect(statuses).toHaveBeenCalledTimes(2);
+    expect(view.getByTestId('ssh-link-connect').textContent).toBe('Reconnect');
+
+    rows = [{ conversationId: conversation.id, sshHostId: firstSshHostId, state: 'dropped', attempt: 0,
+      nextRetryInMs: null, hostFingerprint: null, detail: 'SSH authentication rejected', reaped: null,
+      retryable: false, changedAt: 4000 }];
+    fireEvent.click(view.getByTestId('ssh-link-connect'));
+    await waitFor(() => expect(view.getByText('SSH authentication rejected')).toBeTruthy());
+    expect(view.getByText(sshLocale.pill.droppedActionRequired)).toBeTruthy();
+    expect(view.queryByText(sshLocale.pill.unconfirmedExit)).toBeNull();
+
+    connect.mockRejectedValueOnce(new Error('host credential rejected'));
+    fireEvent.click(view.getByTestId('ssh-link-connect'));
+    await waitFor(() => expect(view.getByRole('alert').textContent).toContain('host credential rejected'));
+    expect(view.getByText('Link lost')).toBeTruthy();
+  } finally {
+    cleanup();
+    statuses.mockRestore();
+    events.mockRestore();
+    reconnected.mockRestore();
+    connect.mockRestore();
+    disconnect.mockRestore();
+  }
+});
+
+test('an empty in-flight snapshot cannot clear a newer live link event', async () => {
+  const conversation = makeSshConversation();
+  let finish!: (rows: IApiSshStatus[]) => void;
+  let listener: Parameters<typeof ipcBridge.ssh.onStatus.on>[0] | undefined;
+  const statuses = spyOn(ipcBridge.ssh.statuses, 'invoke').mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const events = spyOn(ipcBridge.ssh.onStatus, 'on').mockImplementation((callback) => { listener = callback; return () => {}; });
+  const reconnected = spyOn(ipcBridge.conversation.reconnected, 'on').mockReturnValue(() => {});
+  const wrapper = ({ children }: { children: ReactNode }) => <I18nextProvider i18n={locale}>
+    <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
+      fallback: { 'ssh-hosts.list': [host(firstSshHostId, 'Ubuntu A')] } }}>{children}</SWRConfig>
+  </I18nextProvider>;
+  try {
+    const view = render(<SshHostStatusPill conversation={conversation} />, { wrapper });
+    await act(async () => {
+      listener?.({ conversationId: conversation.id, sshHostId: firstSshHostId, state: 'connected', attempt: 0,
+        nextRetryInMs: null, hostFingerprint: null, detail: null, reaped: null, retryable: null, changedAt: 1000 });
+      finish([]);
+    });
+    await waitFor(() => expect(view.getByTestId('ssh-host-status-pill').className).toContain('--active'));
+  } finally {
+    cleanup();
+    statuses.mockRestore();
+    events.mockRestore();
+    reconnected.mockRestore();
   }
 });

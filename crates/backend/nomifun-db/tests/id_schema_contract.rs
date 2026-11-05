@@ -80,6 +80,7 @@ fn migration_directory_contains_the_canonical_forward_migration_chain() {
         "019_remove_office_overview.sql",
         "020_feishu_knowledge_source_kind.sql",
         "021_feishu_connector_tables.sql",
+        "022_retire_ssh_host_connection_status.sql",
     ]);
 }
 

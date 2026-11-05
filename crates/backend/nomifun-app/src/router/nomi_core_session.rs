@@ -9287,6 +9287,8 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             get(list_nomi_core_agent_sessions).post(create_nomi_core_agent_session),
         )
         .route("/api/agent-sessions/ssh", post(create_nomi_core_ssh_agent_session))
+        .route("/api/agent-sessions/{agent_session_id}/ssh/connect", post(connect_nomi_core_session_ssh))
+        .route("/api/agent-sessions/{agent_session_id}/ssh/disconnect", post(disconnect_nomi_core_session_ssh))
         .route(
             "/api/agent-session-messages/search",
             get(search_canonical_agent_session_messages),
@@ -12408,7 +12410,8 @@ async fn create_nomi_core_agent_session(
     headers: HeaderMap,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
-    create_nomi_core_agent_session_owned(state, owner, headers, request, None, None).await
+    let (response, _) = create_nomi_core_agent_session_owned(state, owner, headers, request, None, None).await?;
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 async fn create_nomi_core_ssh_agent_session(
@@ -12428,7 +12431,7 @@ async fn create_nomi_core_ssh_agent_session(
     let binding = state.control_plane.prepare_ssh_session_base_binding(
         &owner.0, request.model.as_ref(),
     ).await?;
-    create_nomi_core_agent_session_owned(state, owner, headers,
+    let (response, duplicate) = create_nomi_core_agent_session_owned(state.clone(), owner.clone(), headers,
         CreateAgentSessionRequestDto {
             preset_id: binding.preset_revision_ref.preset_id.clone(), title: Some(host.name),
             model: request.model, reasoning_effort: None,
@@ -12437,7 +12440,83 @@ async fn create_nomi_core_ssh_agent_session(
             }],
             knowledge_policy: None, workspace: None, session_capabilities: None,
             required_modules: BTreeSet::from(["ssh".into()]),
-        }, None, Some(binding)).await
+        }, None, Some(binding)).await?;
+    if !duplicate {
+        if let Err(error) = start_session_ssh_connection(&state, &owner, AgentSessionId::from(response.agent_session_id.clone())).await {
+            // Opening is already committed. A resource-start admission failure
+            // must not make the client discard the successful creation receipt.
+            tracing::warn!(agent_session_id = %response.agent_session_id, %error, "SSH Session was created but its connection could not start");
+        }
+    }
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+// Session creation and an explicit retry enter the same resource owner. The
+// operation fence keeps the selected binding stable until its dial settles;
+// the process registry, rather than the HTTP request or model, owns that dial.
+async fn start_session_ssh_connection(
+    state: &NomiCoreAgentApiState,
+    owner: &AuthenticatedOwner,
+    session_id: AgentSessionId,
+) -> Result<(), AppError> {
+    let operation_fence = state.session_owner.session_operation_lock(session_id.as_ref()).read_owned().await;
+    let session = state.session_owner.canonical.session_record(&authenticated_principal(owner), &session_id).await?;
+    let resource = session.agent_binding.typed_resource_bindings.iter()
+        .find(|resource| resource.resource_kind.as_ref() == "ssh_host")
+        .ok_or_else(|| AppError::Conflict("This Session has no bound SSH host".into()))?;
+    let host_id = nomifun_common::SshHostId::parse(resource.resource_id.as_ref())
+        .map_err(|error| AppError::Conflict(format!("Invalid canonical SSH resource identity: {error}")))?;
+    let cwd = resource.typed_parameters.get("remote_cwd").cloned().unwrap_or_else(|| ".".to_owned());
+    let pool = state.ssh_pool.clone();
+    let owner_id = owner.as_ref().to_owned();
+    if !state.session_owner.background_tasks.spawn(Box::pin(async move {
+        let _operation_fence = operation_fence;
+        if let Err(error) = pool.acquire(&owner_id, session_id.as_ref(), &host_id, &cwd).await {
+            // The pool publishes the real failure through ssh.status. A failed
+            // connection does not undo the already-created canonical Session.
+            tracing::debug!(agent_session_id = %session_id.as_ref(), %error, "SSH Session connection failed");
+        }
+    })) {
+        return Err(AppError::Conflict("The Session owner is shutting down".into()));
+    }
+    Ok(())
+}
+
+async fn connect_nomi_core_session_ssh(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+) -> Result<Json<ApiResponse<Value>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    start_session_ssh_connection(&state, &owner, session_id).await?;
+    Ok(Json(ApiResponse::ok(json!({"accepted": true}))))
+}
+
+async fn disconnect_nomi_core_session_ssh(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+) -> Result<Json<ApiResponse<Value>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let _operation_fence = state.session_owner.session_operation_lock(session_id.as_ref()).read_owned().await;
+    let principal = authenticated_principal(&owner);
+    let session = state.session_owner.canonical.session_record(&principal, &session_id).await?;
+    let resource = session.agent_binding.typed_resource_bindings.iter()
+        .find(|resource| resource.resource_kind.as_ref() == "ssh_host")
+        .ok_or_else(|| AppError::Conflict("This Session has no bound SSH host".into()))?;
+    if let Some(link) = state.ssh_pool.resource_instances(owner.as_ref()).into_iter()
+        .find(|link| link.registered && link.agent_session_id == session_id.as_ref()
+            && link.ssh_host_id == resource.resource_id.as_ref()) {
+        super::session_ssh_resources::request_close(
+            state.session_owner.canonical.store().clone(), state.ssh_pool.clone(),
+            state.session_owner.background_tasks.clone(),
+            nomifun_agent_contracts::SessionSshLinkCloseV1 {
+                agent_session_id: session_id, owner_ref: principal, ssh_host_id: link.ssh_host_id,
+                pool_instance_id: link.pool_instance_id, instance_id: link.instance_id,
+            },
+        ).await?;
+    }
+    Ok(Json(ApiResponse::ok(json!({"accepted": true}))))
 }
 
 /// Product owners may supply an exact prepared Agent without reselecting its
@@ -12450,7 +12529,7 @@ async fn create_nomi_core_agent_session_owned(
     request: CreateAgentSessionRequestDto,
     app_project_id: Option<&str>,
     prepared_binding: Option<AgentBindingValueDto>,
-) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
+) -> Result<(CreateAgentSessionResponseDto, bool), NomiCoreApiError> {
     let creation_key = request_idempotency_key(&headers, "nomi-core-agent-session-create")?;
     if app_project_id.is_none() && creation_key.starts_with("app-development:") {
         return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "APP_PROJECT_CREATION_KEY_RESERVED",
@@ -12575,12 +12654,12 @@ async fn create_nomi_core_agent_session_owned(
             }),
         ),
     );
-    Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
+    Ok((CreateAgentSessionResponseDto {
         agent_session_id: opened.session.agent_session_id.as_ref().to_owned(),
-        agent_binding: binding,
+        agent_binding: agent_binding_dto(&opened.session.agent_binding)?,
         state: "ready".to_owned(),
         cursor: session_cursor(&opened.session.agent_session_id, opened.cursor.seq),
-    })))
+    }, opened.duplicate))
 }
 
 /// An explicit project command may open another existing Session or create a
@@ -12652,12 +12731,11 @@ pub(super) async fn resolve_app_development_session_selection(
     let mut headers = HeaderMap::new();
     headers.insert("Idempotency-Key", idempotency_key.parse()
         .map_err(|_| AppError::Conflict("Invalid application development Session identity".into()))?);
-    let Json(opened) = create_nomi_core_agent_session_owned(state.clone(), owner.clone(), headers,
+    let (opened, _) = create_nomi_core_agent_session_owned(state.clone(), owner.clone(), headers,
         CreateAgentSessionRequestDto { preset_id: binding.preset_revision_ref.preset_id.clone(), title: Some(app.name.clone()),
             model, reasoning_effort, resource_selections, knowledge_policy: None,
             workspace: Some(workspace.to_owned()), session_capabilities: Some(Default::default()),
             required_modules: BTreeSet::from(["app.hosting".to_owned(), "workspace.files".to_owned(), "workspace.process".to_owned()]) }, Some(&app.id), Some(binding)).await?;
-    let opened = opened.data.ok_or_else(|| AppError::Conflict("Application development Session was not created".into()))?;
     load_owned_nomi_core_session(state, &owner, &parse_agent_session_id(&opened.agent_session_id)?).await
 }
 

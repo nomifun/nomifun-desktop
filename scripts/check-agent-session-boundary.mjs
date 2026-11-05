@@ -83,12 +83,20 @@ const { baseline, pluginForwardMigration, metadataForwardMigration, hostingForwa
   cronWorkbenchForwardMigration, modelInputConstraintsForwardMigration, queueSettingForwardMigration,
   executionPlanGateForwardMigration, officeHubForwardMigration, officeCompactForwardMigration,
   officeActivityRetirementForwardMigration, officeOverviewRetirementForwardMigration,
-  feishuSourceKindForwardMigration, feishuConnectorTablesForwardMigration } = AGENT_FORWARD_MIGRATIONS;
+  feishuSourceKindForwardMigration, feishuConnectorTablesForwardMigration,
+  sshHostStateRetirementForwardMigration } = AGENT_FORWARD_MIGRATIONS;
 if (!areKnownAgentMigrationPaths(migrations)) {
   failures.push('Agent clean cut requires its canonical baseline and only explicitly supported forward migrations');
 }
 const migrationStatements = (path) => readFileSync(resolve(ROOT, path), 'utf8')
   .replace(/--[^\r\n]*/g, '').split(';').map((statement) => statement.replace(/\s+/g, ' ').trim()).filter(Boolean);
+if (migrations.includes(sshHostStateRetirementForwardMigration)
+  && JSON.stringify(migrationStatements(sshHostStateRetirementForwardMigration)) !== JSON.stringify([
+    'ALTER TABLE ssh_hosts DROP COLUMN status',
+    'ALTER TABLE ssh_hosts DROP COLUMN last_connected_at',
+  ])) {
+  failures.push('SSH host state retirement may only remove unused connection hints; saved credentials, fingerprints and canonical Agent facts stay unchanged');
+}
 if (migrations.includes(officeHubForwardMigration)) {
   failures.push(...officeHubMigrationErrors(readFileSync(resolve(ROOT, officeHubForwardMigration), 'utf8')));
 }

@@ -1,4 +1,4 @@
-use nomifun_common::{SshHostId, TimestampMs};
+use nomifun_common::SshHostId;
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
@@ -55,8 +55,8 @@ impl ISshHostRepository for SqliteSshHostRepository {
                 (ssh_host_id, user_id, name, host, port, username, auth_type, \
                  password_encrypted, private_key_encrypted, passphrase_encrypted, \
                  certificate_encrypted, sudo_password_encrypted, host_fingerprint, \
-                 status, last_connected_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'unknown', NULL, ?, ?) \
+                 created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) \
              RETURNING id",
         )
         .bind(ssh_host_id.as_str())
@@ -91,8 +91,6 @@ impl ISshHostRepository for SqliteSshHostRepository {
             certificate_encrypted: params.certificate_encrypted.map(str::to_string),
             sudo_password_encrypted: params.sudo_password_encrypted.map(str::to_string),
             host_fingerprint: None,
-            status: "unknown".to_string(),
-            last_connected_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -186,21 +184,16 @@ impl ISshHostRepository for SqliteSshHostRepository {
         Ok(())
     }
 
-    async fn update_status(
+    async fn update_fingerprint(
         &self,
         user_id: &str,
         id: &SshHostId,
-        status: &str,
-        last_connected_at: Option<TimestampMs>,
-        host_fingerprint: Option<&str>,
+        host_fingerprint: &str,
     ) -> Result<(), DbError> {
         let affected = sqlx::query(
-            "UPDATE ssh_hosts SET status = ?, last_connected_at = ?, \
-                host_fingerprint = COALESCE(?, host_fingerprint), updated_at = ? \
+            "UPDATE ssh_hosts SET host_fingerprint = ?, updated_at = ? \
              WHERE user_id = ? AND ssh_host_id = ?",
         )
-        .bind(status)
-        .bind(last_connected_at)
         .bind(host_fingerprint)
         .bind(nomifun_common::now_ms())
         .bind(user_id)

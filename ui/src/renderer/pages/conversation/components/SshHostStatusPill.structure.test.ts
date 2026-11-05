@@ -27,9 +27,8 @@ describe('SshHostStatusPill structure', () => {
     expect(pillSource.includes("import { Server } from '@icon-park/react';")).toBe(true);
     expect(pillSource.includes('text-12px')).toBe(true);
     expect(pillSource.includes("data-testid='ssh-host-status-pill'")).toBe(true);
-    // A disabled Arco button swallows pointer events, so the tooltip needs a
-    // wrapper span (same treatment as other capability controls).
-    expect(pillSource.includes("<span className='inline-flex'>{button}</span>")).toBe(true);
+    expect(pillSource.includes("data-testid='ssh-link-connect'")).toBe(true);
+    expect(pillSource.includes("data-testid='ssh-link-disconnect'")).toBe(true);
   });
 
   test('colour comes only from the phase, through the shared table', () => {
@@ -42,10 +41,8 @@ describe('SshHostStatusPill structure', () => {
     expect(pillSource.includes('CAPABILITY_COLORS')).toBe(false);
   });
 
-  test('live state comes from the link hook, never from the stale host row column', () => {
+  test('live state comes from the session link hook', () => {
     expect(pillSource.includes('useSshLinkStatus')).toBe(true);
-    // `IApiSshHost.status` is written once on first connect and never walked
-    // back (V9) — reading it here would resurrect the "always green" bug.
     expect(pillSource.includes('host.status')).toBe(false);
     expect(pillSource.includes('.status ===')).toBe(false);
   });
@@ -74,7 +71,8 @@ describe('SshHostStatusPill structure', () => {
     // I on" answerable; `return null` leaves the header indistinguishable from a
     // local session.
     expect(pillSource.includes('return null')).toBe(false);
-    expect(pillSource.includes("t('ssh.group.hostMissing')")).toBe(true);
+    expect(pillSource.includes("'ssh.group.hostMissing'")).toBe(true);
+    expect(pillSource.includes("'ssh.group.hostUnknown'")).toBe(true);
     expect(pillSource.includes('sshHostId.slice(0,')).toBe(true);
     // Shares the host book's SWR key, so the pill costs no extra round-trip.
     expect(pillSource.includes("useSWR('ssh-hosts.list'")).toBe(true);

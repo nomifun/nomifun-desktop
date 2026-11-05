@@ -39,10 +39,7 @@ pub mod types;
 pub mod web_search;
 #[cfg(feature = "browser-use")]
 pub mod local_web_search;
-pub use ssh_backend::{
-    RemoteCommandOutput, RemoteFileStat, SshBackend, SshBackendProvider, SshLeaseRelease,
-    SshSessionBinding, SshSessionLease,
-};
+pub use ssh_backend::{RemoteCommandOutput, RemoteFileStat, SshBackend};
 pub use context_contributor::{ContextContributor, TurnContext};
 pub use nomi_config;
 pub use nomi_types;

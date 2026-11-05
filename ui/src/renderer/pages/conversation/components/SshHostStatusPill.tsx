@@ -11,7 +11,7 @@ import type { TChatConversation } from '@/common/config/storage';
 import { conversationSshHostId } from '../utils/conversationSshBinding';
 import { SSH_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 import type { I18nKey } from '@/renderer/services/i18n';
-import { Button, Popover, Tooltip } from '@arco-design/web-react';
+import { Button, Popover } from '@arco-design/web-react';
 import { Server } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -70,21 +70,15 @@ interface Props {
 }
 
 /**
- * 会话 header 上的「远程主机」药丸（设计 §10 / TODO T1）。
+ * Session host identity, live link diagnostics, and explicit link controls.
  *
  * An SSH-bound session looks exactly like a local one everywhere else in the
  * chrome, which is how you end up running `rm -rf` on the wrong machine. This
  * pill is the session's identity badge: *which* host it drives, and whether the
  * link to it is actually up right now.
  *
- * Two deliberate refusals:
- *
- * - The colour is a pure function of the wire phase via {@link SSH_STATUS_COLOR}.
- *   `detail` is free-form operator text and is shown verbatim, never parsed —
- *   string-matching it is how "connection refused" ends up green.
- * - The host book's own `status` column is not read at all. It is written once on
- *   first connect and never walked back, so it is permanently green for any host
- *   that has ever worked; the live phase comes only from {@link useSshLinkStatus}.
+ * The colour comes from the wire phase via {@link SSH_STATUS_COLOR}. Transport
+ * diagnostics are displayed verbatim and never parsed to infer a phase.
  *
  * The host name comes from the host book under the same SWR key the settings
  * page and the sidebar group use, so the pill costs no extra round-trip.
@@ -92,8 +86,25 @@ interface Props {
 const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) => {
   const { t } = useTranslation();
   const { data: hosts } = useSWR('ssh-hosts.list', () => ipcBridge.ssh.list.invoke());
-  const status = useSshLinkStatus(conversationId, sshHostId);
+  const { status, loading, error, refresh } = useSshLinkStatus(conversationId, sshHostId);
   const retryInSeconds = useRetryCountdown(status);
+  const [pendingAction, setPendingAction] = useState<'connect' | 'disconnect' | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const controlLink = async (action: 'connect' | 'disconnect') => {
+    setPendingAction(action);
+    setActionError(null);
+    try {
+      const command = action === 'connect'
+        ? ipcBridge.agentPlatform.sessions.connectSsh
+        : ipcBridge.agentPlatform.sessions.disconnectSsh;
+      await command.invoke({ agent_session_id: conversationId });
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setPendingAction(null);
+    }
+  };
 
   const host = useMemo(
     () => (hosts ?? []).find((candidate) => candidate.sshHostId === sshHostId) ?? null,
@@ -127,7 +138,7 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
               style={{ lineHeight: 0 }}
             />
             <span className='text-12px max-w-140px truncate'>
-              {t('ssh.group.hostMissing')} · {sshHostId.slice(0, 8)}
+              {t(hosts == null ? 'ssh.group.hostUnknown' : 'ssh.group.hostMissing')} · {sshHostId.slice(0, 8)}
             </span>
           </span>
         </Button>
@@ -139,6 +150,7 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
   const phase: ISshLinkPhase = status?.state ?? 'idle';
   const dotColor = SSH_STATUS_COLOR[phase];
   const linked = phase === 'connected';
+  const hasActiveLink = ['connecting', 'connected', 'degraded', 'reconnecting'].includes(phase);
   const detail = status?.detail ?? null;
   // `reaped === false` is the backend saying it could NOT confirm the remote
   // shell exited — a stray process may still hold the host. That is a warning,
@@ -168,7 +180,9 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
         <Server theme='outline' size='14' fill={dotColor} className='block shrink-0' style={{ lineHeight: 0 }} />
         <span className='text-13px text-t-primary font-[500] leading-none min-w-0 truncate'>{host.name}</span>
         <span className='text-11px leading-none shrink-0' style={{ color: dotColor }}>
-          {t(SSH_PHASE_LABEL_KEY[phase])}
+          {status == null && loading
+            ? t('ssh.pill.statusLoading')
+            : status == null && error ? t('ssh.pill.statusUnavailable') : t(SSH_PHASE_LABEL_KEY[phase])}
         </span>
       </div>
 
@@ -177,6 +191,16 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
       <div className='text-11px text-t-tertiary leading-16px'>
         {sudoStored ? t('ssh.pill.sudoStored') : t('ssh.pill.sudoMissing')}
       </div>
+
+      {status == null && !loading && !error ? (
+        <div className='text-11px text-t-secondary leading-16px'>{t('ssh.pill.noLink')}</div>
+      ) : null}
+      {error ? (
+        <div role='alert' className='text-11px text-t-secondary leading-16px'>
+          {t('ssh.pill.statusLoadFailed', { message: error })}
+          <Button size='mini' type='text' loading={loading} onClick={refresh}>{t('ssh.pill.refreshStatus')}</Button>
+        </div>
+      ) : null}
 
       {status != null && status.attempt > 0 ? (
         <div className='text-11px text-t-tertiary leading-16px'>
@@ -202,6 +226,24 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
       {unconfirmedExit ? (
         <div className='text-11px text-t-secondary leading-16px'>{t('ssh.pill.unconfirmedExit')}</div>
       ) : null}
+      {actionError ? (
+        <div role='alert' className='text-11px text-t-secondary leading-16px'>
+          {t('ssh.pill.controlFailed', { message: actionError })}
+        </div>
+      ) : null}
+      <div className='flex justify-end mt-4px'>
+        {hasActiveLink ? (
+          <Button size='mini' data-testid='ssh-link-disconnect' loading={pendingAction === 'disconnect'}
+            disabled={pendingAction != null} onClick={() => void controlLink('disconnect')}>
+            {t('ssh.pill.disconnect')}
+          </Button>
+        ) : (
+          <Button size='mini' type='primary' data-testid='ssh-link-connect' loading={pendingAction === 'connect'}
+            disabled={pendingAction != null || loading} onClick={() => void controlLink('connect')}>
+            {t(status == null || phase === 'idle' ? 'ssh.pill.connect' : 'ssh.pill.reconnect')}
+          </Button>
+        )}
+      </div>
     </div>
   );
 
@@ -210,7 +252,6 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
       size='mini'
       shape='round'
       type='secondary'
-      disabled={status == null}
       data-testid='ssh-host-status-pill'
       className={capabilityHeaderButtonClass(linked, 'shrink-0')}
       style={capabilityHeaderButtonStyle(dotColor)}
@@ -223,17 +264,6 @@ const BoundSshHostStatusPill: React.FC<Props> = ({ conversationId, sshHostId }) 
       </span>
     </Button>
   );
-
-  if (status == null) {
-    // Nothing has been published for this session yet, so there is no link state
-    // to open a panel about. The pill stays as a passive identity chip, and a
-    // disabled Arco button eats pointer events — hence the wrapper span.
-    return (
-      <Tooltip content={t('ssh.pill.noLink')}>
-        <span className='inline-flex'>{button}</span>
-      </Tooltip>
-    );
-  }
 
   return (
     <Popover trigger='click' position='br' content={panel}>

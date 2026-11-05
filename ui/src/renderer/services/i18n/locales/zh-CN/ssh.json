@@ -71,9 +71,7 @@
     "idle": "未建立链路",
     "degraded": "正在重建远程 shell…",
     "dropped": "链路已断",
-    "closed": "已关闭",
-    "unknown": "未连接",
-    "error": "连接错误"
+    "closed": "已关闭"
   },
   "pill": {
     "endpoint": "登录地址",
@@ -84,9 +82,17 @@
     "attempt": "第 {{attempt}} 次拨号",
     "retryIn": "{{seconds}} 秒后重试",
     "detail": "详情",
-    "noLink": "该会话尚未与主机建立链路。",
-    "droppedHint": "链路恢复前命令无法送达该主机。若迟迟不恢复，请检查凭据与主机密钥。",
-    "droppedActionRequired": "该链路不会自行恢复。请到「设置 → 远程主机」编辑此主机的凭据；若是主机密钥发生变更，请先核对并信任新密钥再重连。",
+    "noLink": "该会话当前未连接主机，可在此连接。",
+    "statusLoading": "正在读取连接状态…",
+    "statusUnavailable": "连接状态暂不可用",
+    "statusLoadFailed": "读取连接状态失败：{{message}}",
+    "refreshStatus": "刷新状态",
+    "connect": "连接",
+    "reconnect": "重新连接",
+    "disconnect": "断开连接",
+    "controlFailed": "连接操作失败：{{message}}",
+    "droppedHint": "命令暂时无法送达该主机。请检查主机、凭据与主机密钥，然后点击「重新连接」。",
+    "droppedActionRequired": "该链路不会自行恢复。请到「设置 → 远程主机」修正凭据；若是主机密钥发生变更，请先核对并信任新密钥，然后在此重新连接。",
     "unconfirmedExit": "无法确认远程 shell 已退出 —— 主机上可能仍有进程在跑。"
   },
   "test": {
@@ -95,7 +101,7 @@
     "failed": "连接失败：{{message}}"
   },
   "delete": {
-    "confirm": "删除此主机？请先移除绑定它的会话。",
+    "confirm": "删除此主机？相关连接将断开，原会话会保留。",
     "ok": "删除",
     "cancel": "取消"
   },

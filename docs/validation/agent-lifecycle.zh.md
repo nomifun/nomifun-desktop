@@ -557,3 +557,17 @@ StepFun Plan step-5-preview真实2子完整通过：1次delegate/2个Attempt/1�
 本轮证据目录为 `C:/Users/muli/.codex/visualizations/2026/10/21/01a15e6a-3be5-7b81-b6e5-d249464be2e5/`，含截图、视觉回执及 `input-queue-validation/` 日志。首轮 Windows ONNX 链接因继承的离线变量失败，随后只清除测试进程变量，使用已有分发缓存正常重编；沙箱首次运行在测试临时 workspace 的共享 authority 文件初始化失败，最终同一测试程序经所需权限运行。旧 Pause 用例按本轮确认合同补齐 queued-held／原 Turn steering 断言后，最终 11 项全部通过；失败记录保留，不改生产锁路径、依赖或权限规则。
 
 保留用户原有 `Cargo.toml`／`bun.lock` 改动，不纳入本轮提交。用户在验证完成后明确授权本轮 commit＋push，交付身份以 Git 记录为准；未打包安装或发布。未执行物理 Tauri 窗口、其他平台构建或真实外部模型验收，此前专项的实模报告不作为本轮最终图证明。
+
+### 10.10 SSH 会话主动建链与显式连接控制（2026-11-05）
+
+保存主机配置不拨号；首次新建 SSH Session 提交后由 Host 后台立即连接，不等待模型或握手完成后才返回。新建请求重放不重新拨号，网络失败保留会话及原 pool 诊断；建链受理错误不覆盖已提交的创建回执。会话页提供连接、断开和重新连接，断开复用原精确实例关闭事实链。工具只使用已开启的链接，不自行建链或复活；原监督器保留已建立链接的断线恢复。启动应用、打开历史会话不连接，没有闲置自动断开，正常退出沿原 Host shutdown 关闭连接。没有增加连接表、开关或第二份状态账本；UI/API 合同为53。
+
+| 范围 | 本轮证据 |
+| --- | --- |
+| 应用层 | `nomifun-app --test ssh_host_e2e --no-default-features` **8/8**。受控 loopback peer 完成真实 SSH 密码认证、shell readiness、SFTP 握手和退出证明；暂停首轮握手时创建响应仍及时返回。覆盖自动连接、失败保留、exact Reaped、断开后真实 ActionOwner 调用不建链、显式重连、完整 Host shutdown，以及文件数据库重启后读取历史不拨号。临时 known_hosts，不接触用户真实主机、凭据或 SSH 配置 |
+| 创建消费者 | `app_project_sessions::project_sessions_are_independent_paginated_history_and_navigation_never_rewrites_facts` **1/1**（其余7项未选入），验证共用创建函数返回结果调整后的真实消费者 |
+| SSH 资源 owner | lib **48项实跑通过**，包含工具不建链/不复活、owner隔离及受控 SSH/SFTP 退休协议。原沙箱限制 Git sh 的组在放行测试进程后 **16/16**，与首次已通过分组合并覆盖48项；没有修改生产代码绕过环境限制。主机服务11、主机删除1、失败拨号保留指纹1，共 **13项实跑通过** |
+| 升级与事实边界 | DB ID合同6、SSH schema3，共 **9/9**；022只删除主机簿冗余连接状态和最近连接时间，验证已有配置、全部凭据密文、指纹、旧迁移checksum及其他schema保持。Contracts空库基线 **1/1**。旧provider/lease、冗余action authority副本、工具lazy revive及无实际产品模式的可选pool分支已退役，canonical资源及原关闭事实合同保留 |
+| 界面与静态检查 | SSH相关8文件 **69项通过**；最终文案/渲染2文件 **6项复验通过**（与前组重叠，不累加）。直接TypeScript检查、i18n生成及校验、desktop UI boundary、Agent Session boundary、迁移边界脚本4项、文档链接及diff空白检查通过。状态快照读取中/失败与确实无链接分开，命令后不额外清空已收到的关闭诊断 |
+
+真实sshd的18项及Linux canonical exec的6项因本机缺少适用环境明确未执行；受控协议peer不证明远端Linux命令、setpriv/sudo或其他平台原生行为。本轮未执行物理Tauri窗口、其他平台构建、真实外部模型或发布。首次ORT链接失败由既有静态分发缓存解决，仅调整验证进程环境并在ignored测试目录补入已有DirectML.dll，不改全局环境、仓库构建配置或依赖版本。用户原有Cargo.toml、bun.lock及临时远程示例改动不纳入本轮提交；提交与推送状态以Git记录为准。

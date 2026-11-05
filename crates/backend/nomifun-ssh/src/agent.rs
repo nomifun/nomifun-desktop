@@ -118,19 +118,15 @@ impl SshResourceOperation {
 /// One exact SSH host selected in a resolved AgentSession snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentSshHostResource {
-    binding_id: String,
     owner_id: String,
     ssh_host_id: SshHostId,
-    remote_cwd: String,
     operations: BTreeSet<SshResourceOperation>,
 }
 
 impl AgentSshHostResource {
     pub fn from_operation_names<I, S>(
-        binding_id: impl Into<String>,
         owner_id: impl Into<String>,
         ssh_host_id: SshHostId,
-        remote_cwd: impl Into<String>,
         operations: I,
     ) -> Result<Self, SshActionError>
     where
@@ -148,28 +144,18 @@ impl AgentSshHostResource {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(binding_id, owner_id, ssh_host_id, remote_cwd, operations)
+        Self::new(owner_id, ssh_host_id, operations)
     }
 
     pub fn new(
-        binding_id: impl Into<String>,
         owner_id: impl Into<String>,
         ssh_host_id: SshHostId,
-        remote_cwd: impl Into<String>,
         operations: impl IntoIterator<Item = SshResourceOperation>,
     ) -> Result<Self, SshActionError> {
-        let binding_id = binding_id.into();
         let owner_id = owner_id.into();
-        let remote_cwd = remote_cwd.into();
-        if binding_id.trim().is_empty() || owner_id.trim().is_empty() {
-            return Err(SshActionError::InvalidResource(
-                "ssh_host binding and owner identities must not be blank".into(),
-            ));
-        }
         UserId::try_from(owner_id.as_str()).map_err(|error| {
             SshActionError::InvalidResource(format!("ssh_host owner is invalid: {error}"))
         })?;
-        validate_remote_path("remote_cwd", &remote_cwd)?;
         let operations = operations.into_iter().collect::<BTreeSet<_>>();
         if operations.is_empty() {
             return Err(SshActionError::InvalidResource(
@@ -177,31 +163,10 @@ impl AgentSshHostResource {
             ));
         }
         Ok(Self {
-            binding_id,
             owner_id,
             ssh_host_id,
-            remote_cwd,
             operations,
         })
-    }
-
-    pub fn binding_id(&self) -> &str {
-        &self.binding_id
-    }
-
-    pub fn ssh_host_id(&self) -> &SshHostId {
-        &self.ssh_host_id
-    }
-
-    pub fn remote_cwd(&self) -> &str {
-        &self.remote_cwd
-    }
-
-    pub fn operation_names(&self) -> BTreeSet<&'static str> {
-        self.operations
-            .iter()
-            .map(|operation| operation.as_str())
-            .collect()
     }
 
     fn authorize(&self, principal_id: &str, action: SshAction) -> Result<(), SshActionError> {
@@ -219,8 +184,7 @@ impl AgentSshHostResource {
     }
 }
 
-/// Frozen SSH authority. An unbound Module remains visible to the product, but
-/// no action can dial or execute until a host resource is explicitly selected.
+/// Frozen SSH authority. Actions use only the selected host's opened link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentSshAuthority {
     principal_id: String,
@@ -403,9 +367,7 @@ impl SshActionOwner {
         context: &SshActionContext,
         input: SshFsReadInput,
     ) -> Result<SshFsReadOutput, SshActionError> {
-        let backend = self
-            .backend(authority, context, SshAction::FsRead)
-            .await?;
+        let backend = self.backend(authority, context, SshAction::FsRead)?;
         match input {
             SshFsReadInput::Read { path } => {
                 validate_remote_path("path", &path)?;
@@ -468,9 +430,7 @@ impl SshActionOwner {
                 "content exceeds the {MAX_SSH_ACTION_WRITE_BYTES}-byte write limit"
             )));
         }
-        let backend = self
-            .backend(authority, context, SshAction::FsWrite)
-            .await?;
+        let backend = self.backend(authority, context, SshAction::FsWrite)?;
         let bytes_written = input.content.len();
         backend
             .write_file(&input.path, input.content.into_bytes())
@@ -489,7 +449,7 @@ impl SshActionOwner {
         input: SshExecInput,
     ) -> Result<SshCommandOutput, SshActionError> {
         validate_command(&input.command, input.timeout_ms)?;
-        let link = self.link(authority, context, SshAction::Exec).await?;
+        let link = self.link(authority, context, SshAction::Exec)?;
         self.pool
             .run_unprivileged_action(
                 authority.principal_id(),
@@ -514,7 +474,7 @@ impl SshActionOwner {
                 "ssh/sudo command must not contain a second privilege launcher".into(),
             ));
         }
-        let link = self.link(authority, context, SshAction::Sudo).await?;
+        let link = self.link(authority, context, SshAction::Sudo)?;
         self.pool
             .run_sudo_action(
                 authority.principal_id(),
@@ -527,17 +487,17 @@ impl SshActionOwner {
             .map_err(dispatch_error)
     }
 
-    async fn backend(
+    fn backend(
         &self,
         authority: &AgentSshAuthority,
         context: &SshActionContext,
         action: SshAction,
     ) -> Result<std::sync::Arc<dyn SshBackend>, SshActionError> {
-        let link = self.link(authority, context, action).await?;
+        let link = self.link(authority, context, action)?;
         Ok(self.pool.backend_for(&link))
     }
 
-    async fn link(
+    fn link(
         &self,
         authority: &AgentSshAuthority,
         context: &SshActionContext,
@@ -547,13 +507,11 @@ impl SshActionOwner {
         let resource = authority.require(action)?;
         self
             .pool
-            .acquire(
+            .existing_link(
                 authority.principal_id(),
                 &context.agent_session_id,
                 &resource.ssh_host_id,
-                &resource.remote_cwd,
             )
-            .await
             .map_err(external_error)
     }
 }
@@ -651,10 +609,8 @@ mod tests {
         operations: impl IntoIterator<Item = SshResourceOperation>,
     ) -> AgentSshHostResource {
         AgentSshHostResource::new(
-            "binding-a",
             owner,
             SshHostId::new(),
-            "/srv/project",
             operations,
         )
         .unwrap()
@@ -699,10 +655,8 @@ mod tests {
         let other = "0190f5fe-7c00-7a00-8000-000000000002";
         assert!(AgentSshAuthority::bound(OWNER, resource(other, [SshResourceOperation::Read])).is_err());
         assert!(AgentSshHostResource::from_operation_names(
-            "binding-a",
             OWNER,
             SshHostId::new(),
-            "/tmp",
             ["read", "connect"],
         )
         .is_err());

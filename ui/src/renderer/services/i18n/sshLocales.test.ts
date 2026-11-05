@@ -36,6 +36,14 @@ const SSH_PILL_KEYS = [
   'pill.retryIn',
   'pill.detail',
   'pill.noLink',
+  'pill.statusLoading',
+  'pill.statusUnavailable',
+  'pill.statusLoadFailed',
+  'pill.refreshStatus',
+  'pill.connect',
+  'pill.reconnect',
+  'pill.disconnect',
+  'pill.controlFailed',
   'pill.droppedHint',
   'pill.droppedActionRequired',
   'pill.unconfirmedExit',
@@ -89,6 +97,8 @@ describe('ssh locale coverage', () => {
       for (const [key, placeholder] of [
         ['pill.attempt', '{{attempt}}'],
         ['pill.retryIn', '{{seconds}}'],
+        ['pill.statusLoadFailed', '{{message}}'],
+        ['pill.controlFailed', '{{message}}'],
       ] as const) {
         if (!String(getLocaleValue(locale, key)).includes(placeholder)) {
           failures.push(`${name} ssh.${key} lost ${placeholder}`);

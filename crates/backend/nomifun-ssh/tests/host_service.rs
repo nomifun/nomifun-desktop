@@ -1,5 +1,8 @@
 //! Host-book service: encryption at rest, masked round-trip, and the mandatory
 //! negative security assertion (no plaintext in the serialized response).
+#[path = "support/mod.rs"]
+mod support;
+
 use std::sync::Arc;
 
 use nomifun_common::SshHostId;
@@ -346,9 +349,10 @@ async fn the_host_book_router_builds_with_every_route() {
     // router — i.e. at boot, not on a request. The import routes sit on the same
     // prefix as the `{ssh_host_id}` capture, so this asserts the whole router
     // still assembles rather than discovering it when the app fails to start.
-    let (service, _user) = service_with_owner().await;
+    let directory = tempfile::TempDir::new().unwrap();
+    let harness = support::harness(directory.path().join("known_hosts"), support::brisk_tuning()).await;
     let _router = nomifun_ssh::ssh_host_routes(nomifun_ssh::SshHostRouterState {
-        service,
-        pool: None,
+        service: harness.service(),
+        pool: harness.pool.clone(),
     });
 }

@@ -762,6 +762,14 @@ export const agentPlatform = {
     createSsh: httpPost<CreateAgentSessionResponse, CreateSshAgentSessionRequest>(
       '/api/agent-sessions/ssh'
     ),
+    connectSsh: httpPost<{ accepted: boolean }, { agent_session_id: string }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/ssh/connect`,
+      () => undefined
+    ),
+    disconnectSsh: httpPost<{ accepted: boolean }, { agent_session_id: string }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/ssh/disconnect`,
+      () => undefined
+    ),
     getCapabilitySelection: httpGet<AgentSessionCapabilitySelectionState, { agent_session_id: string }>(
       (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`
     ),
@@ -1994,8 +2002,6 @@ export interface IApiSshHost {
   certificate: string | null;
   sudoPassword: string | null;
   hostFingerprint: string | null;
-  status: string;
-  lastConnectedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -2038,9 +2044,7 @@ export type ISshLinkPhase =
  * different depending on how the client learned about it. Every field is always
  * present — "unknown" is an explicit null, never an omitted key.
  *
- * This — not {@link IApiSshHost.status} — is live link state. The host row's
- * `status` column is a per-host hint that is written on first connect and never
- * walked back, so it is permanently green once a host has ever worked.
+ * Link state belongs to the session, independently of the saved host profile.
  */
 export interface IApiSshStatus {
   sshHostId: SshHostId;

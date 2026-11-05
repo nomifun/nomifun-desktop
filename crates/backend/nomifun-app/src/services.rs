@@ -2351,12 +2351,9 @@ impl AppServices {
         ));
         app_mcp_sources.set_auth_service(&mcp_auth)?;
 
-        // SSH remote sessions: ONE process-level connection pool, built here
-        // because the agent factory below is its first consumer and the host-book
-        // routes plus the conversation-delete cascade must receive this very
-        // handle. A second pool would supervise sockets nobody is talking to while
-        // reporting status for the ones the operator can see. Host keys are learned
-        // into the operator's own ~/.ssh/known_hosts.
+        // SSH launches, Actions, status routes and Session cleanup share this
+        // process-level pool. Constructing it does not connect historical Sessions.
+        // Host keys are learned into the operator's own ~/.ssh/known_hosts.
         let ssh_pool = {
             let repo = Arc::new(nomifun_db::SqliteSshHostRepository::new(
                 database.pool().clone(),

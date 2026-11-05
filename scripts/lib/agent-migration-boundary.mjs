@@ -22,6 +22,7 @@ export const AGENT_FORWARD_MIGRATIONS = Object.freeze({
   officeOverviewRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/019_remove_office_overview.sql',
   feishuSourceKindForwardMigration: 'crates/backend/nomifun-db/migrations/020_feishu_knowledge_source_kind.sql',
   feishuConnectorTablesForwardMigration: 'crates/backend/nomifun-db/migrations/021_feishu_connector_tables.sql',
+  sshHostStateRetirementForwardMigration: 'crates/backend/nomifun-db/migrations/022_retire_ssh_host_connection_status.sql',
 });
 const KNOWN = new Set(Object.values(AGENT_FORWARD_MIGRATIONS));
 export function areKnownAgentMigrationPaths(paths) {

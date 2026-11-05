@@ -32,8 +32,6 @@ pub struct SshHostResponse {
     pub certificate: Option<String>,
     pub sudo_password: Option<String>,
     pub host_fingerprint: Option<String>,
-    pub status: String,
-    pub last_connected_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -57,8 +55,6 @@ impl From<SshHostRow> for SshHostResponse {
             certificate: mask(&r.certificate_encrypted),
             sudo_password: mask(&r.sudo_password_encrypted),
             host_fingerprint: r.host_fingerprint,
-            status: r.status,
-            last_connected_at: r.last_connected_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }

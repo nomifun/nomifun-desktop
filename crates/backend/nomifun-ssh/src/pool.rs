@@ -479,7 +479,6 @@ impl std::fmt::Debug for SshLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshProbeOutcome {
     pub ok: bool,
-    pub host_fingerprint: Option<String>,
     pub detail: String,
 }
 
@@ -635,8 +634,8 @@ struct PoolInner {
 }
 
 /// Process-level pool of live SSH links. `clone()` is a handle to the same pool,
-/// never a copy of it — the whole point is that the router, the agent factory and
-/// the conversation-delete hook all see the same sockets.
+/// never a copy of it — the router, Session startup, SSH actions and the
+/// conversation-delete hook all see the same sockets.
 #[derive(Clone)]
 pub struct SshConnectionPool(Arc<PoolInner>);
 
@@ -685,10 +684,23 @@ impl SshConnectionPool {
     }
 
     /// Whether this pool still holds the link for `key`. False once it has been
-    /// closed (or was never opened), which is how a released lease tells "the pool
-    /// kept my session" from "my session is gone".
+    /// closed (or was never opened).
     pub fn is_pooled(&self, key: &SshLinkKey) -> bool {
         self.0.links.contains_key(key)
+    }
+
+    /// Tools use a link already opened by Session startup or an explicit connect.
+    /// Looking up an absent or withdrawn link never creates or dials one.
+    pub(crate) fn existing_link(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        ssh_host_id: &SshHostId,
+    ) -> Result<Arc<SshLink>, String> {
+        self.0.links.get(&SshLinkKey::new(conversation_id, ssh_host_id.clone()))
+            .filter(|link| link.owner_id == user_id)
+            .map(|link| Arc::clone(link.value()))
+            .ok_or_else(|| "The SSH link is not open for this Session. Connect to the host before using SSH tools.".into())
     }
 
     /// The link for `(conversation_id, ssh_host_id)`, connected. Reuses the
@@ -800,7 +812,7 @@ impl SshConnectionPool {
         let _command = link.command_slot(deadline).await.map_err(SshActionDispatchError::Rejected)?;
         let handle = link.current_handle().await.ok_or_else(|| {
             SshActionDispatchError::Rejected(format!(
-                "ssh link for this session is not connected ({:?})",
+                "ssh link for this session is not connected ({:?}); reconnect to the host before using SSH tools",
                 link.state().phase()
             ))
         })?;
@@ -845,7 +857,7 @@ impl SshConnectionPool {
         let _command = link.command_slot(deadline).await.map_err(SshActionDispatchError::Rejected)?;
         let handle = link.current_handle().await.ok_or_else(|| {
             SshActionDispatchError::Rejected(format!(
-                "ssh link for this session is not connected ({:?})",
+                "ssh link for this session is not connected ({:?}); reconnect to the host before using SSH tools",
                 link.state().phase()
             ))
         })?;
@@ -1175,14 +1187,12 @@ impl SshConnectionPool {
         if self.0.quiescing.load(Ordering::SeqCst) {
             return SshProbeOutcome {
                 ok: false,
-                host_fingerprint: None,
                 detail: SshDialError::ShuttingDown.to_string(),
             };
         }
         let Some(_global_lease) = self.0.global_admission.admit() else {
             return SshProbeOutcome {
                 ok: false,
-                host_fingerprint: None,
                 detail: SshDialError::ShuttingDown.to_string(),
             };
         };
@@ -1195,48 +1205,29 @@ impl SshConnectionPool {
         {
             Ok(handle) => handle,
             Err(e) => {
-                let detail = e.to_string();
-                let _ = self
-                    .0
-                    .service
-                    .mark_unreachable(user_id, ssh_host_id, &detail)
-                    .await;
                 return SshProbeOutcome {
                     ok: false,
-                    host_fingerprint: None,
-                    detail,
+                    detail: e.to_string(),
                 };
             }
         };
 
-        let fingerprint = handle.fingerprint.clone();
         let probe = handle.shell().run("true", PROBE_TIMEOUT).await;
         let outcome = match probe {
             Ok(_) => {
-                let _ = self
-                    .0
-                    .service
-                    .mark_connected(user_id, ssh_host_id, fingerprint.as_deref())
-                    .await;
+                if let Some(fingerprint) = handle.fingerprint.as_deref() {
+                    let _ = self.0.service
+                        .record_fingerprint(user_id, ssh_host_id, fingerprint).await;
+                }
                 SshProbeOutcome {
                     ok: true,
-                    host_fingerprint: fingerprint,
                     detail: "connection succeeded".to_string(),
                 }
             }
-            Err(e) => {
-                let detail = format!("connected but the probe command failed: {e}");
-                let _ = self
-                    .0
-                    .service
-                    .mark_unreachable(user_id, ssh_host_id, &detail)
-                    .await;
-                SshProbeOutcome {
-                    ok: false,
-                    host_fingerprint: fingerprint,
-                    detail,
-                }
-            }
+            Err(e) => SshProbeOutcome {
+                ok: false,
+                detail: format!("connected but the probe command failed: {e}"),
+            },
         };
         handle.shell().close(self.0.tuning.close_budget).await;
         let _ = handle.conn().disconnect().await;
@@ -1247,13 +1238,6 @@ impl SshConnectionPool {
     /// [`PoolInner::recycle_shell`]). Called by the link-backed backend.
     pub(crate) async fn recycle_shell(&self, link: &Arc<SshLink>, detail: &str) {
         self.0.recycle_shell(link, detail).await;
-    }
-
-    /// Dial a link the reconnect ladder gave up on, because a tool call asked for
-    /// it. Treated as a deliberate dial, and still subject to the host's dial gate
-    /// — so a model retrying in a loop cannot outpace the cooldown.
-    pub(crate) async fn revive(&self, link: &Arc<SshLink>) -> Result<(), SshDialError> {
-        self.0.ensure_connected(link).await
     }
 
     /// Report that a tool call found the transport gone.
@@ -1268,79 +1252,6 @@ fn remaining_command_budget(deadline: Instant) -> Result<u64, SshActionDispatchE
         Err(SshActionDispatchError::Rejected("SSH command budget expired before input was submitted".into()))
     } else {
         Ok(remaining.min(u128::from(u64::MAX)) as u64)
-    }
-}
-
-/// The pool *is* the agent's SSH provider. There is deliberately no second
-/// un-pooled path: a session that dialled on the side would be invisible to the
-/// status routes, to the delete cascade and to shutdown accounting.
-#[async_trait::async_trait]
-impl nomifun_ai_agent::SshBackendProvider for SshConnectionPool {
-    async fn connect(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        ssh_host_id: &str,
-        remote_cwd: &str,
-    ) -> Result<nomifun_ai_agent::SshSessionBinding, String> {
-        let id = SshHostId::parse(ssh_host_id)
-            .map_err(|e| format!("invalid ssh_host_id: {e}"))?;
-        let link = self
-            .acquire(user_id, conversation_id, &id, remote_cwd)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(nomifun_ai_agent::SshSessionBinding {
-            backend: self.backend_for(&link),
-            lease: Arc::new(PooledSessionLease {
-                pool: self.clone(),
-                link,
-            }),
-        })
-    }
-}
-
-/// One agent runtime's claim on a pooled link.
-///
-/// Holds the pool strongly on purpose: the pool is a process-level service that
-/// outlives every runtime, and a lease that could not reach it would have to
-/// report a failure it cannot actually distinguish from success.
-struct PooledSessionLease {
-    pool: SshConnectionPool,
-    link: Arc<SshLink>,
-}
-
-#[async_trait::async_trait]
-impl nomifun_ai_agent::SshSessionLease for PooledSessionLease {
-    /// Report, never close. The runtime that holds this lease is destroyed and
-    /// rebuilt on every model switch; closing here would cost the operator their
-    /// shell, their cwd and another passphrase prompt for a UI click. So the answer
-    /// is read out of the link's own state — the single truth this crate keeps.
-    async fn release(&self) -> nomifun_ai_agent::SshLeaseRelease {
-        use nomifun_ai_agent::SshLeaseRelease;
-        match self.link.state() {
-            SshLinkState::Closed { teardown } => match teardown {
-                SshTeardown::Reaped { detail } => SshLeaseRelease::Reaped { detail },
-                // A lease reports proof, and "already down" is the absence of it:
-                // the remote shell was never seen to exit. The pool's shutdown
-                // report keeps the two apart because it counts links for an
-                // operator; a runtime can only say "proven" or "not proven".
-                SshTeardown::Lost { detail } | SshTeardown::AlreadyDown { detail } => {
-                    SshLeaseRelease::Lost { detail }
-                }
-            },
-            other if self.pool.is_pooled(self.link.key()) => SshLeaseRelease::Retained {
-                detail: format!(
-                    "link kept for this conversation ({:?})",
-                    other.phase()
-                ),
-            },
-            other => SshLeaseRelease::Lost {
-                detail: format!(
-                    "link left the pool while {:?} and never reported how it closed",
-                    other.phase()
-                ),
-            },
-        }
     }
 }
 
@@ -1496,7 +1407,7 @@ impl PoolInner {
             }
             Err(SshDialError::LinkRetired)=>Err(SshDialError::LinkRetired),
             Err(e) => {
-                self.fail(link, &e).await;
+                self.fail(link, &e);
                 Err(e)
             }
         }
@@ -1518,36 +1429,23 @@ impl PoolInner {
             },
         );
         self.spawn_supervisor(link);
-        // Best-effort hint on the host row; the live truth is the watch above.
-        if let Err(e) = self
-            .service
-            .mark_connected(
-                &link.owner_id,
-                &link.key.ssh_host_id,
-                fingerprint.as_deref(),
-            )
-            .await
+        if let Some(fingerprint) = fingerprint.as_deref()
+            && let Err(e) = self.service.record_fingerprint(
+                &link.owner_id, &link.key.ssh_host_id, fingerprint,
+            ).await
         {
-            debug!(error = %e, "could not stamp the ssh host as connected");
+            debug!(error = %e, "could not save the ssh host fingerprint");
         }
     }
 
-    async fn fail(&self, link: &Arc<SshLink>, err: &SshDialError) {
-        let detail = err.to_string();
+    fn fail(&self, link: &Arc<SshLink>, err: &SshDialError) {
         self.publish(
             link,
             SshLinkState::Dropped {
-                detail: detail.clone(),
+                detail: err.to_string(),
                 retryable: err.is_retryable(),
             },
         );
-        if let Err(e) = self
-            .service
-            .mark_unreachable(&link.owner_id, &link.key.ssh_host_id, &detail)
-            .await
-        {
-            debug!(error = %e, "could not walk back the ssh host status");
-        }
     }
 
     /// Dial the link's host through its gate, replaying the link's last proven
@@ -1958,7 +1856,7 @@ impl PoolInner {
                     // Rejected credentials, a changed host key, a withdrawn host:
                     // retrying would only lock the account out or re-accept a key
                     // that a human has to look at first.
-                    self.fail(link, &e).await;
+                    self.fail(link, &e);
                     return false;
                 }
                 Err(e) => debug!(attempt, error = %e, "ssh redial failed"),
@@ -2014,6 +1912,40 @@ mod tests {
     struct SilentEvents;
     impl nomifun_realtime::UserEventSink for SilentEvents {
         fn send_to_user(&self,_user:&str,_event:nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    }
+
+    #[tokio::test]
+    async fn tools_never_create_or_reopen_an_absent_link() {
+        let db = nomifun_db::init_database_memory().await.unwrap();
+        let service = SshHostService::new(Arc::new(nomifun_db::SqliteSshHostRepository::new(db.pool().clone())), [7; 32]);
+        let pool = SshConnectionPool::new(service, PathBuf::from("unused-fixture-known-hosts"), SshEventEmitter::new(Arc::new(SilentEvents)));
+        let principal = nomifun_common::UserId::new();
+        let session = nomifun_common::ConversationId::new();
+        let host = SshHostId::new();
+        let authority = crate::AgentSshAuthority::bound(principal.as_str(),
+            crate::AgentSshHostResource::new(principal.as_str(), host.clone(), [crate::SshResourceOperation::Execute]).unwrap(),
+        ).unwrap();
+        let context = crate::SshActionContext {
+            principal_id: principal.as_str().into(), agent_session_id: session.as_str().into(), operation_id: "no-implicit-connect".into(),
+        };
+        let owner = crate::SshActionOwner::new(pool.clone());
+        let command = crate::SshExecInput { command: "true".into(), timeout_ms: 1_000 };
+        let error = owner.exec(&authority, &context, command.clone()).await.unwrap_err();
+        assert!(matches!(error, crate::SshActionError::External(detail) if detail.contains("Connect to the host")));
+        assert_eq!(pool.active_link_count(), 0);
+        assert!(pool.0.gates.is_empty(), "a tool without a link must not start a host dial");
+
+        let key = SshLinkKey::new(session.as_str(), host.clone());
+        let original = pool.0.link_for(&key, principal.as_str(), ".");
+        assert!(pool.existing_link("foreign-owner", session.as_str(), &host).is_err());
+        let backend = pool.backend_for(&original);
+        assert!(backend.stat("/").await.unwrap_err().contains("not connected"));
+        assert!(pool.0.gates.is_empty(), "a backend must not revive an idle link");
+        pool.close_link(&key).await;
+        let error = owner.exec(&authority, &context, command).await.unwrap_err();
+        assert!(matches!(error, crate::SshActionError::External(detail) if detail.contains("Connect to the host")));
+        assert_eq!(pool.active_link_count(), 0, "a tool must not reopen a manually closed link");
+        assert!(pool.0.gates.is_empty());
     }
 
     #[tokio::test]

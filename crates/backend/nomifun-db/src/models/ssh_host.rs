@@ -26,9 +26,6 @@ pub struct SshHostRow {
     pub sudo_password_encrypted: Option<String>,
     /// SHA256 host-key fingerprint recorded on first connect.
     pub host_fingerprint: Option<String>,
-    /// One of: "unknown", "connected", "error".
-    pub status: String,
-    pub last_connected_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

@@ -302,6 +302,7 @@ mod tests {
         database.execute_batch(include_str!("../../nomifun-db/migrations/019_remove_office_overview.sql")).expect("Office overview retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/020_feishu_knowledge_source_kind.sql")).expect("Feishu source kind migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/021_feishu_connector_tables.sql")).expect("Feishu connector table rename");
+        database.execute_batch(include_str!("../../nomifun-db/migrations/022_retire_ssh_host_connection_status.sql")).expect("SSH host connection hint retirement");
         database.execute_batch(include_str!("../../nomifun-db/migrations/011_cron_run_cancellation.sql")).expect("Cron cancellation migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/012_unify_cron_agent_binding.sql")).expect("Cron workbench binding migration");
         database.execute_batch(include_str!("../../nomifun-db/migrations/015_retire_execution_plan_gate.sql")).expect("unused execution plan gate retirement");

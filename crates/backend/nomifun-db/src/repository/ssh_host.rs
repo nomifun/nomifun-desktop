@@ -1,4 +1,4 @@
-use nomifun_common::{SshHostId, TimestampMs};
+use nomifun_common::SshHostId;
 
 use crate::error::DbError;
 use crate::models::SshHostRow;
@@ -29,14 +29,12 @@ pub trait ISshHostRepository: Send + Sync {
     /// Delete an owned host. `DbError::NotFound` if absent or not owned.
     async fn delete(&self, user_id: &str, id: &SshHostId) -> Result<(), DbError>;
 
-    /// Update connection status and (optionally) last_connected_at + fingerprint.
-    async fn update_status(
+    /// Record the negotiated host-key fingerprint without changing credentials.
+    async fn update_fingerprint(
         &self,
         user_id: &str,
         id: &SshHostId,
-        status: &str,
-        last_connected_at: Option<TimestampMs>,
-        host_fingerprint: Option<&str>,
+        host_fingerprint: &str,
     ) -> Result<(), DbError>;
 }
 

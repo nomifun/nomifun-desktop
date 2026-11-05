@@ -662,16 +662,9 @@ impl NomiCoreWave2Host {
                     "the ssh_host resource identity is invalid: {error}"
                 ))
             })?;
-        let remote_cwd = binding
-            .typed_parameters
-            .get("remote_cwd")
-            .cloned()
-            .unwrap_or_else(|| ".".to_owned());
         let resource = nomifun_ssh::AgentSshHostResource::from_operation_names(
-            binding.binding_id.as_ref(),
             binding.owner_id.clone(),
             ssh_host_id,
-            remote_cwd,
             binding.operations.iter(),
         )
         .map_err(ssh_action_error)?;

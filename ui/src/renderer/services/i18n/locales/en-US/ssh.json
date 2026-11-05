@@ -71,9 +71,7 @@
     "idle": "No link",
     "degraded": "Recycling shell…",
     "dropped": "Link lost",
-    "closed": "Closed",
-    "unknown": "Not connected",
-    "error": "Connection error"
+    "closed": "Closed"
   },
   "pill": {
     "endpoint": "Endpoint",
@@ -84,9 +82,17 @@
     "attempt": "Dial attempt {{attempt}}",
     "retryIn": "Next retry in {{seconds}}s",
     "detail": "Detail",
-    "noLink": "This session has no live link to the host yet.",
-    "droppedHint": "Commands cannot reach the host until the link is back. If it does not return on its own, check the credentials and the host key.",
-    "droppedActionRequired": "This link will not come back on its own. Open 「Settings → Remote hosts」 to fix this host's credentials, or — if its host key changed — to review and trust the new key before reconnecting.",
+    "noLink": "This session is not connected to the host. Connect here when ready.",
+    "statusLoading": "Loading link status…",
+    "statusUnavailable": "Link status unavailable",
+    "statusLoadFailed": "Could not read link status: {{message}}",
+    "refreshStatus": "Refresh status",
+    "connect": "Connect",
+    "reconnect": "Reconnect",
+    "disconnect": "Disconnect",
+    "controlFailed": "Link command failed: {{message}}",
+    "droppedHint": "Commands cannot reach the host. Check the host, credentials and host key, then click Reconnect.",
+    "droppedActionRequired": "This link will not come back on its own. Fix the credentials in Settings → Remote hosts, or review and trust a changed host key, then reconnect here.",
     "unconfirmedExit": "The remote shell could not be confirmed as exited — a process may still be running on the host."
   },
   "test": {
@@ -95,7 +101,7 @@
     "failed": "Connection failed: {{message}}"
   },
   "delete": {
-    "confirm": "Delete this host? Sessions bound to it must be removed first.",
+    "confirm": "Delete this host? Its connections will close and existing sessions will be kept.",
     "ok": "Delete",
     "cancel": "Cancel"
   },

@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { InvalidEntityIdError } from '@/common/types/ids';
-import { ssh, type IApiSshStatus } from './ipcBridge';
+import { agentPlatform, ssh, type IApiSshStatus } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
 const SSH_HOST_ID = '0190f5fe-7c00-7a00-8000-0000000000a1';
@@ -47,6 +47,27 @@ function respondWith(data: unknown): void {
 }
 
 describe('ssh live-status wire contract', () => {
+  test('link controls post only the canonical session identity in the URL', async () => {
+    const requests: { url: string; method?: string; body: BodyInit | null | undefined }[] = [];
+    globalThis.fetch = (async (input, init) => {
+      requests.push({ url: String(input), method: init?.method, body: init?.body });
+      return new Response(JSON.stringify({ success: true, data: { accepted: true } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      expect(await agentPlatform.sessions.connectSsh.invoke({ agent_session_id: CONVERSATION_ID })).toEqual({ accepted: true });
+      expect(await agentPlatform.sessions.disconnectSsh.invoke({ agent_session_id: CONVERSATION_ID })).toEqual({ accepted: true });
+      expect(requests.map((request) => new URL(request.url, 'http://127.0.0.1').pathname)).toEqual([
+        `/api/agent-sessions/${CONVERSATION_ID}/ssh/connect`,
+        `/api/agent-sessions/${CONVERSATION_ID}/ssh/disconnect`,
+      ]);
+      expect(requests.every((request) => request.method === 'POST' && request.body == null)).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test('the snapshot route and the push event name are the ones the backend serves', () => {
     // Plural on purpose: `/api/ssh-hosts/status` would be shadowed by the
     // `/{ssh_host_id}` capture on the same prefix.
@@ -101,10 +122,7 @@ describe('ssh live-status wire contract', () => {
     }
   });
 
-  test('the live path never reads the host row status column', () => {
-    // `IApiSshHost.status` is the host book's stale per-host hint (V9: it is
-    // written once on connect and never walked back). Live link state comes
-    // only from ssh.status / the statuses snapshot.
+  test('live link status is independent of the saved host profile', () => {
     expect(source.includes('IApiSshStatus')).toBe(true);
     const mapperStart = source.indexOf('const fromApiSshStatus');
     const statusesBlock = source.slice(
@@ -114,6 +132,9 @@ describe('ssh live-status wire contract', () => {
     expect(statusesBlock.length).toBeGreaterThan(0);
     expect(statusesBlock.includes('value.status')).toBe(false);
     expect(statusesBlock.includes('host.status')).toBe(false);
+    const hostDto = source.slice(source.indexOf('export interface IApiSshHost {'), source.indexOf('/** Create payload'));
+    expect(hostDto.includes('status:')).toBe(false);
+    expect(hostDto.includes('lastConnectedAt')).toBe(false);
   });
 
   test('snapshot rows are branded at the boundary and reject a legacy id', async () => {

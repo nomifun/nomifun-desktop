@@ -1101,7 +1101,7 @@ impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
 pub fn build_ssh_host_state(services: &AppServices) -> nomifun_ssh::SshHostRouterState {
     nomifun_ssh::SshHostRouterState {
         service: services.ssh_pool.host_service(),
-        pool: Some(services.ssh_pool.clone()),
+        pool: services.ssh_pool.clone(),
     }
 }
 
@@ -2151,9 +2151,7 @@ mod tests {
         };
         let services = AppServices::from_config(db, &config).await.unwrap();
 
-        let routed = build_ssh_host_state(&services)
-            .pool
-            .expect("the ssh host routes must be backed by the process pool");
+        let routed = build_ssh_host_state(&services).pool;
         assert!(
             routed.is_same_pool(&services.ssh_pool),
             "build_ssh_host_state must reuse services.ssh_pool instead of building its own"
@@ -2162,14 +2160,12 @@ mod tests {
         // The host-facing adapter uses the same pool. A link it
         // opens — including one that failed to dial, which is precisely what the
         // header pill has to show — must be visible through the routes' handle.
-        let provider: Arc<dyn nomifun_ai_agent::SshBackendProvider> =
-            Arc::new(services.ssh_pool.clone());
         let unsaved_host = nomifun_common::SshHostId::new();
-        let dialled = provider
-            .connect(
+        let dialled = services.ssh_pool
+            .acquire(
                 services.authoritative_user_id.as_ref(),
                 "conversation-with-no-saved-host",
-                unsaved_host.as_str(),
+                &unsaved_host,
                 ".",
             )
             .await;
@@ -2180,7 +2176,7 @@ mod tests {
         assert_eq!(
             routed.active_link_count(),
             1,
-            "the routes must see the link the agent's provider just opened"
+            "the routes must see the link opened through the shared session pool"
         );
 
         let services_source = include_str!("../services.rs");

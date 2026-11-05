@@ -22,7 +22,7 @@ import { getConversationCreateErrorMessage } from '../utils/conversationCreateEr
  * One implementation for both entry points — the host book in settings and the
  * sidebar's remote-session popover — so a host always starts a session the same
  * way. Creation selects an `ssh_host` resource; the canonical session binding
- * records its identity and the session factory connects its remote tools.
+ * records its identity and the host starts connecting in the background.
  *
  * Resolves `true` once the conversation exists and navigation was issued, so a
  * caller can close its own surface only on success and leave it open (with the

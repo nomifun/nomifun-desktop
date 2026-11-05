@@ -1305,10 +1305,8 @@ impl DesktopServer {
             }
         }
 
-        // Quiesce the SSH pool before the database closes: closing a link walks the
-        // host row back from "connected", and a link let go of without exit evidence
-        // is a real leak on someone else's machine, so it is reported rather than
-        // silently counted as clean.
+        // Close SSH links before storage. Missing remote shell exit evidence is
+        // reported by the original pool rather than counted as clean shutdown.
         if !nomi_core_owned_cleanup {
             if let Some(ssh_pool) = &self.ssh_pool {
                 let ssh_result = tokio::time::timeout(

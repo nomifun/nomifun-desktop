@@ -30,10 +30,8 @@ fn authority(harness: &support::PoolHarness, host: &SshHostId) -> AgentSshAuthor
     AgentSshAuthority::bound(
         &harness.user_id,
         AgentSshHostResource::new(
-            "canonical-ssh-fixture",
             &harness.user_id,
             host.clone(),
-            "/",
             [
                 SshResourceOperation::Execute,
                 SshResourceOperation::Read,
@@ -115,6 +113,7 @@ async fn canonical_exec_persists_shell_state_and_isolates_sessions() {
     let host = harness.add_fixture_host(&sshd).await;
     let authority = authority(&harness, &host);
     let first = context(&harness);
+    harness.pool.acquire(&harness.user_id, &first.agent_session_id, &host, "/").await.unwrap();
     if !require_nonroot(&sshd, &harness, &host, &authority, &first).await {
         return;
     }
@@ -155,6 +154,7 @@ async fn canonical_exec_persists_shell_state_and_isolates_sessions() {
         "persisted 中文 value"
     );
     let second = context(&harness);
+    harness.pool.acquire(&harness.user_id, &second.agent_session_id, &host, "/").await.unwrap();
     let isolated = exec(
         &owner,
         &authority,
@@ -177,6 +177,7 @@ async fn canonical_exec_keeps_kernel_fence_and_requires_sudo_authority() {
     let host = harness.add_fixture_host(&sshd).await;
     let authority = authority(&harness, &host);
     let context = context(&harness);
+    harness.pool.acquire(&harness.user_id, &context.agent_session_id, &host, "/").await.unwrap();
     if !require_nonroot(&sshd, &harness, &host, &authority, &context).await {
         return;
     }
@@ -244,6 +245,7 @@ async fn canonical_exec_recovers_timeout_and_cancel_without_replaying_commands()
     let host = harness.add_fixture_host(&sshd).await;
     let authority = authority(&harness, &host);
     let context = context(&harness);
+    harness.pool.acquire(&harness.user_id, &context.agent_session_id, &host, "/").await.unwrap();
     if !require_nonroot(&sshd, &harness, &host, &authority, &context).await {
         return;
     }
@@ -319,6 +321,7 @@ async fn canonical_exec_concurrent_submissions_do_not_recycle_an_active_shell() 
     let host = harness.add_fixture_host(&sshd).await;
     let authority = authority(&harness, &host);
     let context = context(&harness);
+    harness.pool.acquire(&harness.user_id, &context.agent_session_id, &host, "/").await.unwrap();
     if !require_nonroot(&sshd, &harness, &host, &authority, &context).await {
         return;
     }
@@ -405,6 +408,7 @@ async fn canonical_exec_reconnect_restores_confirmed_cwd_and_reapplies_fence() {
     let host = harness.add_fixture_host(&sshd).await;
     let authority = authority(&harness, &host);
     let context = context(&harness);
+    harness.pool.acquire(&harness.user_id, &context.agent_session_id, &host, "/").await.unwrap();
     if !require_nonroot(&sshd, &harness, &host, &authority, &context).await {
         return;
     }
@@ -438,6 +442,7 @@ async fn canonical_exec_keeps_sftp_and_nonzero_receipts_working() {
     let host = harness.add_fixture_host(&sshd).await;
     let authority = authority(&harness, &host);
     let context = context(&harness);
+    harness.pool.acquire(&harness.user_id, &context.agent_session_id, &host, "/").await.unwrap();
     if !require_nonroot(&sshd, &harness, &host, &authority, &context).await {
         return;
     }
