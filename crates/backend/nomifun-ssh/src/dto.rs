@@ -6,7 +6,7 @@
 //! "this secret is set; don't resend it on update". Unlike `remote_agents`'
 //! `mask_token`, we deliberately do NOT reveal a last-4 suffix — that would
 //! require decrypting every secret just to render a list, a needless exposure.
-use nomifun_common::TimestampMs;
+use nomifun_common::{SshHostId, TimestampMs};
 use nomifun_db::SshHostRow;
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +99,30 @@ pub struct UpdateSshHostRequest {
 
 fn default_port() -> i64 {
     22
+}
+
+/// Probe the current editor values without creating or updating a host. An
+/// owned saved id is only a source for unchanged, masked credentials.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestSshConnectionRequest {
+    pub ssh_host_id: Option<SshHostId>,
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: i64,
+    pub username: String,
+    pub auth_type: String,
+    pub password: Option<String>,
+    pub private_key: Option<String>,
+    pub passphrase: Option<String>,
+    pub certificate: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestSshConnectionResult {
+    pub ok: bool,
+    pub message: String,
 }
 
 // ── `~/.ssh/config` import ──────────────────────────────────────────────

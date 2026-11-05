@@ -113,6 +113,7 @@
     "portRange": "端口须在 1–65535 之间。",
     "usernameRequired": "请填写用户名。",
     "passwordRequired": "密码认证需要填写密码。",
-    "privateKeyRequired": "该认证方式需要提供私钥。"
+    "privateKeyRequired": "该认证方式需要提供私钥。",
+    "certificateRequired": "证书认证需要提供证书。"
   }
 }

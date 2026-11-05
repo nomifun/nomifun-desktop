@@ -8299,6 +8299,7 @@ export type I18nKey =
   | 'ssh.test.ok'
   | 'ssh.test.running'
   | 'ssh.title'
+  | 'ssh.validation.certificateRequired'
   | 'ssh.validation.hostRequired'
   | 'ssh.validation.nameRequired'
   | 'ssh.validation.passwordRequired'

@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { InvalidEntityIdError } from '@/common/types/ids';
+import { InvalidEntityIdError, parseSshHostId } from '@/common/types/ids';
 import { agentPlatform, ssh, type IApiSshStatus } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
@@ -47,6 +47,29 @@ function respondWith(data: unknown): void {
 }
 
 describe('ssh live-status wire contract', () => {
+  test('connection tests post the draft, with an optional owned host for unchanged secrets', async () => {
+    const requests: { url: string; method?: string; body: unknown }[] = [];
+    globalThis.fetch = (async (input, init) => {
+      requests.push({ url: String(input), method: init?.method, body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({ success: true, data: { ok: true, message: 'connected' } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const draft = { host: 'draft.example', port: 2222, username: 'deploy', authType: 'password' as const, password: 'draft-secret' };
+      expect(await ssh.testConnection.invoke(draft)).toEqual({ ok: true, message: 'connected' });
+      await ssh.testConnection.invoke({ ...draft, password: undefined, sshHostId: parseSshHostId(SSH_HOST_ID) });
+      expect(requests.map(({ url }) => new URL(url, 'http://127.0.0.1').pathname)).toEqual([
+        '/api/ssh-hosts/test-connection', '/api/ssh-hosts/test-connection',
+      ]);
+      expect(requests.every(({ method }) => method === 'POST')).toBe(true);
+      expect(requests[0]!.body).toEqual(draft);
+      expect(requests[1]!.body).toEqual({ host: draft.host, port: draft.port, username: draft.username, authType: draft.authType, sshHostId: SSH_HOST_ID });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test('link controls post only the canonical session identity in the URL', async () => {
     const requests: { url: string; method?: string; body: BodyInit | null | undefined }[] = [];
     globalThis.fetch = (async (input, init) => {

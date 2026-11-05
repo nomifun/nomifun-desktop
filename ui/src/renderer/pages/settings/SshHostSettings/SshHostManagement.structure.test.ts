@@ -63,13 +63,6 @@ describe('SshHostManagement structure', () => {
     }
   });
 
-  test('Test Connection validates exactly once, keeping the edit-mode relaxation', () => {
-    // On edit the stored secrets arrive masked as '***'; `isEdit` is what lets
-    // the operator test a connection without retyping the password. Losing that
-    // argument would make edit-mode Test Connection permanently impossible.
-    expect(src.includes('canTestConnection')).toBe(false);
-    expect(src.match(/validateSshHostForm\(values, isEdit\)/g)?.length).toBe(2);
-  });
 });
 
 describe('SshHostManagement ~/.ssh/config import', () => {

@@ -6,7 +6,7 @@
 
 import type { IApiSshConfigScan, IApiSshHost } from '@/common/adapter/ipcBridge';
 import { ipcBridge } from '@/common';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { Alert, Button, Dropdown, Form, Input, InputNumber, Menu, Message, Modal, Select, Spin } from '@arco-design/web-react';
 import NomiModal from '@renderer/components/base/NomiModal';
 import { VisualEmpty, VisualListRow, VisualSearch } from '../components/CodeVisualPrimitives';
@@ -17,6 +17,7 @@ import type { I18nKey } from '@renderer/services/i18n';
 import { useOpenSshSession } from '@renderer/pages/conversation/hooks/useOpenSshSession';
 import {
   buildUpdatePayload,
+  validateSshConnectionForm,
   validateSshHostForm,
   type SshAuthType,
   type SshHostFormValues,
@@ -73,8 +74,48 @@ export const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, 
   const [form] = Form.useForm<SshHostFormValues>();
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string }>();
+  const operation = useRef<'save' | 'test' | null>(null);
+  const generation = useRef(0);
+  const revision = useRef(0);
+
+  // Initialize before interaction, rather than after the opening animation.
+  // A closed/reopened form owns a new generation; late responses belong to the old one.
+  useLayoutEffect(() => {
+    generation.current += 1;
+    operation.current = null;
+    setSaving(false);
+    setTesting(false);
+    setTestResult(undefined);
+    form.resetFields();
+    if (visible) {
+      form.setFieldsValue({
+        name: editHost?.name ?? '',
+        host: editHost?.host ?? '',
+        port: editHost?.port ?? 22,
+        username: editHost?.username ?? '',
+        authType: editHost?.authType ?? 'password',
+        // The server returns masked sentinels for stored secrets.
+        password: editHost?.password ?? undefined,
+        privateKey: editHost?.privateKey ?? undefined,
+        passphrase: editHost?.passphrase ?? undefined,
+        certificate: editHost?.certificate ?? undefined,
+        sudoPassword: editHost?.sudoPassword ?? undefined,
+      });
+    }
+    return () => { generation.current += 1; };
+  }, [visible, editHost?.sshHostId, form]);
 
   const isEdit = Boolean(editHost);
+
+  const handleClose = () => {
+    if (operation.current === 'save') return;
+    generation.current += 1;
+    operation.current = null;
+    setTesting(false);
+    setTestResult(undefined);
+    onClose();
+  };
 
   const currentValues = (): SshHostFormValues => {
     const v = form.getFieldsValue() as Partial<SshHostFormValues>;
@@ -93,12 +134,15 @@ export const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, 
   };
 
   const handleSave = useCallback(async () => {
+    if (operation.current) return;
     const values = currentValues();
     const errorKey = validateSshHostForm(values, isEdit);
     if (errorKey) {
       Message.warning(t(errorKey));
       return;
     }
+    operation.current = 'save';
+    const currentGeneration = generation.current;
     setSaving(true);
     try {
       let saved: IApiSshHost;
@@ -133,71 +177,86 @@ export const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, 
           sudoPassword: values.sudoPassword ?? undefined,
         });
       }
-      onSaved(saved);
-      onClose();
+      if (generation.current === currentGeneration) {
+        onSaved(saved);
+        onClose();
+      }
     } catch (e) {
-      Message.error(String(e));
+      if (generation.current === currentGeneration) Message.error(String(e));
     } finally {
-      setSaving(false);
+      if (generation.current === currentGeneration) {
+        operation.current = null;
+        setSaving(false);
+      }
     }
   }, [editHost, isEdit, onClose, onSaved, t]);
 
   const handleTest = useCallback(async () => {
+    if (operation.current) return;
     const values = currentValues();
-    const errorKey = validateSshHostForm(values, isEdit);
+    const errorKey = validateSshConnectionForm(values, isEdit);
     if (errorKey) {
       Message.warning(t(errorKey));
       return;
     }
-    if (!editHost) {
-      // Test-connection probes a saved host; save first for a new host.
-      Message.info(t('ssh.form.save'));
-      return;
-    }
+    const draft = isEdit ? buildUpdatePayload(values) : values;
+    const currentGeneration = generation.current;
+    const currentRevision = revision.current;
+    const isCurrent = () => generation.current === currentGeneration && revision.current === currentRevision;
+    operation.current = 'test';
+    setTestResult(undefined);
     setTesting(true);
     try {
-      const res = await ipcBridge.ssh.testConnection.invoke({ ssh_host_id: editHost.sshHostId });
-      if (res.ok) Message.success(t('ssh.test.ok'));
-      else Message.error(t('ssh.test.failed', { message: res.message }));
+      const res = await ipcBridge.ssh.testConnection.invoke({
+        sshHostId: editHost?.sshHostId,
+        host: values.host,
+        port: values.port,
+        username: values.username,
+        authType: values.authType,
+        password: draft.password ?? undefined,
+        privateKey: draft.privateKey ?? undefined,
+        passphrase: draft.passphrase ?? undefined,
+        certificate: draft.certificate ?? undefined,
+      });
+      if (isCurrent()) setTestResult(res);
     } catch (e) {
-      Message.error(t('ssh.test.failed', { message: String(e) }));
+      if (isCurrent()) setTestResult({ ok: false, message: String(e) });
     } finally {
-      setTesting(false);
+      if (generation.current === currentGeneration) {
+        operation.current = null;
+        setTesting(false);
+      }
     }
   }, [editHost, isEdit, t]);
 
   return (
     <NomiModal
       visible={visible}
-      onCancel={onClose}
+      onCancel={handleClose}
+      maskClosable={!saving}
+      escToExit={!saving}
       header={{
         title: editHost ? t('ssh.form.editTitle') : t('ssh.form.addTitle'),
-        showClose: true,
+        showClose: !saving,
       }}
       style={{ maxWidth: '92vw', borderRadius: 16 }}
       contentStyle={{ background: 'var(--dialog-fill-0)', borderRadius: 16, padding: '20px 24px 16px', overflow: 'auto' }}
-      okText={t('ssh.form.save')}
-      cancelText={t('ssh.form.cancel')}
-      onOk={handleSave}
-      confirmLoading={saving}
-      afterOpen={() => {
-        form.setFieldsValue({
-          name: editHost?.name ?? '',
-          host: editHost?.host ?? '',
-          port: editHost?.port ?? 22,
-          username: editHost?.username ?? '',
-          authType: (editHost?.authType as SshAuthType) ?? 'password',
-          // Masked sentinels: the server returns '***' for stored secrets.
-          password: editHost?.password ?? undefined,
-          privateKey: editHost?.privateKey ?? undefined,
-          passphrase: editHost?.passphrase ?? undefined,
-          certificate: editHost?.certificate ?? undefined,
-          sudoPassword: editHost?.sudoPassword ?? undefined,
-        });
-      }}
-      afterClose={() => form.resetFields()}
+      footer={
+        <div className='flex items-center justify-between gap-8px'>
+          <Button type='outline' icon={<Speed theme='outline' size='14' />} loading={testing} disabled={saving || testing} onClick={handleTest}>
+            {t('ssh.form.test')}
+          </Button>
+          <div className='flex gap-8px'>
+            <Button disabled={saving} onClick={handleClose}>{t('ssh.form.cancel')}</Button>
+            <Button type='primary' loading={saving} disabled={saving || testing} onClick={handleSave}>{t('ssh.form.save')}</Button>
+          </div>
+        </div>
+      }
     >
-      <Form form={form} layout='vertical' style={{ width: 460, maxWidth: '100%' }}>
+      <Form form={form} layout='vertical' disabled={saving} style={{ width: 460, maxWidth: '100%' }} onValuesChange={() => {
+        revision.current += 1;
+        setTestResult(undefined);
+      }}>
         <FormItem label={t('ssh.form.name')} field='name' rules={[{ required: true }]}>
           <Input placeholder='prod-web-01' />
         </FormItem>
@@ -270,11 +329,12 @@ export const SshHostFormModal: React.FC<FormModalProps> = ({ visible, editHost, 
           <Input.Password placeholder={isEdit ? t('ssh.form.secretKept') : ''} autoComplete='new-password' />
         </FormItem>
 
-        {isEdit && (
-          <Button long type='outline' icon={<Speed theme='outline' size='14' />} loading={testing} onClick={handleTest}>
-            {t('ssh.form.test')}
-          </Button>
-        )}
+        <div role='status' aria-live='polite'>
+          {testing && <Alert type='info' content={t('ssh.test.running')} />}
+          {!testing && testResult && <Alert type={testResult.ok ? 'success' : 'error'} content={
+            testResult.ok ? t('ssh.test.ok') : t('ssh.test.failed', { message: testResult.message })
+          } />}
+        </div>
       </Form>
     </NomiModal>
   );

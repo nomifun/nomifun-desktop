@@ -113,6 +113,7 @@
     "portRange": "Port must be between 1 and 65535.",
     "usernameRequired": "Username is required.",
     "passwordRequired": "A password is required for password authentication.",
-    "privateKeyRequired": "A private key is required for this authentication method."
+    "privateKeyRequired": "A private key is required for this authentication method.",
+    "certificateRequired": "A certificate is required for certificate authentication."
   }
 }

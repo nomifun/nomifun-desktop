@@ -164,12 +164,11 @@ async fn shutting_down_refuses_a_dial_before_touching_the_network() {
 }
 
 /// A port that completes the TCP handshake and then says nothing — the shape of a
-/// mistyped port landing on a non-SSH service, and the case no layer below this
-/// crate bounds: the transport sets no handshake timeout, so without a budget here
-/// the dial never returns.
+/// mistyped port landing on a non-SSH service. Both the transport handshake and
+/// the pool's total Session setup budget must bound this wait.
 ///
 /// Not a firewall DROP, because that would need privileges; an accepted socket
-/// that never sends an SSH banner reaches the same unbounded wait through the
+/// that never sends an SSH banner reaches the same handshake wait through the
 /// same code path. The listener is owned by the test (a real `TcpListener` bound
 /// to an ephemeral loopback port) and dropped with it — no child process, so
 /// nothing to signal or clean up.

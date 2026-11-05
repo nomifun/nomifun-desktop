@@ -30,7 +30,7 @@ use tracing::{debug, warn};
 
 use crate::dto::SshStatusEvent;
 use crate::events::SshEventEmitter;
-use crate::service::SshHostService;
+use crate::service::{DecryptedCredential, SshHostService};
 use crate::sink::{
     SshActionDispatchError, SshConnectionHandle, SshDialError, SshLinkBackend,
 };
@@ -530,7 +530,7 @@ impl SshShutdownReport {
 /// may dial a host that was withdrawn from the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialIntent {
-    /// `acquire` / `probe`: the operator is asking, so a stale retirement is
+    /// `acquire`: the operator is asking, so a stale retirement is
     /// forgotten (they have most likely just fixed whatever was wrong).
     Fresh,
     /// The reconnect ladder. Never revives a withdrawn host.
@@ -1180,58 +1180,75 @@ impl SshConnectionPool {
         report
     }
 
-    /// Test-connection probe: dial, run one trivial command, close. Nothing is
-    /// pooled, so clicking "test" on the host book cannot leave a link behind or
-    /// disturb a session already talking to that host.
-    pub async fn probe(&self, user_id: &str, ssh_host_id: &SshHostId) -> SshProbeOutcome {
-        if self.0.quiescing.load(Ordering::SeqCst) {
-            return SshProbeOutcome {
-                ok: false,
-                detail: SshDialError::ShuttingDown.to_string(),
-            };
-        }
-        let Some(_global_lease) = self.0.global_admission.admit() else {
+    /// Test the supplied editor values without a Session, saved-host gate, or
+    /// persistence. The owned task retains admission through native cleanup even
+    /// when its HTTP observer goes away; shutdown joins that original work.
+    pub async fn probe(&self, credential: DecryptedCredential) -> SshProbeOutcome {
+        let Some(lease) = self.0.global_admission.admit() else {
             return SshProbeOutcome {
                 ok: false,
                 detail: SshDialError::ShuttingDown.to_string(),
             };
         };
-        // The remote `$HOME` — a probe has no session and therefore no cwd to
-        // honour.
-        let handle = match self
-            .0
-            .dial_host(user_id, ssh_host_id, ".", DialIntent::Fresh,None,None)
-            .await
-        {
-            Ok(handle) => handle,
-            Err(e) => {
-                return SshProbeOutcome {
-                    ok: false,
-                    detail: e.to_string(),
-                };
-            }
-        };
-
-        let probe = handle.shell().run("true", PROBE_TIMEOUT).await;
-        let outcome = match probe {
-            Ok(_) => {
-                if let Some(fingerprint) = handle.fingerprint.as_deref() {
-                    let _ = self.0.service
-                        .record_fingerprint(user_id, ssh_host_id, fingerprint).await;
+        let known_hosts = self.0.known_hosts.clone();
+        let close_budget = self.0.tuning.close_budget;
+        let worker = tokio::spawn(async move {
+            let _lease = lease;
+            // Each native phase has its own deadline. Do not cancel the entire
+            // connect future on an outer deadline after it has opened a shell.
+            let handle = match SshConnectionHandle::connect(credential, known_hosts, ".").await {
+                Ok(handle) => handle,
+                Err(error) => {
+                    return SshProbeOutcome {
+                        ok: false,
+                        detail: error.to_string(),
+                    };
                 }
-                SshProbeOutcome {
+            };
+            let mut outcome = match handle.shell().run("true", PROBE_TIMEOUT).await {
+                Ok(result) if !result.timed_out && result.exit_code == 0 => SshProbeOutcome {
                     ok: true,
-                    detail: "connection succeeded".to_string(),
-                }
+                    detail: "connection succeeded".into(),
+                },
+                Ok(result) if result.timed_out => SshProbeOutcome {
+                    ok: false,
+                    detail: "connected but the probe command timed out".into(),
+                },
+                Ok(result) => SshProbeOutcome {
+                    ok: false,
+                    detail: format!(
+                        "connected but the probe command exited with status {}",
+                        result.exit_code
+                    ),
+                },
+                Err(error) => SshProbeOutcome {
+                    ok: false,
+                    detail: format!("connected but the probe command failed: {error}"),
+                },
+            };
+            let proofs = handle.close_shells(close_budget).await;
+            let closed = proofs.iter().all(|proof| proof.is_reaped());
+            let disconnected = handle.conn().disconnect().await;
+            if !closed {
+                warn!("SSH connection-test shell cleanup could not be confirmed");
+                outcome.ok = false;
+                outcome
+                    .detail
+                    .push_str("; could not confirm the test shell exited");
             }
-            Err(e) => SshProbeOutcome {
-                ok: false,
-                detail: format!("connected but the probe command failed: {e}"),
-            },
-        };
-        handle.shell().close(self.0.tuning.close_budget).await;
-        let _ = handle.conn().disconnect().await;
-        outcome
+            if let Err(error) = disconnected {
+                warn!(%error, "SSH connection-test transport disconnect failed");
+                outcome.ok = false;
+                outcome
+                    .detail
+                    .push_str(&format!("; test transport disconnect failed: {error}"));
+            }
+            outcome
+        });
+        worker.await.unwrap_or_else(|_| SshProbeOutcome {
+            ok: false,
+            detail: "the SSH connection test did not complete".into(),
+        })
     }
 
     /// Reopen a wedged shell on the same transport (see
@@ -1495,10 +1512,9 @@ impl PoolInner {
 
         let shell_started=Arc::new(AtomicBool::new(false));
         let outcome = match self.service.decrypt_credential(user_id, host_id).await {
-            // Bounded here and nowhere else: the transport has no connect or
-            // handshake timeout, and this await is held under the per-host dial
-            // lock, so an unbounded one blocks every other session's `acquire` on
-            // this host — the agent's included — not just the caller's.
+            // Bound the complete setup while holding the per-host gate. Native
+            // phases have their own deadlines, but their sum must not keep other
+            // Sessions queued behind this dial for that entire duration.
             Ok(cred) => {
                 let _native=match retirement {Some(retirement)=>Some(retirement.admit().ok_or(SshDialError::LinkRetired)?),None=>None};
                 match tokio::time::timeout(

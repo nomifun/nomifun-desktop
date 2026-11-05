@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::dto::{
     CreateSshHostRequest, ImportedSshHost, SshHostResponse, SshImportResult, SshImportSkipReason,
-    SkippedSshHost, UpdateSshHostRequest, SECRET_MASK,
+    SkippedSshHost, TestSshConnectionRequest, UpdateSshHostRequest, SECRET_MASK,
 };
 
 /// Errors surfaced by the host-book service.
@@ -59,6 +59,106 @@ impl SshHostService {
                 .map_err(|e| SshServiceError::Internal(format!("encrypt: {e}"))),
             _ => Ok(None),
         }
+    }
+
+    fn decrypt(
+        &self,
+        ciphertext: Option<&String>,
+    ) -> Result<Option<Zeroizing<String>>, SshServiceError> {
+        ciphertext
+            .map(|value| {
+                nomifun_common::decrypt_string(value, &self.encryption_key)
+                    .map(Zeroizing::new)
+                    .map_err(|error| SshServiceError::Internal(format!("decrypt: {error}")))
+            })
+            .transpose()
+    }
+
+    /// Resolve only the editor's connection fields. Saved credentials are read
+    /// after the owner lookup and never written back; an empty value clears one
+    /// for this probe, while an omitted value or mask keeps the stored secret.
+    pub async fn credential_for_probe(
+        &self,
+        user_id: &str,
+        req: TestSshConnectionRequest,
+    ) -> Result<DecryptedCredential, SshServiceError> {
+        use nomi_ssh::limits::{
+            MAX_SSH_HOST_BYTES, MAX_SSH_USERNAME_BYTES, validate_credential,
+            validate_endpoint_component,
+        };
+
+        validate_auth_type(&req.auth_type)?;
+        let port = u16::try_from(req.port)
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| {
+                SshServiceError::BadRequest("port must be between 1 and 65535".into())
+            })?;
+        for (field, value, limit) in [
+            ("SSH host", req.host.as_str(), MAX_SSH_HOST_BYTES),
+            ("SSH username", req.username.as_str(), MAX_SSH_USERNAME_BYTES),
+        ] {
+            validate_endpoint_component(field, value, limit)
+                .map_err(|error| SshServiceError::BadRequest(error.to_string()))?;
+            if value.trim().is_empty() {
+                return Err(SshServiceError::BadRequest(format!("{field} must not be blank")));
+            }
+        }
+        let saved = match req.ssh_host_id.as_ref() {
+            Some(id) => Some(
+                self.repo
+                    .find(user_id, id)
+                    .await
+                    .map_err(|error| SshServiceError::Internal(error.to_string()))?
+                    .ok_or(SshServiceError::NotFound)?,
+            ),
+            None => None,
+        };
+        let resolve = |value: Option<String>,
+                       stored: Option<&String>|
+         -> Result<Option<Zeroizing<String>>, SshServiceError> {
+            match value {
+                Some(value) if value == SECRET_MASK => {
+                    if saved.is_none() {
+                        return Err(SshServiceError::BadRequest(
+                            "masked credentials require an owned saved host".into(),
+                        ));
+                    }
+                    self.decrypt(stored)
+                }
+                Some(value) if value.is_empty() => Ok(None),
+                Some(value) => {
+                    validate_credential("SSH credential", &value)
+                        .map_err(|error| SshServiceError::BadRequest(error.to_string()))?;
+                    Ok(Some(Zeroizing::new(value)))
+                }
+                None => self.decrypt(stored),
+            }
+        };
+        Ok(DecryptedCredential {
+            host: req.host,
+            port,
+            username: req.username,
+            auth_type: req.auth_type,
+            password: resolve(
+                req.password,
+                saved.as_ref().and_then(|row| row.password_encrypted.as_ref()),
+            )?,
+            private_key: resolve(
+                req.private_key,
+                saved.as_ref().and_then(|row| row.private_key_encrypted.as_ref()),
+            )?,
+            passphrase: resolve(
+                req.passphrase,
+                saved.as_ref().and_then(|row| row.passphrase_encrypted.as_ref()),
+            )?,
+            certificate: resolve(
+                req.certificate,
+                saved.as_ref().and_then(|row| row.certificate_encrypted.as_ref()),
+            )?,
+            // Testing an SSH login never authenticates sudo or reads its secret.
+            sudo_password: None,
+        })
     }
 
     /// List the owner's hosts as masked responses.
@@ -298,25 +398,16 @@ impl SshHostService {
             .map_err(|e| SshServiceError::Internal(e.to_string()))?
             .ok_or(SshServiceError::NotFound)?;
 
-        let dec = |c: &Option<String>| -> Result<Option<Zeroizing<String>>, SshServiceError> {
-            match c {
-                Some(ct) => nomifun_common::decrypt_string(ct, &self.encryption_key)
-                    .map(|p| Some(Zeroizing::new(p)))
-                    .map_err(|e| SshServiceError::Internal(format!("decrypt: {e}"))),
-                None => Ok(None),
-            }
-        };
-
         Ok(DecryptedCredential {
             host: row.host,
             port: u16::try_from(row.port).unwrap_or(22),
             username: row.username,
             auth_type: row.auth_type,
-            password: dec(&row.password_encrypted)?,
-            private_key: dec(&row.private_key_encrypted)?,
-            passphrase: dec(&row.passphrase_encrypted)?,
-            certificate: dec(&row.certificate_encrypted)?,
-            sudo_password: dec(&row.sudo_password_encrypted)?,
+            password: self.decrypt(row.password_encrypted.as_ref())?,
+            private_key: self.decrypt(row.private_key_encrypted.as_ref())?,
+            passphrase: self.decrypt(row.passphrase_encrypted.as_ref())?,
+            certificate: self.decrypt(row.certificate_encrypted.as_ref())?,
+            sudo_password: self.decrypt(row.sudo_password_encrypted.as_ref())?,
         })
     }
 }

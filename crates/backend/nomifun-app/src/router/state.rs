@@ -1096,8 +1096,8 @@ impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
 
 /// Build the SSH host-book router state on the process connection pool. The pool
 /// carries its own host book, so the routes edit the exact credentials the next
-/// redial will use and the test-connection probe dials through the same gate a
-/// session does.
+/// redial will use. Draft connection probes share the native transport and
+/// shutdown admission without changing a saved profile or its dial gate.
 pub fn build_ssh_host_state(services: &AppServices) -> nomifun_ssh::SshHostRouterState {
     nomifun_ssh::SshHostRouterState {
         service: services.ssh_pool.host_service(),

@@ -164,10 +164,17 @@ impl SshConnectionHandle {
         let conn = Arc::new(conn);
 
         shell_started.store(true,std::sync::atomic::Ordering::Release);
-        let shell = conn.open_shell(remote_cwd).await?;
+        let shell = match conn.open_shell(remote_cwd).await {
+            Ok(shell) => shell,
+            Err(error) => {
+                let _ = conn.disconnect().await;
+                return Err(error.into());
+            }
+        };
         let fs = match conn.open_sftp().await {Ok(fs)=>Arc::new(fs),Err(error)=>{
             let proof=shell.close(crate::state::SSH_CLOSE_BUDGET).await;
             if proof.is_reaped(){shell_started.store(false,std::sync::atomic::Ordering::Release);}
+            let _ = conn.disconnect().await;
             return Err(error.into());
         }};
 

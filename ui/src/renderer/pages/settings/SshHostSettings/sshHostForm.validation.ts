@@ -32,7 +32,8 @@ export type SshHostValidationKey =
   | 'ssh.validation.portRange'
   | 'ssh.validation.usernameRequired'
   | 'ssh.validation.passwordRequired'
-  | 'ssh.validation.privateKeyRequired';
+  | 'ssh.validation.privateKeyRequired'
+  | 'ssh.validation.certificateRequired';
 
 const hasText = (v?: string | null): boolean => Boolean(v && v.trim().length > 0);
 
@@ -54,6 +55,14 @@ export function validateSshHostForm(
   isEdit: boolean = false
 ): SshHostValidationKey | null {
   if (!hasText(values.name)) return 'ssh.validation.nameRequired';
+  return validateSshConnectionForm(values, isEdit);
+}
+
+/** A connection probe needs connection settings, independently of the display name. */
+export function validateSshConnectionForm(
+  values: SshHostFormValues,
+  isEdit: boolean = false
+): SshHostValidationKey | null {
   if (!hasText(values.host)) return 'ssh.validation.hostRequired';
   if (!Number.isInteger(values.port) || values.port < 1 || values.port > 65535) {
     return 'ssh.validation.portRange';
@@ -70,6 +79,9 @@ export function validateSshHostForm(
     case 'key':
     case 'certificate':
       if (!secretPresent(values.privateKey)) return 'ssh.validation.privateKeyRequired';
+      if (values.authType === 'certificate' && !secretPresent(values.certificate)) {
+        return 'ssh.validation.certificateRequired';
+      }
       break;
     case 'agent':
       // No stored secret — auth is delegated to the operator's ssh-agent.

@@ -12,15 +12,15 @@ use nomifun_common::{AppError, SshHostId};
 
 use crate::dto::{
     CreateSshHostRequest, ImportSshHostsRequest, SshHostResponse, SshImportResult, SshStatusEvent,
-    UpdateSshHostRequest,
+    TestSshConnectionRequest, TestSshConnectionResult, UpdateSshHostRequest,
 };
 use crate::pool::SshConnectionPool;
 use crate::service::{SshHostService, SshServiceError};
 use crate::ssh_config::SshConfigScan;
 
 /// Router state: the host book plus the process connection pool (both cheap
-/// handles). The pool is the same one SSH actions use, so a probe
-/// here and a session there cannot disagree about a host.
+/// handles). Draft probes use the same transport and host-key policy as SSH
+/// actions without joining a Session or modifying a saved profile.
 #[derive(Clone)]
 pub struct SshHostRouterState {
     pub service: SshHostService,
@@ -36,13 +36,10 @@ pub fn ssh_host_routes(state: SshHostRouterState) -> Router {
         .route("/api/ssh-hosts/statuses", get(statuses))
         .route("/api/ssh-hosts/import-candidates", get(import_candidates))
         .route("/api/ssh-hosts/import", post(import_from_ssh_config))
+        .route("/api/ssh-hosts/test-connection", post(test_connection))
         .route(
             "/api/ssh-hosts/{ssh_host_id}",
             get(get_one).put(update).delete(delete_one),
-        )
-        .route(
-            "/api/ssh-hosts/{ssh_host_id}/test-connection",
-            post(test_connection),
         )
         .with_state(state)
 }
@@ -134,26 +131,19 @@ async fn statuses(
     Ok(Json(ApiResponse::ok(items)))
 }
 
-/// Result of a test-connection probe.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TestConnectionResult {
-    ok: bool,
-    /// Why, in the operator's terms — the probe's own detail, so a failure names
-    /// the setting to fix instead of a generic "could not connect".
-    message: String,
-}
-
 async fn test_connection(
     State(state): State<SshHostRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(ssh_host_id): Path<SshHostId>,
-) -> Result<Json<ApiResponse<TestConnectionResult>>, AppError> {
-    // The pool's probe dials, runs one trivial command and closes with the same
-    // forensics a session close uses — so "test" proves the connection instead of
-    // leaving a socket behind for the runtime to trip over.
-    let outcome = state.pool.probe(user.id.as_str(), &ssh_host_id).await;
-    Ok(Json(ApiResponse::ok(TestConnectionResult {
+    body: Result<Json<TestSshConnectionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<TestSshConnectionResult>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let credential = state
+        .service
+        .credential_for_probe(user.id.as_str(), req)
+        .await
+        .map_err(map_err)?;
+    let outcome = state.pool.probe(credential).await;
+    Ok(Json(ApiResponse::ok(TestSshConnectionResult {
         ok: outcome.ok,
         message: outcome.detail,
     })))

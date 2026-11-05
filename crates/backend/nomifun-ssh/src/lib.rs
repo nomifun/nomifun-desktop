@@ -19,7 +19,8 @@ pub mod state;
 
 pub use dto::{
     CreateSshHostRequest, ImportSshHostsRequest, ImportedSshHost, SshHostResponse, SshImportResult,
-    SshImportSkipReason, SshStatusEvent, UpdateSshHostRequest,
+    SshImportSkipReason, SshStatusEvent, TestSshConnectionRequest, TestSshConnectionResult,
+    UpdateSshHostRequest,
 };
 pub use agent::{
     AgentSshAuthority, AgentSshHostResource, DEFAULT_SSH_ACTION_TIMEOUT_MS,

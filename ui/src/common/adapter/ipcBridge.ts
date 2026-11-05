@@ -2022,6 +2022,11 @@ export interface IApiCreateSshHost {
 
 export type IApiUpdateSshHost = Partial<IApiCreateSshHost>;
 
+/** Tests the current draft without saving. An owned host supplies unchanged secrets on edit. */
+export type IApiTestSshConnection = Omit<IApiCreateSshHost, 'name' | 'sudoPassword'> & {
+  sshHostId?: SshHostId;
+};
+
 /**
  * Live phase of one conversation↔host link (backend `SshLinkPhase`).
  *
@@ -2178,8 +2183,8 @@ export const ssh = {
   delete: httpDelete<void, { ssh_host_id: SshHostId }>(
     (p) => `/api/ssh-hosts/${p.ssh_host_id}`
   ),
-  testConnection: httpPost<{ ok: boolean; message: string }, { ssh_host_id: SshHostId }>(
-    (p) => `/api/ssh-hosts/${p.ssh_host_id}/test-connection`
+  testConnection: httpPost<{ ok: boolean; message: string }, IApiTestSshConnection>(
+    '/api/ssh-hosts/test-connection', undefined, { timeoutMs: 150_000 }
   ),
   /**
    * Snapshot of every live link the caller owns. Plural on purpose: a singular

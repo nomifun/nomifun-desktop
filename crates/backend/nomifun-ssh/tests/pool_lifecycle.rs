@@ -841,24 +841,24 @@ async fn await_ladder_give_up(link: &Arc<nomifun_ssh::SshLink>, budget: Duration
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn probe_saves_the_fingerprint_of_a_reachable_host() {
-    const NAME: &str = "probe_saves_the_fingerprint_of_a_reachable_host";
+async fn probe_leaves_the_saved_profile_unchanged_and_unpooled() {
+    const NAME: &str = "probe_leaves_the_saved_profile_unchanged_and_unpooled";
     let sshd = sshd_or_skip!(NAME);
     let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
     let id = harness.add_fixture_host(&sshd).await;
 
-    let outcome = harness.pool.probe(&harness.user_id, &id).await;
+    let before = serde_json::to_value(harness.service().get(&harness.user_id, &id).await.unwrap()).unwrap();
+    let credential = harness.service().decrypt_credential(&harness.user_id, &id).await.unwrap();
+    let outcome = harness.pool.probe(credential).await;
     if outcome.detail.contains("did not become ready") {
         println!("SKIP: {NAME}: {}", outcome.detail);
         return;
     }
     assert!(outcome.ok, "{outcome:?}");
-    assert!(
-        harness.service().get(&harness.user_id, &id).await.unwrap()
-            .host_fingerprint
-            .as_deref()
-            .is_some_and(|f| f.starts_with("SHA256:")),
-        "{outcome:?}"
+    assert_eq!(
+        serde_json::to_value(harness.service().get(&harness.user_id, &id).await.unwrap()).unwrap(),
+        before,
+        "a probe must not modify the saved host profile"
     );
     assert_eq!(
         harness.pool.active_link_count(),

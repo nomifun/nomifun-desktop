@@ -9,6 +9,7 @@ import {
   buildUpdatePayload,
   isMaskedSecret,
   isRealSecret,
+  validateSshConnectionForm,
   validateSshHostForm,
   type SshHostFormValues,
 } from './sshHostForm.validation';
@@ -57,6 +58,16 @@ describe('SSH host form validation', () => {
     expect(validateSshHostForm(base({ authType: 'agent', password: null }))).toBeNull();
   });
 
+  test('certificate authentication requires both the private key and certificate', () => {
+    const certificateHost = base({ authType: 'certificate', password: null, privateKey: 'private-key', certificate: '' });
+    expect(validateSshConnectionForm(certificateHost)).toBe('ssh.validation.certificateRequired');
+    expect(validateSshHostForm(certificateHost)).toBe('ssh.validation.certificateRequired');
+    expect(validateSshConnectionForm({ ...certificateHost, certificate: 'signed-certificate' })).toBeNull();
+    expect(validateSshConnectionForm({ ...certificateHost, privateKey: '', certificate: 'signed-certificate' })).toBe('ssh.validation.privateKeyRequired');
+    expect(validateSshConnectionForm({ ...certificateHost, privateKey: '***', certificate: '***' }, true)).toBeNull();
+    expect(validateSshConnectionForm({ ...certificateHost, privateKey: '***', certificate: '***' }, false)).toBe('ssh.validation.privateKeyRequired');
+  });
+
   test('on edit, a masked secret counts as present', () => {
     // create would fail (no real secret) but edit accepts the mask
     const masked = base({ password: '***' });
@@ -86,15 +97,17 @@ describe('SSH host form validation', () => {
     expect(out.name).toBe('x');
   });
 
-  test('Test Connection is gated by the same rule as Save', () => {
-    // The button has no rule of its own: it calls `validateSshHostForm(values,
-    // isEdit)` exactly like Save. What it depends on is the `isEdit` relaxation
-    // below — an edit-mode host whose password is still the mask is testable,
-    // because the server holds the real one.
-    expect(validateSshHostForm(base({ password: '' }), false)).toBe(
+  test('connection testing validates credentials and keeps the stored-secret edit rule', () => {
+    expect(validateSshConnectionForm(base({ password: '' }), false)).toBe(
       'ssh.validation.passwordRequired'
     );
-    expect(validateSshHostForm(base(), false)).toBeNull();
-    expect(validateSshHostForm(base({ password: '***' }), true)).toBeNull();
+    expect(validateSshConnectionForm(base(), false)).toBeNull();
+    expect(validateSshConnectionForm(base({ password: '***' }), true)).toBeNull();
+  });
+
+  test('a display name is required for saving and optional for testing', () => {
+    const unnamed = base({ name: '' });
+    expect(validateSshConnectionForm(unnamed)).toBeNull();
+    expect(validateSshHostForm(unnamed)).toBe('ssh.validation.nameRequired');
   });
 });

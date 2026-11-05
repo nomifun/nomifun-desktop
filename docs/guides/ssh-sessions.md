@@ -30,8 +30,11 @@ host, stored secrets show as `***`; leave them untouched to keep the stored
 value, or type a new value to replace it. Saving a profile does not connect to
 the host. Deleting a host closes its existing connections.
 
-**Test connection** dials the host and runs a trivial probe, reporting success
-or the exact failure.
+When adding or editing a host, **Test connection** uses the current form's address and credentials
+to verify the shell and SFTP, runs a trivial probe, and closes the test connection before reporting
+its result. It works before saving and never creates or updates a host profile or chat session.
+Unchanged credentials in an edited profile use the saved values. The test verifies SSH connectivity,
+not the sudo password.
 
 ## Starting a session
 

@@ -25,14 +25,11 @@ pub const SSH_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// How long a close may spend collecting exit evidence before giving up and
 /// reporting the teardown as unproven.
 pub const SSH_CLOSE_BUDGET: Duration = Duration::from_secs(5);
-/// How long one dial may take before it counts as unreachable.
-///
-/// Nothing below this bounds a dial: the transport sets no connect or handshake
-/// timeout, so a firewall that DROPs gets the kernel's ~130s of SYN retries and a
-/// port that accepts without speaking SSH (a mistyped port landing on an HTTP
-/// server) never returns at all. A dial is also serialized per host, so an
-/// unbounded one wedges every other session's `acquire` behind it — including the
-/// agent's — not just the operator's "test connection" spinner.
+/// Total budget for establishing a saved Session link. The transport separately
+/// bounds the handshake, shell initialization and SFTP open; this tighter
+/// combined deadline also bounds the time other Sessions wait at the host gate.
+/// Draft probes retain their own native owner through those individual phase
+/// deadlines and cleanup, without acquiring a saved-host gate.
 pub const SSH_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The coarse, machine-readable half of a link state — what the UI colours by.
