@@ -850,7 +850,9 @@ async fn local_microphone_checks(app: &tauri::AppHandle, settings: &Settings, fi
 
     unconfigured.enabled = true;
     unconfigured.k4_enabled = true;
+    unconfigured.external_keyboard_enabled = true;
     keyboard::validation_request(app, None, Some(unconfigured)).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_connection(app, true).await.map_err(anyhow::Error::msg)?;
     hardware(app, None).await?;
     keyboard::validation_microphone_test(app, "microphone_test_start", "local-k4", None).await.map_err(anyhow::Error::msg)?;
     wait_state(app, |state| state["microphoneTest"]["state"] == "listening").await?;
@@ -873,6 +875,7 @@ async fn local_microphone_checks(app: &tauri::AppHandle, settings: &Settings, fi
     configured.enabled = true;
     configured.k4_enabled = true;
     keyboard::validation_request(app, None, Some(configured)).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_connection(app, false).await.map_err(anyhow::Error::msg)?;
     let idle_before = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
     let idle_document = keyboard::validation_snapshot(app);
     keyboard::validation_microphone_test(app, "microphone_test_start", "local-configured-idle", None).await.map_err(anyhow::Error::msg)?;
@@ -903,6 +906,9 @@ async fn software_shortcut_checks(app: &tauri::AppHandle, settings: &Settings, f
         "idle configured voice runtime opened provider/audio resources");
     ensure!(app.get_webview_window("keyboard-subtitle").is_none(), "idle runtime constructed subtitle WebView");
     ensure!(keyboard::validation_snapshot(app)["device"]["connected"] == false, "software fixture unexpectedly needs hardware");
+    let owner = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(owner["worker"].is_null() && owner["lockHeld"] == false && owner["directoryExists"] == false,
+        "default-off voice runtime created an external keyboard owner or directory");
 
     keyboard::validation_resource_block(app, Some("isolated old owner still alive")).await.map_err(anyhow::Error::msg)?;
     ensure!(action(app, "test_start").await.is_err(), "UI capture bypassed blocked old resource retirement");
@@ -1016,10 +1022,132 @@ async fn software_shortcut_checks(app: &tauri::AppHandle, settings: &Settings, f
         "release_does_not_stop_ui_recording":true,"released_editor_and_asr_preparation_do_not_resume":true,
         "cancel_suspend_update_remap_disable_require_fresh_release":true}))
 }
+async fn external_keyboard_checks(app: &tauri::AppHandle, settings: &Settings, fixture: &Fixture) -> Result<Value> {
+    use nomifun_keyboard::service::{DeviceStatus, Event};
+    let mut configured = settings.clone();
+    configured.enabled = false; // OS shortcut registration is independent.
+    configured.external_keyboard_enabled = true;
+    configured.k2_enabled = true; configured.k3_enabled = true; configured.k4_enabled = true;
+    keyboard::validation_request(app, None, Some(configured.clone())).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_connection(app, true).await.map_err(anyhow::Error::msg)?;
+    hardware(app, None).await?;
+    let owner = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(owner["lockHeld"] == true && owner["worker"].is_string(), "explicit opt-in did not acquire its own native transport");
+    let epoch = owner["epoch"].as_u64().context("adapter epoch missing")?;
+    action(app, "open").await?; edit(app, "外设共享草稿", None).await?;
+    let original = keyboard::validation_snapshot(app);
+    click(app, "k1").await?;
+    ensure!(keyboard::validation_snapshot(app)["visible"] == false, "K1 did not reuse subtitle hide");
+    click(app, "k1").await?;
+    let shown = keyboard::validation_snapshot(app);
+    for field in ["documentId", "text", "originalText", "revision"] { ensure!(shown[field] == original[field], "K1 discarded {field}"); }
+    close(app).await?;
+    start(app, fixture, "外设语音").await?;
+    hardware(app, Some(false)).await?; settled(app, "外设语音").await?;
+    click(app, "k2").await?; settled(app, "美化：外设语音").await?;
+    start(app, fixture, "外设取消的片段不得写入").await?;
+    click(app, "k3").await?; hardware(app, Some(false)).await?;
+    assert_stable(app, "美化：外设语音").await?;
+    start(app, fixture, "拔出后的迟到片段不得写入").await?;
+    keyboard::validation_external_event(app, epoch, Event::Failure("synthetic USB unplug".into())).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| idle(state) && state["text"] == "美化：外设语音").await?;
+    let reconnected_owner = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(reconnected_owner["worker"] == owner["worker"] && reconnected_owner["epoch"] == owner["epoch"],
+        "recoverable USB failure destroyed the live discovery owner");
+    hardware(app, None).await?; close(app).await?;
+    start(app, fixture, "硬件后的本地测试").await?;
+    hardware(app, Some(false)).await?; settled(app, "硬件后的本地测试").await?;
+    keyboard::validation_microphone_test(app, "microphone_test_start", "ui-local-after-hardware", None).await.map_err(anyhow::Error::msg)?;
+    let local = wait_state(app, |state| state["microphoneTest"]["state"] == "listening").await?;
+    keyboard::validation_external_event(app, epoch, Event::Failure("USB failure during UI local microphone test".into())).await.map_err(anyhow::Error::msg)?;
+    let local_after = keyboard::validation_snapshot(app);
+    ensure!(local_after["microphoneTest"]["id"] == local["microphoneTest"]["id"]
+        && local_after["microphoneTest"]["state"] == "listening" && local_after["audioState"]["state"] == "capturing",
+        "USB failure cancelled a UI microphone owner after previous hardware speech");
+    keyboard::validation_microphone_test(app, "microphone_test_stop", "ui-local-after-hardware", None).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["microphoneTest"]["stopped"] == true).await?;
+    close(app).await?;
+
+    configured.enabled = true;
+    keyboard::validation_request(app, None, Some(configured.clone())).await.map_err(anyhow::Error::msg)?;
+    *fixture.asr_text.lock().unwrap() = "快捷键持续录音".into();
+    shortcut(app, "dictate", true).await?;
+    let software = wait_state(app, |state| state["audioState"]["state"] == "capturing").await?;
+    keyboard::validation_external_event(app, epoch, Event::Status(DeviceStatus::default())).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_event(app, epoch, Event::Failure("USB port rejected while software records".into())).await.map_err(anyhow::Error::msg)?;
+    let after_usb = keyboard::validation_snapshot(app);
+    ensure!(after_usb["operationId"] == software["operationId"] && after_usb["audioState"]["state"] == "capturing"
+        && after_usb["error"] == software["error"], "recoverable USB failure changed an unrelated software operation");
+    let retired_commands = keyboard::validation_external_commands(app).map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_terminal(app, epoch, "synthetic terminal external bridge failure").await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_queued_start(app, epoch, retired_commands).await.map_err(anyhow::Error::msg)?;
+    let terminal = keyboard::validation_snapshot(app);
+    ensure!(terminal["externalKeyboard"]["state"] == "error", "queued same-instance startup revived a terminal adapter");
+    ensure!(terminal["operationId"] == software["operationId"] && terminal["audioState"]["state"] == "capturing"
+        && terminal["error"] == software["error"], "terminal external bridge failure stopped software speech");
+    keyboard::validation_external_connection(app, false).await.map_err(anyhow::Error::msg)?;
+    let disabled = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(disabled["worker"].is_null() && disabled["lockHeld"] == false, "disabled status preceded actual owner join");
+    let after_disable = keyboard::validation_snapshot(app);
+    ensure!(after_disable["operationId"] == software["operationId"] && after_disable["audioState"]["state"] == "capturing",
+        "turning off the external connection stopped software speech");
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    shortcut(app, "dictate", false).await?; settled(app, "快捷键持续录音").await?;
+
+    keyboard::validation_external_connection(app, true).await.map_err(anyhow::Error::msg)?;
+    hardware(app, None).await?;
+    let new_owner = keyboard::validation_transport_owner(app).map_err(anyhow::Error::msg)?;
+    ensure!(new_owner["epoch"] != owner["epoch"], "reenabling reused a retired adapter epoch");
+    keyboard::validation_external_frame(app, epoch, json!({"event":"button_down","button":"k4"})).await.map_err(anyhow::Error::msg)?;
+    ensure!(idle(&keyboard::validation_snapshot(app)), "retired adapter frame started capture after reenable");
+    start(app, fixture, "关闭外设连接的片段不得写入").await?;
+    keyboard::validation_external_connection(app, false).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| idle(state) && state["text"] == "快捷键持续录音").await?;
+    keyboard::validation_external_frame(app, new_owner["epoch"].as_u64().unwrap(), json!({"event":"button_down","button":"k4"})).await.map_err(anyhow::Error::msg)?;
+    ensure!(idle(&keyboard::validation_snapshot(app)), "late frame restarted hardware after disable");
+
+    // Leave the old operation source as Hardware, then start software streaming
+    // preparation while the adapter is off. Unrelated saves and hardware-only
+    // flags must not cancel the pending software request.
+    if !fixture.platform_asr {
+        configured = serde_json::from_value(keyboard::validation_snapshot(app)["settings"].clone())?;
+        configured.enabled = true; configured.k4_enabled = true;
+        keyboard::validation_request(app, None, Some(configured.clone())).await.map_err(anyhow::Error::msg)?;
+        let baseline = keyboard::validation_snapshot(app)["text"].as_str().unwrap().to_owned();
+        *fixture.asr_text.lock().unwrap() = "配置变化后快捷键".into();
+        fixture.hold_handshakes.store(true, Ordering::Release);
+        let connections = count(&fixture.connections);
+        shortcut(app, "dictate", true).await?; wait_counter(&fixture.connections, connections + 1).await?;
+        configured.subtitle_font_size = 16;
+        keyboard::validation_request(app, None, Some(configured.clone())).await.map_err(anyhow::Error::msg)?;
+        configured.k4_enabled = false;
+        keyboard::validation_request(app, None, Some(configured.clone())).await.map_err(anyhow::Error::msg)?;
+        ensure!(keyboard::validation_snapshot(app)["capturePreparing"] == true, "hardware-only or unrelated save cancelled pending software ASR");
+        fixture.hold_handshakes.store(false, Ordering::Release);
+        wait_state(app, |state| state["audioState"]["state"] == "capturing").await?;
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        shortcut(app, "dictate", false).await?;
+        settled(app, &format!("{baseline}配置变化后快捷键")).await?;
+    }
+    close(app).await?;
+    keyboard::validation_request(app, None, Some(settings.clone())).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_connection(app, false).await.map_err(anyhow::Error::msg)?;
+    Ok(json!({"default_off_has_no_owner":true,"opt_in_acquires_single_owned_transport":true,
+        "hardware_independent_of_shortcut_master":true,"k1_reuses_preserving_subtitle_toggle":true,"k2_reuses_beautification":true,"k3_reuses_cancellation":true,
+        "unplug_stops_only_hardware_capture":true,"recoverable_failure_preserves_discovery_owner":true,
+        "ui_local_capture_after_hardware_isolated":true,"software_capture_survives_usb_failure_and_disable":true,
+        "terminal_epoch_cannot_be_revived_by_queued_start":true,"disable_waits_for_owner_join":true,
+        "retired_frames_rejected_after_disable_and_reenable":true,"hardware_configuration_does_not_cancel_software":true,
+        "streaming_pending_case_applicable":!fixture.platform_asr}))
+}
 async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture) -> Result<Value> {
     let software_shortcuts = software_shortcut_checks(app, &settings, fixture).await.context("software shortcut Actor controls")?;
+    let external_keyboard = external_keyboard_checks(app, &settings, fixture).await.context("optional external keyboard adapter")?;
     let local_microphone = local_microphone_checks(app, &settings, fixture).await.context("local microphone checks")?;
-    keyboard::validation_request(app, None, Some(settings)).await.map_err(anyhow::Error::msg)?;
+    let mut hardware_settings = settings;
+    hardware_settings.external_keyboard_enabled = true;
+    keyboard::validation_request(app, None, Some(hardware_settings)).await.map_err(anyhow::Error::msg)?;
+    keyboard::validation_external_connection(app, true).await.map_err(anyhow::Error::msg)?;
     hardware(app, None).await?;
     let editor = preparation_and_editor(app, fixture).await.context("preparation/editor cancellation")?;
     let boundaries = cancellation_boundaries(app, fixture).await.context("ASR/polish cancellation")?;
@@ -1028,7 +1156,7 @@ async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture)
     let update_recovery = update_recovery(app, fixture).await.context("update pause/cancel/failure recovery")?;
     Ok(json!({"passed":true,"asr_mode":if fixture.platform_asr{"platform"}else{"streaming"},
         "audio_source":"explicit synthetic PCM fixture; no OS microphone","real_os_microphone":false,
-        "provider_requests_loopback_only":true,"software_shortcuts":software_shortcuts,"local_microphone":local_microphone,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
+        "provider_requests_loopback_only":true,"software_shortcuts":software_shortcuts,"external_keyboard_adapter":external_keyboard,"local_microphone":local_microphone,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
         "caret_and_close":caret_close,"update_recovery":update_recovery,
         "pcm_samples":count(&fixture.pcm),"uploads":count(&fixture.uploads),
         "asr_final_requests":count(&fixture.final_requests),"polish_requests":count(&fixture.polish)}))

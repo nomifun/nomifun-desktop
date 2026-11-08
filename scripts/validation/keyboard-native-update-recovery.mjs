@@ -72,6 +72,17 @@ function verifyRecovery(report, mode) {
     || software.released_editor_and_asr_preparation_do_not_resume !== true
     || software.cancel_suspend_update_remap_disable_require_fresh_release !== true) throw new Error('Missing software shortcut Actor ownership and demand-driven resource evidence');
   const recovery = report.update_recovery;
+  const external = report.external_keyboard_adapter;
+  if (!external || [
+    'default_off_has_no_owner', 'opt_in_acquires_single_owned_transport', 'hardware_independent_of_shortcut_master',
+    'k1_reuses_preserving_subtitle_toggle', 'k2_reuses_beautification', 'k3_reuses_cancellation',
+    'unplug_stops_only_hardware_capture', 'recoverable_failure_preserves_discovery_owner',
+    'ui_local_capture_after_hardware_isolated', 'software_capture_survives_usb_failure_and_disable',
+    'terminal_epoch_cannot_be_revived_by_queued_start', 'disable_waits_for_owner_join',
+    'retired_frames_rejected_after_disable_and_reenable', 'hardware_configuration_does_not_cancel_software',
+  ].some(key => external[key] !== true) || external.streaming_pending_case_applicable !== (mode === 'streaming')) {
+    throw new Error('Missing optional external adapter lifecycle, instance fencing, or software isolation evidence');
+  }
   if (recovery?.successful_handoff_keeps_old_runtime_paused !== true || recovery.cloud_completion_not_required !== true || recovery.automatic_recording_not_resumed !== true || recovery.disabled_and_unconfigured_keyboard_admit_maintenance !== true
     || !Array.isArray(recovery.cases) || recovery.cases.length !== 4
     || !['cancel_after_ready', 'cancel_during_native_stop', 'native_stop_timeout', 'external_native_stop_timeout'].every(scenario => recovery.cases.some(value => value.scenario === scenario && value.capture_recovered === true && value.old_hold_not_resumed === true && value.native_stop_proof_retained === true && value.preferences_preserved === true))) throw new Error('Missing native successful handoff, failed-stop, or cancelled-update recovery evidence');

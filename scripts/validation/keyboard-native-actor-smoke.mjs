@@ -139,6 +139,17 @@ async function session(profile) {
       throw new Error('Actor fixture lacks local-only microphone evidence and native owner isolation');
     }
     const recovery = report.update_recovery;
+    const external = report.external_keyboard_adapter;
+    if (!external || [
+      'default_off_has_no_owner', 'opt_in_acquires_single_owned_transport', 'hardware_independent_of_shortcut_master',
+      'k1_reuses_preserving_subtitle_toggle', 'k2_reuses_beautification', 'k3_reuses_cancellation',
+      'unplug_stops_only_hardware_capture', 'recoverable_failure_preserves_discovery_owner',
+      'ui_local_capture_after_hardware_isolated', 'software_capture_survives_usb_failure_and_disable',
+      'terminal_epoch_cannot_be_revived_by_queued_start', 'disable_waits_for_owner_join',
+      'retired_frames_rejected_after_disable_and_reenable', 'hardware_configuration_does_not_cancel_software',
+    ].some(key => external[key] !== true) || external.streaming_pending_case_applicable !== (details.options.mode === 'streaming')) {
+      throw new Error('Actor fixture lacks optional external adapter lifecycle and source isolation evidence');
+    }
     const software = report.software_shortcuts;
     if (software?.no_hardware_prerequisite !== true || software.hardware_key_toggles_do_not_gate_software !== true
       || software.idle_without_provider_audio_or_webview !== true || software.blocked_old_resources_gate_all_capture !== true

@@ -13,7 +13,7 @@ import { subtitleTextMap } from './subtitleText';
 
 const snapshot = (patch: Partial<KeyboardState> = {}): KeyboardState => ({
   sequence: 0, cancelGeneration: 0,
-  settings: { enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
+  settings: { enabled: true, externalKeyboardEnabled: false, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
     asrModel: null, textModel: null, language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: true, subtitleFontSize: 14 },
   documentId: 'document-1', revision: 3, operationId: null, editSessionId: null, dictationSelection: null, phase: 'idle', text: '原文 👋\nSecond line',
   originalText: '原文 👋\nSecond line', partial: '', candidate: '', visible: true, pendingAction: null,
@@ -24,7 +24,7 @@ const snapshot = (patch: Partial<KeyboardState> = {}): KeyboardState => ({
   capturePreparing: false,
   device: { connected: true, id: 'device-1', port: 'COM8', firmware: 'test',
     policyState: 'applied', captureState: 'stopped', detail: null },
-  service: { running: true, ready: true, detail: null }, ...patch,
+  service: { running: true, ready: true, detail: null }, externalKeyboard: { state: 'disabled', detail: null }, ...patch,
 });
 function deferred<T>() {
   let resolve!: (value: T) => void;

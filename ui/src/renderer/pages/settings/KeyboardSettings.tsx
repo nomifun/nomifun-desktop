@@ -64,6 +64,42 @@ function ShortcutBindings({ shortcuts, disabled, onApply }: {
   </>;
 }
 
+function ExternalKeyboardPanel({ state, draft, onChange }: {
+  state: KeyboardState; draft: Settings; onChange: (patch: Partial<Settings>) => void;
+}) {
+  const { t } = useTranslation();
+  const status = state.externalKeyboard.state;
+  const stopping = status === 'stopping';
+  const showDevice = draft.externalKeyboardEnabled || status !== 'disabled';
+  const detail = state.externalKeyboard.detail;
+  return <VisualPanel title={t('settings.keyboard.externalTitle')} description={t('settings.keyboard.externalHint')} className='keyboard-section-target'>
+    <VisualRow label={t('settings.keyboard.externalEnabled')} description={t('settings.keyboard.externalEnabledHint')}>
+      <VisualSwitch label={t('settings.keyboard.externalEnabled')} checked={draft.externalKeyboardEnabled} disabled={stopping}
+        onChange={externalKeyboardEnabled => onChange({ externalKeyboardEnabled })} />
+    </VisualRow>
+    <VisualRow label={t('settings.keyboard.externalStatus')} description={status === 'error' ? undefined : detail}>
+      <VisualStatus tone={status === 'error' ? 'danger' : status === 'connected' ? 'success' : stopping || status === 'starting' ? 'info' : 'neutral'}>
+        {t(`settings.keyboard.external_${status}`)}
+      </VisualStatus>
+    </VisualRow>
+    {status === 'error' && detail && <Alert type='warning' content={detail} />}
+    {showDevice && <>
+      {state.device.connected && <>
+        <VisualRow label={t('settings.keyboard.externalDevice')} description={[state.device.id, state.device.port].filter(Boolean).join(' · ')} />
+        {state.device.firmware && <VisualRow label={t('settings.keyboard.externalFirmware')} description={state.device.firmware} />}
+      </>}
+      {state.device.detail && state.device.detail !== detail && <p className='cv-note'>{state.device.detail}</p>}
+      <VisualRow label={t('settings.keyboard.externalK1')} description={t('settings.keyboard.externalK1Hint')} />
+      {(['k2Enabled', 'k3Enabled', 'k4Enabled'] as const).map(key => <VisualRow key={key} label={t(`settings.keyboard.${key}`)}
+        disabled={!draft.externalKeyboardEnabled || stopping}>
+        <VisualSwitch label={t(`settings.keyboard.${key}`)} checked={draft[key]} disabled={!draft.externalKeyboardEnabled || stopping}
+          onChange={value => onChange({ [key]: value })} />
+      </VisualRow>)}
+      {draft.externalKeyboardEnabled && !draft.k4Enabled && <p className='cv-note'>{t('settings.keyboard.externalDictationDisabled')}</p>}
+    </>}
+  </VisualPanel>;
+}
+
 export default function KeyboardSettings() {
   const { t } = useTranslation();
   const native = useKeyboard();
@@ -361,6 +397,8 @@ export default function KeyboardSettings() {
             <Button disabled={native.busy} onClick={() => void native.action({ action: 'reset_position' })}>{t('settings.keyboard.resetPosition')}</Button>
           </div>
         </VisualPanel>
+
+        <ExternalKeyboardPanel state={state} draft={draft} onChange={patch => autosave.change(patch)} />
 
       </>}
     </div>

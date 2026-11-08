@@ -11,11 +11,12 @@ function state(sequence = 1, patch: Partial<KeyboardSettings> = {}): KeyboardSta
   return {
     sequence, cancelGeneration: 0,
     settings: {
-      enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true,
+      enabled: true, externalKeyboardEnabled: false, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true,
       audioDeviceId: null, asrMode: 'streaming', asrModel: null, textModel: null,
       language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false,
       subtitleFontSize: 14, ...patch,
     },
+    externalKeyboard: { state: 'disabled', detail: null },
     documentId: null, revision: 0, operationId: null, editSessionId: null,
     dictationSelection: null, phase: 'idle', text: '', originalText: '', partial: '',
     candidate: '', visible: false, pendingAction: null, error: null, notice: null,
@@ -96,6 +97,32 @@ function fixture() {
 }
 
 describe('keyboard settings autosave controller', () => {
+  test('external mode enable preserves disabled hardware keys and the independent shortcut preference', async () => {
+    const f = fixture();
+    f.controller.observe(state(2, { enabled: false, k2Enabled: false, k4Enabled: false }));
+    f.controller.change({ externalKeyboardEnabled: true });
+    expect(f.writes[0].settings).toMatchObject({ enabled: false, externalKeyboardEnabled: true, k2Enabled: false, k3Enabled: true, k4Enabled: false });
+    await f.acknowledge(0, 3);
+    expect(f.controller.getSnapshot().saved?.externalKeyboardEnabled).toBe(true);
+    expect(f.controller.getSnapshot().saved?.shortcuts).toEqual(defaultVoiceKeyboardShortcuts);
+  });
+
+  test('external connection disable can save during capture without leaking deferred ASR edits', async () => {
+    const f = fixture();
+    f.controller.observe({ ...state(2, { externalKeyboardEnabled: true }), phase: 'recording', audioState: { state: 'capturing', detail: null } });
+    f.controller.change({ language: 'zh' }, 'debounced');
+    f.controller.change({ externalKeyboardEnabled: false });
+    expect(f.writes[0].settings).toMatchObject({ enabled: true, externalKeyboardEnabled: false, language: '' });
+    expect(f.controller.getSnapshot().deferred).toBe(true);
+    f.writes[0].reply.resolve({ ...state(3, f.writes[0].settings), phase: 'recording', audioState: { state: 'capturing', detail: null } });
+    await settle();
+    f.clock.advance(500);
+    expect(f.writes).toHaveLength(1);
+    f.controller.observe(state(4, { externalKeyboardEnabled: false }));
+    expect(f.writes[1].settings).toMatchObject({ enabled: true, externalKeyboardEnabled: false, language: 'zh' });
+    await f.acknowledge(1, 5);
+  });
+
   test('observing mount and unrelated native events never writes settings', () => {
     const f = fixture();
     f.controller.observe({ ...state(2), text: 'An unrelated transcript update' });

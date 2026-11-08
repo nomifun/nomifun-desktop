@@ -81,23 +81,32 @@ mod native {
         Ok(())
     }
 
-    fn until(mut ready: impl FnMut() -> bool) -> Result<()> {
+    fn until(stage: &str, mut ready: impl FnMut() -> bool) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(4);
         while !ready() {
-            ensure!(Instant::now() < deadline, "native shortcut witness timed out");
+            ensure!(Instant::now() < deadline, "native shortcut witness timed out: {stage}");
             std::thread::sleep(Duration::from_millis(20));
         }
         Ok(())
     }
 
     fn validate(app: &tauri::AppHandle, window: usize) -> Result<serde_json::Value> {
-        until(|| owned_foreground(window).is_ok())?;
+        until("owned window foreground", || owned_foreground(window).is_ok())?;
         let events = Arc::new(Mutex::new(Vec::new()));
         let collect = events.clone();
         let mut controller = shortcuts::Controller::new(app.clone(), move |action, pressed| {
             collect.lock().unwrap().push((format!("{action:?}"), pressed));
         });
         let result = (|| -> Result<_> {
+            // Exercise the actual shipping defaults as well as isolated F-key
+            // chords: a default reserved by Windows must fail this witness.
+            // No default shortcut is injected into the user's desktop.
+            let defaults = Settings::default();
+            ensure!(controller.reconfigure(&defaults).map_err(anyhow::Error::msg)? == 4,
+                "all four shipping default shortcuts must register with the OS");
+            controller.shutdown().map_err(anyhow::Error::msg)?;
+            ensure!(controller.registered() == 0, "default shortcuts were not released before F-key tests");
+            ensure!(events.lock().unwrap().is_empty(), "unexpected user input while reserving defaults");
             let mut settings = Settings::default();
             settings.enabled = true;
             settings.shortcuts.toggle.clear(); settings.shortcuts.beautify.clear(); settings.shortcuts.cancel.clear();
@@ -109,16 +118,16 @@ mod native {
             let conflict = controller.reconfigure(&changed).expect_err("OS-reserved F24 must conflict");
             ensure!(controller.registered() == 1, "conflict must preserve the original registration");
             chord(window, F23)?;
-            until(|| events.lock().unwrap().len() >= 2)?;
+            until("original F23 dictation press/release", || events.lock().unwrap().len() >= 2)?;
             ensure!(*events.lock().unwrap() == vec![("Dictate".into(), true), ("Dictate".into(), false)],
                 "original binding did not retain its native press/release edges");
             drop(reservation);
             changed.shortcuts.toggle = "Control+Alt+Shift+F23".into();
             ensure!(controller.reconfigure(&changed).map_err(anyhow::Error::msg)? == 2, "updated registration count");
             chord(window, F23)?;
-            until(|| events.lock().unwrap().len() >= 4)?;
+            until("rebound F23 toggle press/release", || events.lock().unwrap().len() >= 4)?;
             chord(window, F24)?;
-            until(|| events.lock().unwrap().len() >= 6)?;
+            until("F24 dictation press/release", || events.lock().unwrap().len() >= 6)?;
             ensure!(*events.lock().unwrap() == vec![("Dictate".into(), true), ("Dictate".into(), false),
                 ("Toggle".into(), true), ("Toggle".into(), false), ("Dictate".into(), true), ("Dictate".into(), false)],
                 "rebinding did not route native edges to the intended actions");
@@ -131,6 +140,7 @@ mod native {
             std::thread::sleep(Duration::from_millis(150));
             ensure!(events.lock().unwrap().len() == 6, "events continued after shutdown");
             Ok(json!({"ok":true,"events":*events.lock().unwrap(),"conflict":conflict,
+                "defaultPlanRegistered":4,"defaultPlanReleased":true,"defaultBindings":defaults.shortcuts,
                 "actualOsRegistration":true,"actualPressedAndReleased":true,"rebindingVerified":true,
                 "osRegistrationsReleased":true,"foregroundPid":std::process::id(),"testKeys":["Control+Alt+Shift+F23","Control+Alt+Shift+F24"],
                 "microphoneOpened":false,"serialOpened":false,"providerCalled":false,"productionProfileUsed":false}))
@@ -155,6 +165,7 @@ mod native {
             let window = tauri::window::WindowBuilder::new(app, "voice-shortcut-owned-fixture")
                 .title("NomiFun voice shortcut fixture — no microphone or hardware")
                 .inner_size(880.0, 600.0).min_inner_size(880.0, 600.0).focused(true).build()?;
+            window.set_focus()?;
             let window = window.hwnd()?.0 as usize;
             let app = app.handle().clone();
             std::thread::spawn(move || {

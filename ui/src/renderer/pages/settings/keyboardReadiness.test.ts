@@ -5,7 +5,7 @@ import type { KeyboardSettings, KeyboardState } from '@/common/keyboard';
 import { deriveKeyboardReadiness, type KeyboardReadinessInput } from './keyboardReadiness';
 
 const settings = (): KeyboardSettings => ({
-  enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true,
+  enabled: true, externalKeyboardEnabled: false, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true,
   audioDeviceId: null, asrMode: 'streaming',
   asrModel: { providerId: 'provider-1', model: 'streaming-model' }, textModel: null,
   language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false, subtitleFontSize: 14,
@@ -27,7 +27,7 @@ function input(): KeyboardReadinessInput {
       connected: true, id: 'keyboard-1', port: 'test-port', firmware: 'test-firmware',
       policyState: 'applied' as const, captureState: 'stopped' as const, detail: null,
     },
-    service: { running: true, ready: true, detail: null },
+    service: { running: true, ready: true, detail: null }, externalKeyboard: { state: 'disabled' as const, detail: null },
   };
   const state: KeyboardState = snapshot;
   return {
@@ -42,6 +42,19 @@ function input(): KeyboardReadinessInput {
 }
 
 describe('derived keyboard readiness', () => {
+  test.each(['disabled', 'starting', 'connecting', 'connected', 'stopping', 'error'] as const)(
+    'optional external lifecycle %s never becomes a software speech prerequisite', (state) => {
+      const value = input();
+      value.state.externalKeyboard = { state, detail: state === 'error' ? 'Optional port failed' : null };
+      value.state.settings.externalKeyboardEnabled = state !== 'disabled';
+      value.state.device.connected = false;
+      value.state.device.policyState = 'error';
+      const result = deriveKeyboardReadiness(value);
+      expect(result.shortcutsReady).toBe(true);
+      expect(result.cloudBlockers).toEqual([]);
+    }
+  );
+
   test('reports software speech prerequisites without requiring hardware or text polish', () => {
     const value = input();
     value.state.device.connected = false; value.state.service.ready = false;

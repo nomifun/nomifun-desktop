@@ -2320,7 +2320,26 @@
     "shortcutHint_cancel": "取消当前语音输入或美化，保留已定稿正文。",
     "shortcutEmpty": "不设置快捷键",
     "applyShortcuts": "应用快捷键",
-    "shortcutFormat": "输入组合键，例如 CommandOrControl+Shift+Space。CommandOrControl 在 Windows/Linux 表示 Ctrl，在 macOS 表示 Command。留空可停用对应快捷键；点击应用后生效，冲突会显示错误并保留原有可用快捷键。"
+    "shortcutFormat": "输入组合键，例如 CommandOrControl+Shift+Space。CommandOrControl 在 Windows/Linux 表示 Ctrl，在 macOS 表示 Command。留空可停用对应快捷键；点击应用后生效，冲突会显示错误并保留原有可用快捷键。",
+    "externalTitle": "外置键盘连接（可选）",
+    "externalHint": "作为同一套语音能力的可选输入方式。系统快捷键、麦克风检测和语音识别均可独立使用。",
+    "externalEnabled": "连接外置键盘",
+    "externalEnabledHint": "默认关闭。需要使用四键设备时主动开启；关闭后会等待设备连接彻底释放。",
+    "externalStatus": "设备连接状态",
+    "external_disabled": "连接模式未开启",
+    "external_starting": "正在启动设备连接",
+    "external_connecting": "等待外置键盘连接",
+    "external_connected": "已连接",
+    "external_stopping": "正在关闭连接，等待设备释放…",
+    "external_error": "设备连接需要处理",
+    "externalDevice": "设备",
+    "externalFirmware": "固件版本",
+    "externalK1": "K1 · 显示或隐藏字幕",
+    "externalK1Hint": "与字幕快捷键共用同一字幕窗口和正文。",
+    "k2Enabled": "K2 · 美化全文",
+    "k3Enabled": "K3 · 取消当前操作",
+    "k4Enabled": "K4 · 按住说话",
+    "externalDictationDisabled": "K4 听写已关闭。开启 K4 后才能通过设备录音；系统听写快捷键可独立使用。"
   },
 
   "enhancedTools": {

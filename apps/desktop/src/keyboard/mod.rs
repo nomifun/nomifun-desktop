@@ -1,6 +1,7 @@
 //! One voice operation path for system shortcuts, subtitle controls and optional hardware.
 mod asr_preparation;
 mod audio;
+mod external_input;
 mod key_hold;
 mod lifecycle;
 mod models;
@@ -63,6 +64,13 @@ pub(crate) struct KeyboardState {
     cancel_generation: u64,
     edit_session_id: Option<String>,
     shortcut_state: ShortcutState,
+    external_keyboard: ExternalKeyboardState,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalKeyboardState { state: String, detail: Option<String> }
+impl Default for ExternalKeyboardState {
+    fn default() -> Self { Self { state: "disabled".into(), detail: None } }
 }
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +93,7 @@ pub(crate) struct KeyboardRuntime {
     update_admission: Arc<UpdateAdmission>,
     root: PathBuf,
     transport: Arc<Mutex<Option<OwnedTransport>>>,
+    external: external_input::Controller,
 }
 /// Both joins belong to the GUI runtime. The event bridge never reconnects or
 /// starts another process, and shutdown holds this owner until both are gone.
@@ -123,9 +132,15 @@ enum Message {
     ValidationHoldStop(bool, oneshot::Sender<Result<(), String>>),
     #[cfg(feature = "native-keyboard-validation")]
     ValidationLateCaptureCallback(oneshot::Sender<Result<(), String>>),
-    Connected(Commands),
-    Disconnected(String),
-    Device(Event),
+    Connected(u64, Commands),
+    Disconnected(u64, String),
+    Device(u64, Event),
+    ExternalSettled(u64, Result<bool, String>),
+    LifecycleFailure(String),
+    #[cfg(feature = "native-keyboard-validation")]
+    ValidationExternalEvent(u64, Event, oneshot::Sender<Result<KeyboardState, String>>),
+    #[cfg(feature = "native-keyboard-validation")]
+    ValidationExternalTerminal(u64, String, oneshot::Sender<Result<KeyboardState, String>>),
     Suspend(bool),
     Tick,
     MicrophoneTick(Identity),
@@ -215,6 +230,7 @@ struct Actor {
     shortcut_generation: u64,
     shortcuts: Option<shortcuts::Controller>,
     startup_error: Option<String>,
+    external: external_input::Controller,
     asr: Option<StreamingAsrInput>,
     asr_generation: u64,
     asr_document: Option<Identity>,
@@ -302,6 +318,7 @@ fn start_core(
     let mut saved = saved;
     if error.is_some() || startup_error.is_some() {
         saved.settings.enabled = false;
+        saved.settings.external_keyboard_enabled = false;
     }
     let mut state = KeyboardState {
         sequence: 0,
@@ -322,6 +339,7 @@ fn start_core(
         cancel_generation: 0,
         edit_session_id: None,
         shortcut_state: ShortcutState::default(),
+        external_keyboard: ExternalKeyboardState::default(),
     };
     state.document.error = error.or_else(|| startup_error.clone());
     let snapshot = Arc::new(Mutex::new(state.clone()));
@@ -350,6 +368,7 @@ fn start_core(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let update_admission = Arc::new(UpdateAdmission::default());
     let transport = Arc::new(Mutex::new(None));
+    let external = external_input::Controller::new(transport.clone(), stop_flag.clone(), root.clone(), production, tx.clone(), urgent.clone());
     app.manage(KeyboardRuntime {
         tx: tx.clone(),
         urgent: urgent.clone(),
@@ -359,11 +378,10 @@ fn start_core(
         update_admission: update_admission.clone(),
         root: root.clone(),
         transport: transport.clone(),
+        external: external.clone(),
     });
     #[cfg(feature = "native-keyboard-validation")]
     let synthetic_input = !production && root.join(".synthetic-audio-fixture").exists();
-    #[cfg(feature = "native-keyboard-validation")]
-    let transport_root = root.join("keyboard-transport");
     let actor = Actor {
         app: app.clone(),
         models,
@@ -385,6 +403,7 @@ fn start_core(
         shortcut_generation: 1,
         shortcuts,
         startup_error,
+        external: external.clone(),
         asr: None,
         asr_generation: 0,
         asr_document: None,
@@ -434,7 +453,7 @@ fn start_core(
                 app.manage(guard);
             }
             Err(e) => {
-                let _ = urgent.send(Message::Disconnected(format!("系统会话监听失败：{e}")));
+                let _ = urgent.send(Message::LifecycleFailure(format!("系统会话监听失败：{e}")));
             }
         }
     } else {
@@ -449,29 +468,6 @@ fn start_core(
             }
         }
     });
-    let serial = if production {
-        None
-    } else {
-        #[cfg(feature = "native-keyboard-validation")]
-        {
-            std::fs::create_dir_all(&transport_root)?;
-            Some(Transport::start_validation(transport_root)?)
-        }
-        #[cfg(not(feature = "native-keyboard-validation"))]
-        None
-    };
-    if let Some((serial, events)) = serial {
-        let commands = serial.commands();
-        // Worker initialization precedes caller-supplied actions in the actor
-        // FIFO. Waiting is bounded and cannot depend on any GUI/native action.
-        // On failure the local serial owner is dropped and joined here.
-        initialize_transport_events(&events, commands.clone(), &tx)
-            .map_err(anyhow::Error::msg)?;
-        let bridge = std::thread::Builder::new()
-            .name("nomifun-keyboard-events".into())
-            .spawn(move || transport_events(events, commands, tx, urgent))?;
-        *transport.lock().unwrap() = Some(OwnedTransport { transport: serial, bridge: Some(bridge) });
-    }
     Ok(())
 }
 /// Native conformance examples reuse the production actor, model resolution,
@@ -590,8 +586,7 @@ pub(crate) async fn validation_hardware(
 ) -> Result<serde_json::Value, String> {
     validation_hardware_mode(app, pressed, true).await
 }
-/// Exercise the physical K2/K3 dispatcher guard in a disposable synthetic Actor.
-/// K1 is deliberately excluded because this fixture does not own a main window.
+/// Exercise the optional hardware dispatcher in a disposable synthetic Actor.
 #[cfg(feature = "native-keyboard-validation")]
 pub(crate) async fn validation_hardware_click(
     app: &tauri::AppHandle,
@@ -605,6 +600,51 @@ pub(crate) async fn validation_hardware_click(
         .await
         .map_err(|_| "actor stopped")?;
     serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|e| e.to_string())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_external_connection(app: &tauri::AppHandle, enabled: bool) -> Result<serde_json::Value, String> {
+    let mut settings = app.state::<KeyboardRuntime>().snapshot.lock().unwrap().settings.clone();
+    settings.external_keyboard_enabled = enabled;
+    validation_request(app, None, Some(settings)).await?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = app.state::<KeyboardRuntime>().snapshot.lock().unwrap().clone();
+        if state.external_keyboard.state == "error" { return Err(state.external_keyboard.detail.unwrap_or("external adapter failed".into())); }
+        if (enabled && matches!(state.external_keyboard.state.as_str(), "connecting" | "connected"))
+            || (!enabled && state.external_keyboard.state == "disabled") {
+            return serde_json::to_value(state).map_err(|error| error.to_string());
+        }
+        if Instant::now() >= deadline { return Err("external adapter did not settle".into()); }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_external_frame(app: &tauri::AppHandle, epoch: u64, frame: serde_json::Value) -> Result<serde_json::Value, String> {
+    validation_external_event(app, epoch, Event::Frame(frame)).await
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_external_event(app: &tauri::AppHandle, epoch: u64, event: Event) -> Result<serde_json::Value, String> {
+    let (reply, result) = oneshot::channel();
+    app.state::<KeyboardRuntime>().urgent.send(Message::ValidationExternalEvent(epoch, event, reply)).map_err(|_| "actor stopped")?;
+    serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|error| error.to_string())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) fn validation_external_commands(app: &tauri::AppHandle) -> Result<Commands, String> {
+    app.state::<KeyboardRuntime>().transport.lock().map_err(|_| "transport owner poisoned")?
+        .as_ref().map(|owner| owner.transport.commands()).ok_or("external owner absent".into())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_external_terminal(app: &tauri::AppHandle, epoch: u64, error: &str) -> Result<serde_json::Value, String> {
+    let (reply, result) = oneshot::channel();
+    app.state::<KeyboardRuntime>().urgent.send(Message::ValidationExternalTerminal(epoch, error.into(), reply)).map_err(|_| "actor stopped")?;
+    serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|error| error.to_string())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_external_queued_start(app: &tauri::AppHandle, epoch: u64, commands: Commands) -> Result<serde_json::Value, String> {
+    let runtime = app.state::<KeyboardRuntime>();
+    runtime.tx.send(Message::Connected(epoch, commands)).await.map_err(|_| "actor stopped")?;
+    runtime.tx.send(Message::Device(epoch, Event::Status(DeviceStatus::default()))).await.map_err(|_| "actor stopped")?;
+    validation_microphone_test(app, "microphone_test_stop", "stale-start-ack", None).await
 }
 /// Delay only the explicit synthetic capture owner's release proof. This is
 /// unavailable to ordinary application builds and never affects native audio.
@@ -641,6 +681,8 @@ pub(crate) fn validation_transport_owner(app: &tauri::AppHandle) -> Result<serde
     Ok(serde_json::json!({
         "processId": std::process::id(), "worker": worker, "lockHeld": lock_held,
         "endpointPublished": directory.join("owner.json").exists(),
+        "directoryExists": directory.exists(),
+        "epoch": runtime.external.epoch(),
     }))
 }
 #[cfg(feature = "native-keyboard-validation")]
@@ -665,6 +707,7 @@ async fn validation_hardware_mode(
 fn initialize_transport_events(
     events: &std::sync::mpsc::Receiver<Event>,
     commands: Commands,
+    epoch: u64,
     tx: &mpsc::Sender<Message>,
 ) -> Result<(), String> {
     let initial = events.recv_timeout(Duration::from_secs(1))
@@ -672,27 +715,28 @@ fn initialize_transport_events(
     if !matches!(initial, Event::Status(_)) {
         return Err("键盘串口首个事件不是连接状态".into());
     }
-    tx.try_send(Message::Connected(commands)).map_err(|_| "键盘初始化队列已关闭或满")?;
-    tx.try_send(Message::Device(initial)).map_err(|_| "键盘初始化队列已关闭或满")?;
+    tx.try_send(Message::Connected(epoch, commands)).map_err(|_| "键盘初始化队列已关闭或满")?;
+    tx.try_send(Message::Device(epoch, initial)).map_err(|_| "键盘初始化队列已关闭或满")?;
     Ok(())
 }
 fn transport_events(
     events: std::sync::mpsc::Receiver<Event>,
     commands: Commands,
+    epoch: u64,
     tx: mpsc::Sender<Message>,
     urgent: mpsc::UnboundedSender<Message>,
 ) {
     let mut error = "键盘串口线程已停止".to_owned();
     while let Ok(event) = events.recv() {
         if matches!(&event, Event::Failure(_)) {
-            if urgent.send(Message::Device(event)).is_err() { break; }
-        } else if tx.try_send(Message::Device(event)).is_err() {
+            if urgent.send(Message::Device(epoch, event)).is_err() { break; }
+        } else if tx.try_send(Message::Device(epoch, event)).is_err() {
             let _ = commands.control(Control::Policy { voice_key: "none".into() });
             error = "设备事件队列溢出，键盘输入已撤销".into();
             break;
         }
     }
-    let _ = urgent.send(Message::Disconnected(error));
+    let _ = urgent.send(Message::Disconnected(epoch, error));
 }
 async fn next_message(
     data: &mut mpsc::Receiver<Message>,
@@ -714,10 +758,10 @@ mod priority_tests {
         let root = tempfile::tempdir().unwrap();
         let (mut owner, events) = Transport::start_validation(root.path().into()).unwrap();
         let (tx, mut rx) = mpsc::channel(4);
-        initialize_transport_events(&events, owner.commands(), &tx).unwrap();
+        initialize_transport_events(&events, owner.commands(), 1, &tx).unwrap();
         tx.try_send(Message::Tick).unwrap();
-        assert!(matches!(rx.try_recv(), Ok(Message::Connected(_))));
-        assert!(matches!(rx.try_recv(), Ok(Message::Device(Event::Status(_)))));
+        assert!(matches!(rx.try_recv(), Ok(Message::Connected(1, _))));
+        assert!(matches!(rx.try_recv(), Ok(Message::Device(1, Event::Status(_)))));
         assert!(matches!(rx.try_recv(), Ok(Message::Tick)));
         owner.shutdown().unwrap();
         assert!(!Transport::validation_lock_held(root.path()).unwrap());
@@ -729,7 +773,7 @@ mod priority_tests {
         let (owner, events) = Transport::start_validation(root.path().into()).unwrap();
         let (tx, _rx) = mpsc::channel(1);
         tx.try_send(Message::Tick).unwrap();
-        assert!(initialize_transport_events(&events, owner.commands(), &tx).is_err());
+        assert!(initialize_transport_events(&events, owner.commands(), 1, &tx).is_err());
         drop(owner);
         assert!(!Transport::validation_lock_held(root.path()).unwrap());
     }
@@ -743,7 +787,7 @@ mod priority_tests {
         let (control_tx, mut control) = mpsc::unbounded_channel();
         control_tx.send(Message::Suspend(true)).unwrap();
         control_tx.send(Message::Suspend(false)).unwrap();
-        control_tx.send(Message::Disconnected("stopped".into())).unwrap();
+        control_tx.send(Message::Disconnected(1, "stopped".into())).unwrap();
         assert!(matches!(
             next_message(&mut data, &mut control).await,
             Some(Message::Suspend(true))
@@ -754,7 +798,7 @@ mod priority_tests {
         ));
         assert!(matches!(
             next_message(&mut data, &mut control).await,
-            Some(Message::Disconnected(_))
+            Some(Message::Disconnected(1, _))
         ));
         assert_eq!(data.len(), 64);
     }
@@ -774,6 +818,42 @@ mod priority_tests {
     }
 }
 impl Actor {
+    fn hardware_lost(&mut self, detail: Option<String>) {
+        let active_hardware = self.operation_source == InputSource::Hardware
+            && (self.capture_id.is_some() || self.state.document.phase != Phase::Idle);
+        let pending_hardware = self.pending_start.as_ref().is_some_and(|pending| pending.source == InputSource::Hardware);
+        self.rearm_hardware();
+        if self.pending_origin == Some(InputSource::Hardware) {
+            self.pending_origin = None; self.state.document.pending_action = None;
+        }
+        if active_hardware || pending_hardware {
+            self.abort(false);
+            if let Some(error) = &detail { self.state.document.error = Some(error.clone()); }
+        }
+        if let Some(error) = detail {
+            self.state.external_keyboard.detail = Some(error.clone());
+            self.state.device.detail = Some(error);
+        }
+    }
+    fn request_external(&mut self, enabled: bool) {
+        self.hardware_lost(None);
+        self.commands = None; self.display_sent = None;
+        self.state.device = DeviceStatus::default();
+        self.state.external_keyboard = ExternalKeyboardState {
+            state: if enabled { "starting" } else { "stopping" }.into(), detail: None,
+        };
+        self.external.request(enabled);
+    }
+    fn external_failed(&mut self, epoch: u64, error: String) {
+        if !self.external.accepts(epoch) { return; }
+        self.hardware_lost(Some(error.clone()));
+        self.commands = None; self.display_sent = None;
+        self.state.device.connected = false;
+        self.state.external_keyboard = ExternalKeyboardState { state: "error".into(), detail: Some(error) };
+        // Terminal failure cannot be revived by queued initial Connected or
+        // Status messages from this same instance. Cleanup gets a fresh epoch.
+        self.external.request(false);
+    }
     fn capture_admitted(&self) -> Result<(), String> {
         if let Some(error) = &self.startup_error { return Err(format!("语音资源尚未就绪：{error}")); }
         Ok(())
@@ -791,7 +871,7 @@ impl Actor {
     fn source_authorized(&self, source: InputSource, generation: u64) -> bool {
         match source {
             InputSource::Ui => true,
-            InputSource::Hardware => self.key_hold.waiting() && self.hardware_armed && generation == self.activation_generation,
+            InputSource::Hardware => self.saved.settings.external_keyboard_enabled && self.key_hold.waiting() && self.hardware_armed && generation == self.activation_generation,
             InputSource::Shortcut => self.shortcut_hold.waiting() && self.saved.settings.enabled && generation == self.shortcut_generation,
         }
     }
@@ -824,23 +904,25 @@ impl Actor {
         }
         if !pressed || !self.saved.settings.enabled || self.suspended || self.stop_flag.load(Ordering::Acquire) { return; }
         match action {
-            shortcuts::Action::Toggle => {
-                self.consume_holds();
-                if self.state.document.visible {
-                    if self.capture_id.is_some() || self.pending_start.is_some() || self.state.document.phase != Phase::Idle {
-                        self.state.document.notice = Some("请先结束或取消语音操作再隐藏字幕".into());
-                    } else if let Some(window) = self.app.get_webview_window("keyboard-subtitle") {
-                        match platform::hide_subtitle(&window) {
-                            Ok(()) => self.state.document.visible = false,
-                            Err(error) => self.state.document.error = Some(error.to_string()),
-                        }
-                    }
-                }
-                else { self.close_pending = false; self.state.document.open(); if let Err(error) = self.show() { self.state.document.error = Some(error); } }
-            }
+            shortcuts::Action::Toggle => self.toggle_subtitle(),
             shortcuts::Action::Beautify => self.request_intent(Intent::Beautify, InputSource::Shortcut),
             shortcuts::Action::Cancel => self.cancel_current(),
             shortcuts::Action::Dictate => { if self.shortcut_hold.press() { self.begin_capture(InputSource::Shortcut); } }
+        }
+    }
+    fn toggle_subtitle(&mut self) {
+        if self.state.document.visible {
+            if self.capture_id.is_some() || self.pending_start.is_some() || self.state.document.phase != Phase::Idle {
+                self.state.document.notice = Some("请先结束或取消语音操作再隐藏字幕".into());
+            } else if let Some(window) = self.app.get_webview_window("keyboard-subtitle") {
+                match platform::hide_subtitle(&window) {
+                    Ok(()) => self.state.document.visible = false,
+                    Err(error) => self.state.document.error = Some(error.to_string()),
+                }
+            }
+        } else {
+            self.close_pending = false; self.state.document.open();
+            if let Err(error) = self.show() { self.state.document.error = Some(error); }
         }
     }
     async fn run(
@@ -848,6 +930,7 @@ impl Actor {
         mut rx: mpsc::Receiver<Message>,
         mut urgent: mpsc::UnboundedReceiver<Message>,
     ) {
+        if self.saved.settings.external_keyboard_enabled && self.startup_error.is_none() { self.request_external(true); }
         while let Some(message) = next_message(&mut rx, &mut urgent).await {
             match message {
                 Message::Shortcut(action, pressed) => self.shortcut(action, pressed),
@@ -864,11 +947,26 @@ impl Actor {
                     let _ = reply.send(result);
                 }
                 #[cfg(feature = "native-keyboard-validation")]
+                Message::ValidationExternalEvent(epoch, event, reply) => {
+                    let result = if self.production || !self.synthetic_input { Err("synthetic isolated actor required".into()) }
+                    else {
+                        if self.saved.settings.external_keyboard_enabled && self.external.accepts(epoch) { self.device(event); }
+                        self.publish(); Ok(self.state.clone())
+                    };
+                    let _ = reply.send(result);
+                }
+                #[cfg(feature = "native-keyboard-validation")]
+                Message::ValidationExternalTerminal(epoch, error, reply) => {
+                    let result = if self.production || !self.synthetic_input { Err("synthetic isolated actor required".into()) }
+                    else { self.external_failed(epoch, error); self.publish(); Ok(self.state.clone()) };
+                    let _ = reply.send(result);
+                }
+                #[cfg(feature = "native-keyboard-validation")]
                 Message::ValidationButtonClick(button, reply) => {
                     let result = if self.production || !self.synthetic_input {
                         Err("synthetic isolated actor required".into())
-                    } else if !matches!(button.as_str(), "k2" | "k3") {
-                        Err("only K2/K3 fixture clicks are allowed".into())
+                    } else if !matches!(button.as_str(), "k1" | "k2" | "k3") {
+                        Err("only K1/K2/K3 fixture clicks are allowed".into())
                     } else {
                         self.device(Event::Frame(serde_json::json!({
                             "event": "button_click", "button": button
@@ -886,6 +984,8 @@ impl Actor {
                 } => {
                     let result = if self.production || !self.synthetic_input {
                         Err("synthetic isolated actor required".into())
+                    } else if !self.saved.settings.external_keyboard_enabled {
+                        Err("external input mode is disabled".into())
                     } else {
                         if let Some(pressed) = pressed {
                             self.device(Event::Frame(serde_json::json!({
@@ -893,7 +993,7 @@ impl Actor {
                                 "button": "k4"
                             })));
                         } else {
-                            if reset_asr {
+                            if reset_asr && self.capture_id.is_none() && self.pending_start.as_ref().is_none_or(|pending| pending.source == InputSource::Hardware) {
                                 self.cancel_asr();
                             }
                             self.key_hold.release();
@@ -903,6 +1003,7 @@ impl Actor {
                             self.state.device.capture_state = "stopped".into();
                             self.hardware_armed = true;
                             self.state.service.ready = true;
+                            self.state.external_keyboard = ExternalKeyboardState { state: "connected".into(), detail: None };
                         }
                         Ok(self.state.clone())
                     };
@@ -976,30 +1077,38 @@ impl Actor {
                         let _ = reply.send(());
                     }
                 }
-                Message::Connected(commands) => {
+                Message::Connected(epoch, commands) => {
+                    if !self.saved.settings.external_keyboard_enabled || !self.external.accepts(epoch) { continue; }
                     self.rearm_hardware();
                     self.display_sent = None;
                     self.commands = Some(commands);
                     self.policy_sent = false;
-                    self.state.service = ServiceState {
-                        running: true,
-                        ready: false,
-                        detail: None,
-                    };
+                    self.state.external_keyboard = ExternalKeyboardState { state: "connecting".into(), detail: None };
                     self.apply_policy();
                 }
-                Message::Disconnected(error) => {
-                    self.rearm_hardware();
-                    self.display_sent = None;
-                    self.commands = None;
-                    self.policy_sent = false;
-                    self.state.service.running = false;
-                    self.state.service.ready = false;
-                    self.state.device = DeviceStatus::default();
-                    self.abort(false);
-                    if !self.stop_flag.load(Ordering::Acquire) {
-                        self.state.document.error = Some(error);
+                Message::Disconnected(epoch, error) => self.external_failed(epoch, error),
+                Message::ExternalSettled(epoch, result) => {
+                    if self.external.epoch() != epoch { continue; }
+                    match result {
+                        Ok(false) if !self.saved.settings.external_keyboard_enabled => {
+                            self.state.external_keyboard = ExternalKeyboardState::default();
+                            self.state.device = DeviceStatus::default(); self.commands = None;
+                        }
+                        Ok(true) if self.saved.settings.external_keyboard_enabled => {
+                            self.state.external_keyboard.state = if self.state.device.connected { "connected" } else { "connecting" }.into();
+                        }
+                        Err(error) => {
+                            self.external.invalidate(epoch);
+                            self.hardware_lost(Some(error.clone()));
+                            self.commands = None;
+                            self.state.external_keyboard = ExternalKeyboardState { state: "error".into(), detail: Some(error) };
+                        }
+                        _ => {}
                     }
+                }
+                Message::LifecycleFailure(error) => {
+                    self.suspended = true; self.abort(false);
+                    self.state.service.detail = Some(error);
                 }
                 Message::Suspend(paused) => {
                     self.revoke_shortcut_hold();
@@ -1075,7 +1184,11 @@ impl Actor {
                         self.microphone_check_ready(true);
                     }
                 }
-                Message::Device(event) => self.device(event),
+                Message::Device(epoch, event) => {
+                    if self.saved.settings.external_keyboard_enabled && self.external.accepts(epoch) {
+                        self.device(event);
+                    }
+                }
                 Message::Action {
                     action,
                     document,
@@ -1453,7 +1566,7 @@ impl Actor {
     }
     fn apply_policy(&mut self) {
         if !self.policy_sent && self.commands.is_some() {
-            let control = if self.suspended || self.stop_flag.load(Ordering::Acquire) {
+            let control = if !self.saved.settings.external_keyboard_enabled || self.suspended || self.stop_flag.load(Ordering::Acquire) {
                 Control::Policy { voice_key: "none".into() }
             } else {
                 Control::Rearm { generation: self.activation_generation }
@@ -1463,7 +1576,7 @@ impl Actor {
                     self.policy_sent = true;
                     self.state.device.policy_state = "pending".into();
                 }
-                Err(error) => self.state.document.error = Some(error),
+                Err(error) => self.state.external_keyboard.detail = Some(error),
             }
         }
     }
@@ -1828,6 +1941,7 @@ impl Actor {
             ..Default::default() };
         self.microphone_check = Some(MicrophoneCheck { test_id, owner: owner.clone(), meter,
             started_at: Instant::now(), listening_at: None, timer: timer.clone(), outcome: "completed" });
+        self.operation_source = InputSource::Ui;
         self.capture_id = Some(owner.clone());
         self.capture_input = Some((owner.clone(), input.clone()));
         self.capture_starting = true;
@@ -1985,7 +2099,7 @@ impl Actor {
         }
         if source.hardware()
             && (!self.hardware_armed
-                || !self.saved.settings.enabled
+                || !self.saved.settings.external_keyboard_enabled
                 || !self.saved.settings.k4_enabled
                 || self.state.device.policy_state != "applied")
         {
@@ -2284,6 +2398,7 @@ impl Actor {
         }
     }
     fn device(&mut self, event: Event) {
+        if !self.saved.settings.external_keyboard_enabled { return; }
         match event {
             Event::Rearmed { generation } => {
                 // This shares the device FIFO with key frames. An old Status
@@ -2294,29 +2409,21 @@ impl Actor {
                 }
             }
             Event::Failure(error) => {
-                self.rearm_hardware();
-                self.abort(false);
-                self.state.document.error = Some(error);
-                self.apply_policy();
+                // A port can fail while the same live serial owner continues
+                // discovery. Keep that instance alive for reconnect; only a
+                // terminal bridge/start failure retires its instance epoch.
+                self.hardware_lost(Some(error));
+                self.state.external_keyboard.state = "connecting".into();
             }
             Event::Status(status) => {
                 if !self.state.device.display_available && status.display_available {
                     self.display_sent = None;
                 }
                 if !status.connected {
-                    self.revoke_editor_hardware();
-                    if self
-                        .pending_start
-                        .as_ref()
-                        .is_some_and(|pending| pending.source.hardware())
-                    {
-                        self.cancel_asr();
-                    }
-                    self.policy_sent = false;
-                    self.hardware_armed = false;
-                    self.state.service.ready = false;
-                    self.key_hold.release();
+                    self.hardware_lost(status.detail.clone());
                 }
+                self.state.external_keyboard.state = if status.connected { "connected" } else { "connecting" }.into();
+                self.state.external_keyboard.detail = status.detail.clone();
                 self.state.device = status;
                 self.apply_policy();
                 if self.close_pending {
@@ -2379,15 +2486,11 @@ impl Actor {
                     }
                 } else if event == "button_click" {
                     match logical {
-                        0 => {
-                            if let Err(error) = platform::toggle_main(&self.app) {
-                                self.state.document.error = Some(error.to_string());
-                            }
-                        }
-                        1 if self.saved.settings.enabled && self.saved.settings.k2_enabled => {
+                        0 => self.toggle_subtitle(),
+                        1 if self.saved.settings.k2_enabled => {
                             self.request_intent(Intent::Beautify, InputSource::Hardware);
                         }
-                        2 if self.saved.settings.enabled && self.saved.settings.k3_enabled => {
+                        2 if self.saved.settings.k3_enabled => {
                             self.cancel_current();
                         }
                         _ => {}
@@ -2568,7 +2671,7 @@ impl Actor {
                 let enabled = match source {
                     InputSource::Ui => true,
                     InputSource::Shortcut => self.saved.settings.enabled,
-                    InputSource::Hardware => self.hardware_armed && self.saved.settings.enabled && self.saved.settings.k2_enabled,
+                    InputSource::Hardware => self.hardware_armed && self.saved.settings.external_keyboard_enabled && self.saved.settings.k2_enabled,
                 };
                 if enabled {
                     self.request_intent(intent, source);
@@ -2795,9 +2898,11 @@ impl Actor {
         shortcuts::validate(&settings)?;
         let old = self.saved.settings.clone();
         let shortcut_changed = old.enabled != settings.enabled || old.shortcuts != settings.shortcuts;
+        let external_changed = old.external_keyboard_enabled != settings.external_keyboard_enabled;
+        let retry_external = old == settings && settings.external_keyboard_enabled && self.state.external_keyboard.state == "error";
         let register_shortcuts = shortcut_changed || old == settings;
         let shortcut_checkpoint = self.shortcuts.as_ref().map(shortcuts::Controller::checkpoint);
-        if settings.enabled && let Some(error) = &self.startup_error {
+        if (settings.enabled || settings.external_keyboard_enabled) && let Some(error) = &self.startup_error {
             // Pre-GUI retirement cannot run inside this live Actor: it would
             // ask this same Actor to stop via the application's endpoint.
             return Err(format!("旧语音资源清理尚未完成：{error}。请关闭旧版程序后重新启动 NomiFun。"));
@@ -2838,32 +2943,31 @@ impl Actor {
             || old.language != settings.language
             || old.dictionary != settings.dictionary;
         if audio_changed { self.revoke_shortcut_hold(); }
-        let hardware_changed = old.enabled != settings.enabled
+        let hardware_changed = external_changed
             || old.k4_enabled != settings.k4_enabled
             || audio_changed;
         if audio_changed && self.microphone_check.is_some() {
             self.stop_microphone_check("cancelled", None);
         }
-        let disabling = (!settings.enabled && old.enabled)
-            || (!settings.k4_enabled && old.k4_enabled && self.operation_source == InputSource::Hardware);
-        if !settings.enabled && self.pending_origin.is_some_and(|source| source != InputSource::Ui)
+        let disabling_hardware = (old.external_keyboard_enabled && !settings.external_keyboard_enabled)
+            || (old.k4_enabled && !settings.k4_enabled);
+        if disabling_hardware { self.hardware_lost(None); }
+        if !settings.enabled && self.pending_origin == Some(InputSource::Shortcut)
         {
             self.state.document.pending_action = None;
             self.pending_origin = None;
         }
-        if (audio_changed || disabling)
-            && matches!(
-                self.state.document.phase,
-                Phase::Recording | Phase::Finalizing
-            )
-            || (!settings.enabled && self.operation_source != InputSource::Ui)
-        {
+        let shortcut_disabled = old.enabled && !settings.enabled
+            && self.operation_source == InputSource::Shortcut
+            && (self.capture_id.is_some() || self.state.document.phase != Phase::Idle);
+        if (audio_changed && (self.capture_id.is_some() || matches!(self.state.document.phase, Phase::Recording | Phase::Finalizing))) || shortcut_disabled {
             self.abort(false);
-        } else if audio_changed || disabling {
+        } else if audio_changed {
             self.cancel_asr();
         }
         self.saved.settings = settings.clone();
         self.state.settings = settings;
+        if external_changed || retry_external { self.request_external(self.saved.settings.external_keyboard_enabled); }
         if audio_changed && self.state.document.phase == Phase::Idle {
             self.state.document.error = None;
             self.state.document.notice = None;
@@ -2974,7 +3078,7 @@ impl Actor {
         if self.capture_id.is_some() || self.state.audio_state.state == "error" {
             return;
         }
-        if self.state.device.connected
+        if self.operation_source == InputSource::Hardware && self.state.device.connected
             && (self.state.device.policy_state != "applied"
                 || self.state.device.capture_state != "stopped")
         {
@@ -3128,6 +3232,7 @@ pub(crate) fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
 pub(crate) fn begin_shutdown(app: &tauri::AppHandle) {
     if let Some(runtime) = app.try_state::<KeyboardRuntime>() {
         runtime.stop_flag.store(true, Ordering::Release);
+        runtime.external.fence();
     }
 }
 pub(crate) async fn shutdown_main(app: &tauri::AppHandle) -> Result<(), String> {

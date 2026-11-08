@@ -147,7 +147,11 @@ impl Transport {
     }
     #[cfg(feature = "transport-validation")]
     pub fn validation_lock_held(dir: &std::path::Path) -> Result<bool> {
-        let lock = OpenOptions::new().read(true).write(true).open(dir.join("owner.lock"))?;
+        let lock = match OpenOptions::new().read(true).write(true).open(dir.join("owner.lock")) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
         match lock.try_lock_exclusive() {
             Ok(()) => Ok(false),
             Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(true),

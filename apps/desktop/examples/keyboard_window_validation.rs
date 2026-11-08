@@ -28,7 +28,6 @@ fn main() {
         .setup(move |app| {
             let subtitle_ready=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             for (label, title, width, height, visible) in [
-                ("main", "NomiFun keyboard witness - main", 880.0, 600.0, false),
                 ("keyboard-subtitle", "NomiFun keyboard witness - subtitle", 480.0, 320.0, false),
             ] {
                 let ready=subtitle_ready.clone();
@@ -157,7 +156,6 @@ fn active_role() -> anyhow::Result<&'static str> {
     Ok(
         match x11_command(&["getactivewindow", "getwindowname"])?.as_str() {
             "NomiFun keyboard validation - external control" => "control",
-            "NomiFun keyboard witness - main" => "main",
             "NomiFun keyboard witness - subtitle" => "subtitle",
             _ => "other", // Never log the title of an unrelated user application.
         },
@@ -209,9 +207,6 @@ async fn validate(
     use anyhow::{Context, ensure};
     use std::time::Duration;
     use tauri::Manager;
-    let main = app
-        .get_webview_window("main")
-        .context("main window missing")?;
     let subtitle = app
         .get_webview_window("keyboard-subtitle")
         .context("subtitle window missing")?;
@@ -371,25 +366,6 @@ async fn validate(
         "expired automatic show ran late and remapped the window"
     );
 
-    platform::toggle_main(app)?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(4);
-    while !main.is_focused()? {
-        ensure!(
-            std::time::Instant::now() < deadline,
-            "K1 request did not activate the main window in this compositor"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    ensure!(
-        active_role()? == "main",
-        "X11 active window did not become the main window"
-    );
-    platform::toggle_main(app)?;
-    ensure!(
-        !main.is_visible()?,
-        "K1 did not hide the foreground main window"
-    );
-
     let clipboard = if std::env::var("NOMIFUN_KEYBOARD_VALIDATION_ALLOW_CLIPBOARD").as_deref()
         == Ok("1")
     {
@@ -444,7 +420,7 @@ async fn validate(
     Ok(serde_json::json!({
         "ok": true, "environment": environment(), "automaticShowMapped": true,
         "pointerActivatedSubtitle": true, "pointerSelectedText": true,"nativeWindowDragMoved":true,
-        "expiredShowDidNotRemap": true, "k1ActivatedMain": true, "k1HidMain": true,
+        "expiredShowDidNotRemap": true,
         "clipboard": clipboard, "clipboardPath": "WebKit/GDK system clipboard; X11 or compositor selection bridge",
     }))
 }

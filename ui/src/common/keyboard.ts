@@ -15,11 +15,12 @@ export type KeyboardAsrMode = 'streaming' | 'platform';
 export interface VoiceKeyboardShortcuts { toggle: string; beautify: string; cancel: string; dictate: string }
 export const defaultVoiceKeyboardShortcuts: VoiceKeyboardShortcuts = {
   toggle: 'CommandOrControl+Shift+K', beautify: 'CommandOrControl+Shift+B',
-  cancel: 'CommandOrControl+Shift+Escape', dictate: 'CommandOrControl+Shift+Space',
+  cancel: 'CommandOrControl+Shift+X', dictate: 'CommandOrControl+Shift+Space',
 };
 
 export interface KeyboardSettings {
   enabled: boolean;
+  externalKeyboardEnabled: boolean;
   shortcuts: VoiceKeyboardShortcuts;
   k2Enabled: boolean;
   k3Enabled: boolean;
@@ -46,6 +47,11 @@ export interface KeyboardMicrophoneTest {
   rms: number;
   elapsedMs: number;
   stopped: boolean;
+  detail: string | null;
+}
+
+export interface ExternalKeyboardState {
+  state: 'disabled' | 'starting' | 'connecting' | 'connected' | 'stopping' | 'error';
   detail: string | null;
 }
 
@@ -83,6 +89,7 @@ export interface KeyboardState {
   /** In-process keyboard transport owned by the NomiFun desktop application. */
   service: { running: boolean; ready: boolean; detail: string | null };
   shortcutState?: { registered: number; detail: string | null };
+  externalKeyboard: ExternalKeyboardState;
 }
 
 export type KeyboardAction = 'stop' | 'cancel' | 'beautify' | 'restore_original' | 'close'

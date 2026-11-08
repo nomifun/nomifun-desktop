@@ -2320,7 +2320,26 @@
     "shortcutHint_cancel": "Cancel the current voice input or beautification, keeping finalized text.",
     "shortcutEmpty": "No shortcut",
     "applyShortcuts": "Apply shortcuts",
-    "shortcutFormat": "Enter combinations such as CommandOrControl+Shift+Space. CommandOrControl means Ctrl on Windows/Linux and Command on macOS. Leave a field empty to disable it. Changes take effect after Apply; conflicts are reported without replacing working shortcuts."
+    "shortcutFormat": "Enter combinations such as CommandOrControl+Shift+Space. CommandOrControl means Ctrl on Windows/Linux and Command on macOS. Leave a field empty to disable it. Changes take effect after Apply; conflicts are reported without replacing working shortcuts.",
+    "externalTitle": "External keyboard connection (optional)",
+    "externalHint": "An optional input method for the same voice features. System shortcuts, microphone checks and transcription work independently.",
+    "externalEnabled": "Connect an external keyboard",
+    "externalEnabledHint": "Off by default. Enable only when you want to use a four-key device. Turning it off waits for the device connection to close.",
+    "externalStatus": "Device connection",
+    "external_disabled": "Connection mode off",
+    "external_starting": "Starting device connection",
+    "external_connecting": "Waiting for an external keyboard",
+    "external_connected": "Connected",
+    "external_stopping": "Closing connection; waiting for device release…",
+    "external_error": "Device connection needs attention",
+    "externalDevice": "Device",
+    "externalFirmware": "Firmware",
+    "externalK1": "K1 · Show or hide subtitles",
+    "externalK1Hint": "Uses the same subtitle window and text as your subtitle shortcut.",
+    "k2Enabled": "K2 · Beautify full text",
+    "k3Enabled": "K3 · Cancel current action",
+    "k4Enabled": "K4 · Hold to speak",
+    "externalDictationDisabled": "K4 dictation is off. Enable K4 to record with the device; your system dictation shortcut remains independent."
   },
 
   "enhancedTools": {

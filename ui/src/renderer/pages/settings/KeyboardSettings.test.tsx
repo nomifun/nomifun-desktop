@@ -33,7 +33,7 @@ beforeEach(() => {
     spyOn(ipcBridge.systemPermissions.openSettings, 'invoke').mockImplementation(async ({ kind }) => { openedPermissions.push(kind); }),
   ];
   current = {
-    settings: { enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
+    settings: { enabled: true, externalKeyboardEnabled: false, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
       asrModel: { providerId: 'provider-1', model: 'streaming-model' }, textModel: null,
       language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false, subtitleFontSize: 14 },
     sequence: 0, cancelGeneration: 0, documentId: 'doc-1', revision: 2, operationId: null, editSessionId: null, dictationSelection: null, phase: 'idle', text: 'Ready text', originalText: 'Ready text',
@@ -42,7 +42,7 @@ beforeEach(() => {
     capturePreparing: false, microphoneTest: { ...idleMicrophone },
     device: { connected: false, id: null, port: null, firmware: null,
       policyState: 'applied', captureState: 'stopped', detail: null },
-    service: { running: false, ready: false, detail: null },
+    service: { running: false, ready: false, detail: null }, externalKeyboard: { state: 'disabled', detail: null },
   };
   actions = []; updates = []; listener = undefined;
   keyboard.available = () => true;
@@ -64,6 +64,76 @@ await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { tr
 const show = () => render(<SWRConfig value={{ provider: () => new Map() }}><I18nextProvider i18n={i18n}><MemoryRouter><KeyboardSettings /></MemoryRouter></I18nextProvider></SWRConfig>);
 
 describe('system microphone keyboard settings', () => {
+  test('external keyboard connection is explicitly off by default and performs no mount write', async () => {
+    show();
+    const external = within(await screen.findByRole('region', { name: 'External keyboard connection (optional)' }));
+    expect(external.getByRole('switch', { name: 'Connect an external keyboard' }).getAttribute('aria-checked')).toBe('false');
+    expect(external.getByText('Connection mode off')).toBeTruthy();
+    expect(external.queryByRole('switch', { name: 'K4 · Hold to speak' })).toBeNull();
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+  });
+
+  test('external opt-in preserves old per-key preferences while system shortcuts are disabled', async () => {
+    current.settings.enabled = false; current.settings.k2Enabled = false; current.settings.k4Enabled = false;
+    show();
+    fireEvent.click(await screen.findByRole('switch', { name: 'Connect an external keyboard' }));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]).toMatchObject({ enabled: false, externalKeyboardEnabled: true, k2Enabled: false, k3Enabled: true, k4Enabled: false });
+    emit({ externalKeyboard: { state: 'connecting', detail: null } });
+    const external = within(screen.getByRole('region', { name: 'External keyboard connection (optional)' }));
+    expect(external.getByText('Waiting for an external keyboard')).toBeTruthy();
+    expect(external.getByRole('switch', { name: 'K4 · Hold to speak' }).getAttribute('aria-checked')).toBe('false');
+    expect(external.getByText('K4 dictation is off. Enable K4 to record with the device; your system dictation shortcut remains independent.')).toBeTruthy();
+    expect(external.getByRole('switch', { name: 'K2 · Beautify full text' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  test('turning external mode off reports stopping until native device release is confirmed', async () => {
+    current.settings.externalKeyboardEnabled = true;
+    current.externalKeyboard = { state: 'connected', detail: null };
+    current.device = { ...current.device, connected: true, id: 'fixture-keyboard', port: 'COM19', firmware: 'fixture-v1' };
+    const pending = deferred<KeyboardState>();
+    keyboard.updateSettings = async settings => { updates.push(settings); return pending.promise; };
+    show();
+    fireEvent.click(await screen.findByRole('switch', { name: 'Connect an external keyboard' }));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    emit({ externalKeyboard: { state: 'stopping', detail: 'Waiting for owned device cleanup' } });
+    const external = within(screen.getByRole('region', { name: 'External keyboard connection (optional)' }));
+    expect(external.getByText('Closing connection; waiting for device release…')).toBeTruthy();
+    expect(external.queryByText('Connection mode off')).toBeNull();
+    expect(external.getByRole('switch', { name: 'Connect an external keyboard' }).hasAttribute('disabled')).toBe(true);
+    await act(async () => {
+      current = { ...current, sequence: current.sequence + 1, settings: updates[0], externalKeyboard: { state: 'disabled', detail: null }, device: { ...current.device, connected: false } };
+      listener?.(current); pending.resolve(current);
+    });
+    await external.findByText('Connection mode off');
+    expect(external.queryByRole('switch', { name: 'K4 · Hold to speak' })).toBeNull();
+    expect(current.settings.enabled).toBe(true);
+    expect(current.settings.shortcuts).toEqual(defaultVoiceKeyboardShortcuts);
+  });
+
+  test('an external connection error stays in its optional panel and does not block software transcription', async () => {
+    current.settings.externalKeyboardEnabled = true;
+    current.externalKeyboard = { state: 'error', detail: 'The optional device could not open its port' };
+    show();
+    const external = within(await screen.findByRole('region', { name: 'External keyboard connection (optional)' }));
+    expect(external.getByText('The optional device could not open its port')).toBeTruthy();
+    const start = screen.getByRole('button', { name: 'Test cloud transcription' });
+    await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(actions).toEqual([{ action: 'test_start' }]));
+  });
+
+  test('external K4 preference changes leave system shortcut configuration and microphone selection intact', async () => {
+    current.settings.externalKeyboardEnabled = true;
+    current.externalKeyboard = { state: 'connecting', detail: null };
+    show();
+    fireEvent.click(await screen.findByRole('switch', { name: 'K4 · Hold to speak' }));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]).toMatchObject({ enabled: true, externalKeyboardEnabled: true, k4Enabled: false, audioDeviceId: null });
+    expect(updates[0].shortcuts).toEqual(defaultVoiceKeyboardShortcuts);
+    expect(screen.getByText('K1 · Show or hide subtitles')).toBeTruthy();
+  });
+
   test('voice input is available without external device controls or startup dependencies', async () => {
     show();
     await screen.findByRole('heading', { name: 'Voice keyboard' });

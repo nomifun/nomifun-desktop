@@ -12,6 +12,8 @@ pub struct ModelSelection {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub enabled: bool,
+    #[serde(default)]
+    pub external_keyboard_enabled: bool,
     pub k2_enabled: bool,
     pub k3_enabled: bool,
     pub k4_enabled: bool,
@@ -46,7 +48,7 @@ impl Default for VoiceShortcuts {
         Self {
             toggle: "CommandOrControl+Shift+K".into(),
             beautify: "CommandOrControl+Shift+B".into(),
-            cancel: "CommandOrControl+Shift+Escape".into(),
+            cancel: "CommandOrControl+Shift+X".into(),
             dictate: "CommandOrControl+Shift+Space".into(),
         }
     }
@@ -63,7 +65,7 @@ pub enum AsrMode {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { enabled:true,k2_enabled:true,k3_enabled:true,k4_enabled:true,
+        Self { enabled:true,external_keyboard_enabled:false,k2_enabled:true,k3_enabled:true,k4_enabled:true,
         asr_model:None,asr_mode:AsrMode::Streaming,text_model:None,language:"zh".into(),audio_device_id:None,dictionary:vec![],
         beautify_instruction:"整理标点、语法、口头重复和段落，保留原意、事实、人名、数字、日期、代码和专有词。只输出整理后的完整正文。".into(),
         always_on_top:true,subtitle_font_size:default_subtitle_font_size(),shortcuts:VoiceShortcuts::default() }
@@ -1103,6 +1105,22 @@ mod tests {
         let partial: VoiceShortcuts = serde_json::from_value(serde_json::json!({"dictate":""})).unwrap();
         assert!(partial.dictate.is_empty());
         assert_eq!(partial.toggle, VoiceShortcuts::default().toggle);
+    }
+    #[test]
+    fn existing_settings_never_implicitly_opt_into_external_keyboard() {
+        let mut settings = Settings::default();
+        settings.enabled = true;
+        settings.asr_model = Some(ModelSelection { provider_id: "existing-provider".into(), model: "existing-asr".into() });
+        let mut value = serde_json::to_value(&settings).unwrap();
+        value.as_object_mut().unwrap().remove("externalKeyboardEnabled");
+        let loaded: Settings = serde_json::from_value(value).unwrap();
+        assert!(!loaded.external_keyboard_enabled);
+        assert!(loaded.enabled);
+        assert_eq!(loaded.asr_model, settings.asr_model);
+        let mut independent = loaded;
+        independent.enabled = false;
+        independent.external_keyboard_enabled = true;
+        independent.validate().unwrap();
     }
 
     #[test]
