@@ -660,6 +660,12 @@ pub(crate) async fn validation_hold_capture_stop(
 pub(crate) fn validation_update_paused(app: &tauri::AppHandle) -> bool {
     app.state::<KeyboardRuntime>().update_admission.paused()
 }
+/// Read the native producer's stop proof without changing maintenance fences.
+/// Actor/UI projection delivery may follow this proof and is observed separately.
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) fn validation_capture_stopped(app: &tauri::AppHandle) -> bool {
+    app.state::<KeyboardRuntime>().capture_safety.stopped()
+}
 /// Reads the last command actually consumed by the isolated serial worker.
 #[cfg(feature = "native-keyboard-validation")]
 pub(crate) fn validation_transport_control(app: &tauri::AppHandle) -> Result<Option<Control>, String> {
@@ -667,6 +673,17 @@ pub(crate) fn validation_transport_control(app: &tauri::AppHandle) -> Result<Opt
     let owner = runtime.transport.lock().map_err(|_| "transport owner poisoned")?;
     Ok(owner.as_ref().and_then(|owner| owner.transport.validation_last_control()))
 }
+/// Read the test-owned main window through the same native foreground adapter.
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) fn validation_main_window(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let window = app.get_webview_window("main").ok_or("owned main window missing")?;
+    Ok(serde_json::json!({
+        "visible": window.is_visible().map_err(|error| error.to_string())?,
+        "minimized": window.is_minimized().map_err(|error| error.to_string())?,
+        "foreground": platform::main_is_foreground(&window).map_err(|error| error.to_string())?,
+    }))
+}
+
 /// Observes the real fixture's joinable owner and OS lock without USB access.
 #[cfg(feature = "native-keyboard-validation")]
 pub(crate) fn validation_transport_owner(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
@@ -2490,7 +2507,13 @@ impl Actor {
                     }
                 } else if event == "button_click" {
                     match logical {
-                        0 => self.toggle_subtitle(),
+                        0 => {
+                            // K1 controls the workbench only. Subtitle state,
+                            // text and the active voice operation stay intact.
+                            if let Err(error) = platform::toggle_main(&self.app) {
+                                self.state.external_keyboard.detail = Some(format!("无法切换 NomiFun 主窗口：{error}"));
+                            }
+                        }
                         1 if self.saved.settings.k2_enabled => {
                             self.request_intent(Intent::Beautify, InputSource::Hardware);
                         }

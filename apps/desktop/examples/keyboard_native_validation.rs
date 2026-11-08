@@ -845,7 +845,10 @@ async fn local_microphone_checks(app: &tauri::AppHandle, settings: &Settings, fi
 
     keyboard::validation_microphone_test(app, "microphone_test_start", "local-update", None).await.map_err(anyhow::Error::msg)?;
     let pause = keyboard::prepare_update(app).await.map_err(anyhow::Error::msg)?.context("local test did not stop for update")?;
-    ensure!(keyboard::validation_snapshot(app)["microphoneTest"]["stopped"] == true, "update accepted before local stop proof");
+    ensure!(keyboard::validation_capture_stopped(app), "update accepted before local native stop proof");
+    // The producer confirms ownership release before it delivers CaptureStopped
+    // to the Actor. Wait separately for that UI projection before the next test.
+    wait_state(app, |state| state["microphoneTest"]["stopped"] == true).await?;
     pause.cancel().await.map_err(anyhow::Error::msg)?;
 
     unconfigured.enabled = true;
@@ -1012,6 +1015,47 @@ async fn software_shortcut_checks(app: &tauri::AppHandle, settings: &Settings, f
         "release_does_not_stop_ui_recording":true,"released_editor_and_asr_preparation_do_not_resume":true,
         "cancel_suspend_update_remap_disable_require_fresh_release":true}))
 }
+fn ensure_k1_preserved_voice(before: &Value, after: &Value) -> Result<()> {
+    for field in ["visible", "documentId", "text", "originalText", "revision", "phase", "operationId", "cancelGeneration", "editSessionId", "error", "notice"] {
+        ensure!(after[field] == before[field], "K1 main-window toggle changed voice field {field}");
+    }
+    ensure!(after["audioState"]["state"] == before["audioState"]["state"], "K1 changed the active microphone state");
+    Ok(())
+}
+async fn wait_main_window(app: &tauri::AppHandle, visible: bool) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        let state = keyboard::validation_main_window(app).map_err(anyhow::Error::msg)?;
+        if state["visible"] == visible && (!visible || (state["foreground"] == true && state["minimized"] == false)) { return Ok(()); }
+        ensure!(tokio::time::Instant::now() < deadline, "owned main window did not reach visible={visible}, foreground state: {state}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+async fn focus_fixture_main(app: &tauri::AppHandle) -> Result<()> {
+    let window = app.get_webview_window("main").context("dedicated main-window witness missing")?;
+    window.unminimize()?; window.show()?; window.set_focus()?;
+    wait_main_window(app, true).await
+}
+async fn k1_main_window_roundtrip(app: &tauri::AppHandle) -> Result<()> {
+    focus_fixture_main(app).await?;
+    let subtitle = app.get_webview_window("keyboard-subtitle").context("subtitle witness missing")?;
+    let visible = subtitle.is_visible()?;
+    let position = subtitle.outer_position()?;
+    let size = subtitle.outer_size()?;
+    let voice = keyboard::validation_snapshot(app);
+    click(app, "k1").await?;
+    wait_main_window(app, false).await?;
+    ensure_k1_preserved_voice(&voice, &keyboard::validation_snapshot(app))?;
+    ensure!(subtitle.is_visible()? == visible && subtitle.outer_position()? == position && subtitle.outer_size()? == size,
+        "K1 hiding the main window changed subtitle visibility/geometry");
+    click(app, "k1").await?;
+    wait_main_window(app, true).await?;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    ensure_k1_preserved_voice(&voice, &keyboard::validation_snapshot(app))?;
+    ensure!(subtitle.is_visible()? == visible && subtitle.outer_position()? == position && subtitle.outer_size()? == size,
+        "K1 showing the main window changed subtitle visibility/geometry");
+    Ok(())
+}
 async fn external_keyboard_checks(app: &tauri::AppHandle, settings: &Settings, fixture: &Fixture) -> Result<Value> {
     use nomifun_keyboard::service::{DeviceStatus, Event};
     let mut configured = settings.clone();
@@ -1025,14 +1069,25 @@ async fn external_keyboard_checks(app: &tauri::AppHandle, settings: &Settings, f
     ensure!(owner["lockHeld"] == true && owner["worker"].is_string(), "explicit opt-in did not acquire its own native transport");
     let epoch = owner["epoch"].as_u64().context("adapter epoch missing")?;
     action(app, "open").await?; edit(app, "外设共享草稿", None).await?;
-    let original = keyboard::validation_snapshot(app);
-    click(app, "k1").await?;
-    ensure!(keyboard::validation_snapshot(app)["visible"] == false, "K1 did not reuse subtitle hide");
-    click(app, "k1").await?;
-    let shown = keyboard::validation_snapshot(app);
-    for field in ["documentId", "text", "originalText", "revision"] { ensure!(shown[field] == original[field], "K1 discarded {field}"); }
+    k1_main_window_roundtrip(app).await?;
+    // A minimized main window must be restored and activated by K1 as well.
+    let voice = keyboard::validation_snapshot(app);
+    let subtitle = app.get_webview_window("keyboard-subtitle").context("subtitle witness missing")?;
+    let subtitle_visible = subtitle.is_visible()?;
+    let subtitle_position = subtitle.outer_position()?;
+    let subtitle_size = subtitle.outer_size()?;
+    let main = app.get_webview_window("main").context("main witness missing")?;
+    main.minimize()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while !main.is_minimized()? { ensure!(tokio::time::Instant::now() < deadline, "owned main did not minimize"); tokio::time::sleep(Duration::from_millis(20)).await; }
+    click(app, "k1").await?; wait_main_window(app, true).await?;
+    ensure_k1_preserved_voice(&voice, &keyboard::validation_snapshot(app))?;
+    ensure!(subtitle.is_visible()? == subtitle_visible && subtitle.outer_position()? == subtitle_position && subtitle.outer_size()? == subtitle_size,
+        "K1 restoring a minimized main window changed native subtitle visibility/geometry");
     close(app).await?;
     start(app, fixture, "外设语音").await?;
+    k1_main_window_roundtrip(app).await?;
+    ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "capturing", "K1 stopped K4's shared capture");
     hardware(app, Some(false)).await?; settled(app, "外设语音").await?;
     click(app, "k2").await?; settled(app, "美化：外设语音").await?;
     start(app, fixture, "外设取消的片段不得写入").await?;
@@ -1123,7 +1178,9 @@ async fn external_keyboard_checks(app: &tauri::AppHandle, settings: &Settings, f
     keyboard::validation_request(app, None, Some(settings.clone())).await.map_err(anyhow::Error::msg)?;
     keyboard::validation_external_connection(app, false).await.map_err(anyhow::Error::msg)?;
     Ok(json!({"default_off_has_no_owner":true,"opt_in_acquires_single_owned_transport":true,
-        "hardware_independent_of_shortcut_master":true,"k1_reuses_preserving_subtitle_toggle":true,"k2_reuses_beautification":true,"k3_reuses_cancellation":true,
+        "hardware_independent_of_shortcut_master":true,"k1_toggles_main_window":true,
+        "k1_preserves_subtitle_and_document":true,"k1_preserves_active_capture":true,"k4_reuses_shared_dictation":true,
+        "k2_reuses_beautification":true,"k3_reuses_cancellation":true,
         "unplug_stops_only_hardware_capture":true,"recoverable_failure_preserves_discovery_owner":true,
         "ui_local_capture_after_hardware_isolated":true,"software_capture_survives_usb_failure_and_disable":true,
         "terminal_epoch_cannot_be_revived_by_queued_start":true,"disable_waits_for_owner_join":true,
@@ -1177,9 +1234,18 @@ fn main() -> Result<()> {
     let completed = result.clone();
     let root_path = root.path().to_path_buf();
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol("voice-main-witness", |_, _| {
+            tauri::http::Response::builder().header("Content-Type", "text/html; charset=utf-8")
+                .body(b"<!doctype html><title>Owned main-window witness</title><p>NomiFun synthetic voice fixture</p>".to_vec()).unwrap()
+        })
         .invoke_handler(tauri::generate_handler![keyboard::keyboard_get_state, keyboard::keyboard_action])
         .setup(move |app| {
             *fixture.app.lock().unwrap() = Some(app.handle().clone());
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External("voice-main-witness://localhost/".parse()?))
+                .title("NomiFun voice fixture — dedicated main window")
+                .inner_size(880.0, 600.0).min_inner_size(880.0, 600.0)
+                .data_directory(root_path.join("owned-main-webview"))
+                .visible(true).focused(true).build()?;
             keyboard::validation_start(app.handle().clone(), service.clone(), root_path)?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1205,6 +1271,19 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn k1_witness_rejects_subtitle_document_or_recording_mutation() {
+        let before = json!({"visible":true,"documentId":"owned-doc","text":"keep","originalText":"keep",
+            "revision":3,"phase":"recording","operationId":"owned-capture","cancelGeneration":4,
+            "editSessionId":null,"error":null,"notice":null,"audioState":{"state":"capturing"}});
+        ensure_k1_preserved_voice(&before, &before).unwrap();
+        for field in ["visible", "documentId", "text", "originalText", "revision", "phase", "operationId", "cancelGeneration", "editSessionId", "error", "notice"] {
+            let mut changed = before.clone(); changed[field] = json!("unexpected mutation");
+            assert!(ensure_k1_preserved_voice(&before, &changed).is_err(), "producer must verify {field}");
+        }
+        let mut stopped = before.clone(); stopped["audioState"]["state"] = json!("stopped");
+        assert!(ensure_k1_preserved_voice(&before, &stopped).is_err());
+    }
     #[test]
     fn an_explicit_synthetic_mode_and_new_absolute_report_are_required() {
         for args in [vec![], vec!["--synthetic-audio"], vec!["--expect-no-input", "out.json"],

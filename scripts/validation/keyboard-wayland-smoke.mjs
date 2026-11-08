@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifyWindowInputRoles } from './keyboard-input-roles.mjs';
 
 const pause = (milliseconds) => new Promise((done) => setTimeout(done, milliseconds));
 const x11Displays = () => new Set([
@@ -112,6 +113,8 @@ if (!inner) {
     await wait(witness, 40000);
     if (!existsSync(reportPath)) throw new Error(`Native witness did not report: ${witness.error}`);
     report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    if (report.ok !== true) throw new Error(report.error ?? 'Native compositor window witness failed before reporting input roles');
+    verifyWindowInputRoles(report);
     const restored = spawnSync('timeout', ['4s', 'xclip', '-selection', 'clipboard', '-out'], { env: environment, timeout: 5000 });
     report.clipboardRestoredAfterWitnessExit = restored.status === 0 && restored.stdout.equals(sentinel);
     report.ok = report.ok === true && report.clipboardRestoredAfterWitnessExit && report.clipboard === 'passed_webkit_default_ctrl_c_selection_after_hide';

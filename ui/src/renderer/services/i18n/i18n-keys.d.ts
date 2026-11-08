@@ -6760,6 +6760,7 @@ export type I18nKey =
   | 'settings.keyboard.externalHint'
   | 'settings.keyboard.externalK1'
   | 'settings.keyboard.externalK1Hint'
+  | 'settings.keyboard.externalK4Hint'
   | 'settings.keyboard.externalStatus'
   | 'settings.keyboard.externalTitle'
   | 'settings.keyboard.external_connected'

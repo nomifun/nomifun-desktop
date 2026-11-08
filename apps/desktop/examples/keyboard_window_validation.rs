@@ -2,6 +2,8 @@
 //! Run with isolated HOME/XDG/NOMIFUN_DATA_DIR and GDK_BACKEND=x11. It opens
 //! real GTK/WebKit windows and a separate X11 control application, without
 //! starting a NomiFun backend or model session.
+//! K1 checks the main window only; low-level subtitle mapping is separate from
+//! K4/software input dispatch, which belongs to the production Actor witness.
 #[cfg(target_os = "linux")]
 #[path = "../src/keyboard/platform.rs"]
 mod platform;
@@ -28,6 +30,7 @@ fn main() {
         .setup(move |app| {
             let subtitle_ready=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             for (label, title, width, height, visible) in [
+                ("main", "NomiFun keyboard witness - main", 880.0, 600.0, false),
                 ("keyboard-subtitle", "NomiFun keyboard witness - subtitle", 480.0, 320.0, false),
             ] {
                 let ready=subtitle_ready.clone();
@@ -156,6 +159,7 @@ fn active_role() -> anyhow::Result<&'static str> {
     Ok(
         match x11_command(&["getactivewindow", "getwindowname"])?.as_str() {
             "NomiFun keyboard validation - external control" => "control",
+            "NomiFun keyboard witness - main" => "main",
             "NomiFun keyboard witness - subtitle" => "subtitle",
             _ => "other", // Never log the title of an unrelated user application.
         },
@@ -200,6 +204,14 @@ fn restore_clipboard(text: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+async fn subtitle_text(window: &tauri::WebviewWindow) -> anyhow::Result<String> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    window.eval_with_callback("document.body.textContent", move |value| { let _ = send.send(value); })?;
+    let value = tokio::task::spawn_blocking(move || receive.recv_timeout(std::time::Duration::from_secs(3))).await??;
+    Ok(serde_json::from_str(&value)?)
+}
+
+#[cfg(target_os = "linux")]
 async fn validate(
     app: &tauri::AppHandle,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -207,6 +219,7 @@ async fn validate(
     use anyhow::{Context, ensure};
     use std::time::Duration;
     use tauri::Manager;
+    let main = app.get_webview_window("main").context("main window missing")?;
     let subtitle = app
         .get_webview_window("keyboard-subtitle")
         .context("subtitle window missing")?;
@@ -366,6 +379,25 @@ async fn validate(
         "expired automatic show ran late and remapped the window"
     );
 
+    // Restore physical K1's original workbench role. It must not substitute
+    // for either the software subtitle toggle or K4's recording/subtitle path.
+    let subtitle_visible = subtitle.is_visible()?;
+    let subtitle_position = subtitle.outer_position()?;
+    let subtitle_body = subtitle_text(&subtitle).await?;
+    platform::toggle_main(app)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while !main.is_focused()? {
+        ensure!(std::time::Instant::now() < deadline, "K1 request did not activate the main window in this compositor");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ensure!(main.is_visible()? && active_role()? == "main", "X11 active window did not become the main window");
+    ensure!(subtitle.is_visible()? == subtitle_visible && subtitle.outer_position()? == subtitle_position
+        && subtitle_text(&subtitle).await? == subtitle_body, "K1 main activation changed the subtitle");
+    platform::toggle_main(app)?;
+    ensure!(!main.is_visible()?, "K1 did not hide the foreground main window");
+    ensure!(subtitle.is_visible()? == subtitle_visible && subtitle.outer_position()? == subtitle_position
+        && subtitle_text(&subtitle).await? == subtitle_body, "K1 main hide changed the subtitle");
+
     let clipboard = if std::env::var("NOMIFUN_KEYBOARD_VALIDATION_ALLOW_CLIPBOARD").as_deref()
         == Ok("1")
     {
@@ -420,7 +452,7 @@ async fn validate(
     Ok(serde_json::json!({
         "ok": true, "environment": environment(), "automaticShowMapped": true,
         "pointerActivatedSubtitle": true, "pointerSelectedText": true,"nativeWindowDragMoved":true,
-        "expiredShowDidNotRemap": true,
+        "expiredShowDidNotRemap": true, "k1ActivatedMain": true, "k1HidMain": true, "k1PreservedSubtitle": true,
         "clipboard": clipboard, "clipboardPath": "WebKit/GDK system clipboard; X11 or compositor selection bridge",
     }))
 }

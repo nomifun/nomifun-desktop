@@ -91,6 +91,7 @@ function ExternalKeyboardPanel({ state, draft, onChange }: {
       {state.device.detail && state.device.detail !== detail && <p className='cv-note'>{state.device.detail}</p>}
       <VisualRow label={t('settings.keyboard.externalK1')} description={t('settings.keyboard.externalK1Hint')} />
       {(['k2Enabled', 'k3Enabled', 'k4Enabled'] as const).map(key => <VisualRow key={key} label={t(`settings.keyboard.${key}`)}
+        description={key === 'k4Enabled' ? t('settings.keyboard.externalK4Hint') : undefined}
         disabled={!draft.externalKeyboardEnabled || stopping}>
         <VisualSwitch label={t(`settings.keyboard.${key}`)} checked={draft[key]} disabled={!draft.externalKeyboardEnabled || stopping}
           onChange={value => onChange({ [key]: value })} />

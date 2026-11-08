@@ -8,6 +8,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifyActorInputRoles } from './keyboard-input-roles.mjs';
 
 const usage = 'node scripts/validation/keyboard-native-update-recovery.mjs --binary <absolute keyboard_native_validation.exe> --mode <streaming|platform> --frontend-build-id <UUID> --report <absolute new JSON>';
 const pause = milliseconds => new Promise(done => setTimeout(done, milliseconds));
@@ -28,7 +29,7 @@ function parse(arguments_) {
 }
 
 function inspectBinary(options) {
-  const required = [options.buildId, '.synthetic-audio-fixture', 'successful_handoff_keeps_old_runtime_paused'];
+  const required = [options.buildId, '.synthetic-audio-fixture', 'successful_handoff_keeps_old_runtime_paused', 'k1_toggles_main_window', 'k4_reuses_shared_dictation'];
   const seen = required.map(() => false), hash = createHash('sha256');
   const handle = openSync(options.binary, 'r'), buffer = Buffer.alloc(1024 * 1024);
   let tail = Buffer.alloc(0), first = true;
@@ -44,7 +45,7 @@ function inspectBinary(options) {
       tail = chunk.subarray(Math.max(0, chunk.length - 256));
     }
   } finally { closeSync(handle); }
-  if (first || !seen.every(Boolean)) throw new Error('Fixture lacks the exact frontend stamp, synthetic audio marker, or current update recovery scenarios');
+  if (first || !seen.every(Boolean)) throw new Error('Fixture lacks the exact frontend stamp, synthetic audio, or current input-role/update-recovery markers');
   return hash.digest('hex');
 }
 
@@ -64,6 +65,7 @@ function environment(profile) {
 
 function verifyRecovery(report, mode) {
   if (report.passed !== true || report.real_os_microphone !== false || report.asr_mode !== mode || !report.audio_source?.includes('synthetic') || report.provider_requests_loopback_only !== true) throw new Error('Actor fixture failed or violated its synthetic isolation');
+  verifyActorInputRoles(report);
   const software = report.software_shortcuts;
   if (software?.no_hardware_prerequisite !== true || software.hardware_key_toggles_do_not_gate_software !== true
     || software.idle_without_provider_audio_or_webview !== true
@@ -75,7 +77,7 @@ function verifyRecovery(report, mode) {
   const external = report.external_keyboard_adapter;
   if (!external || [
     'default_off_has_no_owner', 'opt_in_acquires_single_owned_transport', 'hardware_independent_of_shortcut_master',
-    'k1_reuses_preserving_subtitle_toggle', 'k2_reuses_beautification', 'k3_reuses_cancellation',
+    'k2_reuses_beautification', 'k3_reuses_cancellation',
     'unplug_stops_only_hardware_capture', 'recoverable_failure_preserves_discovery_owner',
     'ui_local_capture_after_hardware_isolated', 'software_capture_survives_usb_failure_and_disable',
     'terminal_epoch_cannot_be_revived_by_queued_start', 'disable_waits_for_owner_join',

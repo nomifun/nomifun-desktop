@@ -156,7 +156,10 @@ describe('system microphone keyboard settings', () => {
     await waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0]).toMatchObject({ enabled: true, externalKeyboardEnabled: true, k4Enabled: false, audioDeviceId: null });
     expect(updates[0].shortcuts).toEqual(defaultVoiceKeyboardShortcuts);
-    expect(screen.getByText('K1 · Show or hide subtitles')).toBeTruthy();
+    expect(screen.getByText('K1 · Show or hide main window')).toBeTruthy();
+    expect(screen.getByText('Show or hide the NomiFun main window while the app is running.')).toBeTruthy();
+    expect(screen.getByText('Hold K4 to open the subtitle board and speak; release to finish recognition.')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Subtitle shortcut' }) as HTMLInputElement).value).toBe(defaultVoiceKeyboardShortcuts.toggle);
   });
 
   test('voice input is available without external device controls or startup dependencies', async () => {

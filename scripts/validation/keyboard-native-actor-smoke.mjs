@@ -7,6 +7,7 @@ import { accessSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, o
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifyActorInputRoles } from './keyboard-input-roles.mjs';
 
 const usage = 'node scripts/validation/keyboard-native-actor-smoke.mjs --binary <absolute Linux keyboard_native_validation> --mode <streaming|platform> --frontend-build-id <UUID> --report <absolute new private JSON>';
 const pause = (milliseconds) => new Promise((done) => setTimeout(done, milliseconds));
@@ -46,7 +47,7 @@ function inspectBinary(options) {
   accessSync(options.binary, constants.X_OK);
   const file = openSync(options.binary, 'r');
   const hash = createHash('sha256');
-  const required = [options.buildId, '.synthetic-audio-fixture', 'successful_handoff_keeps_old_runtime_paused'];
+  const required = [options.buildId, '.synthetic-audio-fixture', 'successful_handoff_keeps_old_runtime_paused', 'k1_toggles_main_window', 'k4_reuses_shared_dictation'];
   const seen = required.map(() => false);
   const buffer = Buffer.alloc(1024 * 1024);
   let tail = Buffer.alloc(0);
@@ -63,7 +64,7 @@ function inspectBinary(options) {
       tail = chunk.subarray(Math.max(0, chunk.length - 256));
     }
   } finally { closeSync(file); }
-  if (first || !seen.every(Boolean)) throw new Error('Executable lacks the current frontend stamp or the explicit synthetic fixture marker');
+  if (first || !seen.every(Boolean)) throw new Error('Executable lacks the current frontend stamp, synthetic fixture marker, or keyboard input-role evidence');
   return hash.digest('hex');
 }
 function environment(profile) {
@@ -125,6 +126,7 @@ async function session(profile) {
     const result = await bounded(fixture.exited, 135000, 'Synthetic Actor fixture exceeded 135 seconds');
     const report = JSON.parse(readFileSync(fixtureReport, 'utf8'));
     if (result.code !== 0 || report.passed !== true || report.real_os_microphone !== false || report.asr_mode !== details.options.mode || !report.audio_source?.includes('synthetic')) throw new Error('Actor fixture failed or violated its requested synthetic mode');
+    verifyActorInputRoles(report);
     const local = report.local_microphone;
     if (local?.without_asr_usb_or_k4 !== true || local.no_provider_calls !== true
       || local.five_second_auto_stop !== true || local.document_settings_and_edit_lease_unchanged !== true
@@ -142,7 +144,7 @@ async function session(profile) {
     const external = report.external_keyboard_adapter;
     if (!external || [
       'default_off_has_no_owner', 'opt_in_acquires_single_owned_transport', 'hardware_independent_of_shortcut_master',
-      'k1_reuses_preserving_subtitle_toggle', 'k2_reuses_beautification', 'k3_reuses_cancellation',
+      'k2_reuses_beautification', 'k3_reuses_cancellation',
       'unplug_stops_only_hardware_capture', 'recoverable_failure_preserves_discovery_owner',
       'ui_local_capture_after_hardware_isolated', 'software_capture_survives_usb_failure_and_disable',
       'terminal_epoch_cannot_be_revived_by_queued_start', 'disable_waits_for_owner_join',

@@ -124,6 +124,43 @@ pub fn set_subtitle_topmost(window:&tauri::WebviewWindow,topmost:bool)->Result<(
     Ok(())
 }
 
+/// Native main-window foreground check shared by its toggle and owned tests.
+pub(super) fn main_is_foreground(window:&tauri::WebviewWindow)->Result<bool>{
+    #[cfg(windows)]
+    let foreground={
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor,GetForegroundWindow,GA_ROOT};
+        let main=window.hwnd()?;
+        // WebView2 transfers keyboard focus to its child HWND. Tao's cached
+        // focused bit may then be false while this top-level window remains
+        // foreground; using that bit makes every K1 press show it again.
+        unsafe{let active=GetForegroundWindow();active==main||GetAncestor(active,GA_ROOT)==main}
+    };
+    #[cfg(not(windows))]
+    let foreground=window.is_focused()?;
+    Ok(foreground)
+}
+
+pub fn toggle_main(app:&tauri::AppHandle)->Result<()> {
+    let window=app.get_webview_window("main").context("主窗口尚未就绪")?;
+    let foreground=main_is_foreground(&window)?;
+    if window.is_visible()?&&foreground{window.hide()?;}
+    else {
+        window.unminimize()?;
+        #[cfg(windows)]{window.show()?;window.set_focus()?;}
+        #[cfg(target_os="macos")] {
+            on_main(&window,|window|{
+                let mtm=objc2::MainThreadMarker::new().context("AppKit 主线程不可用")?;
+                let pointer=window.ns_window()?;ensure!(!pointer.is_null(),"主窗口不可用");
+                unsafe{(&*(pointer as *const objc2_app_kit::NSWindow)).makeKeyAndOrderFront(None);}
+                #[allow(deprecated)]objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+                Ok(())
+            })?;
+        }
+        #[cfg(target_os="linux")]{use gtk::prelude::*;on_main(&window,|window|{let native=window.gtk_window()?;native.set_accept_focus(true);native.set_focus_on_map(true);native.present();Ok(())})?;}
+    }
+    Ok(())
+}
+
 /// A fixed in-app route; subtitle input never supplies a URL or route.
 pub fn open_keyboard_settings(app: &tauri::AppHandle) -> Result<()> {
     let window = app.get_webview_window("main").context("主窗口尚未就绪")?;

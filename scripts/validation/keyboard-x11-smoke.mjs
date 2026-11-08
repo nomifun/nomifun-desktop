@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { verifyWindowInputRoles } from './keyboard-input-roles.mjs';
 
 if (process.platform !== 'linux' || !process.argv[2] || !isAbsolute(process.argv[2])) throw new Error('Pass the absolute Linux keyboard_window_validation executable path');
 const binary = process.argv[2];
@@ -45,6 +46,8 @@ try {
   const completed = await wait(native, 35000);
   if (!existsSync(reportPath)) throw new Error(`Native X11 witness did not report: ${completed.error}`);
   report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  if (report.ok !== true) throw new Error(report.error ?? 'Native X11 window witness failed before reporting input roles');
+  verifyWindowInputRoles(report);
   const restored = spawnSync('timeout', ['4s', 'xclip', '-selection', 'clipboard', '-out'], { env: environment, timeout: 5000 });
   report.clipboardRestoredAfterWitnessExit = restored.status === 0 && restored.stdout.equals(sentinel);
   report.profileIsolated = true;
