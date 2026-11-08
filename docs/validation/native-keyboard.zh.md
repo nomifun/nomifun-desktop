@@ -176,3 +176,11 @@ UI 映射与外置状态相关 7 项测试通过（44 个断言），翻译生�
 两份通过报告为前述 `nomifun-k1-main-window-57a3cfd935994a54b97775ca93ae7159` 目录内 `native-streaming-green.json` / `native-platform-green.json`，均记录二进制 SHA-256 `179793af6ad5280b09604519ec6c48ae1e20681e25434fc339fffd857b451b77`。原生例子沿用现有前端产物 stamp `defe4152-17ed-40f5-b2ff-abc42570b369`，不把它标为本次新 UI 构建；本次设置文案由实际开发窗口与 UI 测试验证。
 
 首次完整 streaming 报告另存 `native-streaming-red-projection.json`：K1 检查已通过，随后旧的本地检测维护断言要求 UI 快照同步更新，产生失败。原生生产者先确认停止、再投递 Actor 状态，维护按真实停止证明返回符合当前契约。夹具改为只读检查同一原生所有权证明，再等待 UI 投影；不改变生产停采规则。修正后上述两模式复跑通过，保留失败证据。
+
+## 开发热重启的 Vite 断连回归（2026-11-08）
+
+本次普通 Tauri watcher 重启后端时，Vite 6.4.3 / Node 24.18.0 曾因未处理的原始 Socket `read ECONNRESET` 退出 1，连带终止 beforeDevCommand。独立随机 loopback 夹具复现：非 HMR 的 upgrade 请求没有连接错误处理者，客户端 RST 触发相同异常栈。原事故没有保存 URI，因此只证明同类连接缺口，不能唯一指认原始请求。
+
+增加仅 `apply:serve` 的服务器 upgrade socket 守卫：已有 WS/proxy 处理者继续处理；无人接管的断连只结束本连接并记录原因，意外错误保留错误码与堆栈。不添加进程级异常捕获，不改变 Host/Origin/token 检查或依赖版本。6 项测试、25 个断言和 typecheck 通过；独立 Vite 与项目原配置均在真实 RST 后继续 HTTP 200、认证 HMR 101。证据含源码哈希，位于 `C:\Users\rika0\AppData\Local\Temp\nomifun-vite-reset-c469b12374bf4d149e23091428945acb\report.json`。
+
+随后正常停止 no-watch 开发实例并退出 0，恢复普通 `bun run dev`。实际 watcher 经 `mod.rs`、原生验证例子及内容不变的专属窗口例子时间戳三次触发后端重启，三次均记录守卫接住 `ECONNRESET`，Vite 持续在线，最终 `/` 与 `/@vite/client` 均为 HTTP 200，开发主进程 PID 40920 存活并响应 API 200。完整日志为同一 K1 证据目录内 `dev-watch.log`。该结果是实际热重启证据，不以临时关闭 watcher 作为最终修复。

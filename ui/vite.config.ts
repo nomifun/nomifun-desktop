@@ -5,6 +5,7 @@ import react from '@vitejs/plugin-react';
 import UnoCSS from 'unocss/vite';
 import unoConfig from './uno.config.ts';
 import { createUiBuildManifest } from '../scripts/ui-build-manifest';
+import { guardDevUpgradeSockets } from '../scripts/lib/vite-upgrade-sockets.mjs';
 
 const uiPackage = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string };
 
@@ -21,6 +22,16 @@ function uiBuildManifestPlugin(): Plugin {
         fileName: 'nomifun-build.json',
         source: `${JSON.stringify(manifest, null, 2)}\n`,
       });
+    },
+  };
+}
+
+function devUpgradeSocketGuard(): Plugin {
+  return {
+    name: 'nomifun-dev-upgrade-sockets',
+    apply: 'serve',
+    configureServer(server) {
+      guardDevUpgradeSockets(server.httpServer, server.config.logger);
     },
   };
 }
@@ -91,7 +102,7 @@ export default defineConfig(({ mode }) => {
       host: '127.0.0.1',
       proxy,
     },
-    plugins: [iconParkPlugin(), react(), UnoCSS({ ...unoConfig }), uiBuildManifestPlugin()],
+    plugins: [devUpgradeSocketGuard(), iconParkPlugin(), react(), UnoCSS({ ...unoConfig }), uiBuildManifestPlugin()],
     resolve: {
       alias: {
         '@': src,
