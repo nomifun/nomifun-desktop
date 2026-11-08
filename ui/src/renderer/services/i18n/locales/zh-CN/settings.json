@@ -2353,6 +2353,8 @@
     "preferencesTitle": "识别偏好",
     "preferencesHint": "语言与专有词",
     "shortcutGuide": "组合键格式说明",
+    "shortcutEditHint": "点击修改快捷键，修改后统一应用。",
+    "shortcutNotSet": "未设置",
     "inputMethodsHint": "系统快捷键与外置键盘可独立使用。",
     "externalDetails": "设备详情",
     "externalKeys": "按键功能",

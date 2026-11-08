@@ -208,3 +208,9 @@ UI 映射与外置状态相关 7 项测试通过（44 个断言），翻译生�
 预览入口为 `ui/test/voice-keyboard-preview.html`，所有原生、权限、设置与音频行为均为明确内存模拟，未知fetch不回落真实后端。场景选择使用同源完整导航，避免产品的跨挂载草稿恢复协调器污染另一个测试场景。截图、审查记录和测试日志保存在仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-voice-settings-redesign-RMoQW2\`；遮挡截图已在审查记录中标为拒绝，不作为通过证据。本轮不录制环境声音、不调用真实云端模型、不改变系统权限，macOS/Linux原生窗口没有重新执行。
 
 Windows 真实开发窗口已确认显示四个分区、原有 StepFun 流式模型和系统麦克风；与重构前同尺寸截图比较，核心识别模式、模型和麦克风现已同时出现在首屏。最终原生截图为 `14-after-native-top.png`，没有在真实窗口启动录音或修改语音设置。收尾时 in-app browser 控制连接超时，未能确认预览标签常驻和视口重置；此前的视口/交互证据已保存，原生窗口核查完成，隔离预览HTTP服务仍可独立访问。
+
+## 快捷键键帽与编辑状态（2026-11-08）
+
+默认用真实 `kbd` 元素显示组合，Windows/Linux 的 CommandOrControl 显示 Ctrl，macOS 显示 ⌘；原始字符串只在点击后的编辑框出现。显示别名不回写存储，未知或不完整输入不静默丢弃。预览与输入共用网格占位，失焦只结束编辑，Enter 在非 IME 时结束编辑并回焦预览；四项仍统一 Apply，录音期间禁止编辑。
+
+组件回归 72/72 通过、493 个断言，涵盖 macOS 键帽、四项原值读取、空绑定、失焦/Enter 不提交、IME、跨分区草稿、冲突及禁编辑。typecheck、i18n（8608 键）、桌面边界、theme/theme-vars、dead-css 与图标检查通过。Windows 真实开发窗口确认 Ctrl + Shift + K / Space 的键帽样式，点击后仍为 `CommandOrControl+Shift+K`，不改内容按 Enter 返回键帽，Apply 保持禁用；没有注册新快捷键或启动录音。截图位于仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-shortcut-keycaps-NLlZoZ\native-keycaps.png`。macOS 仅有组件渲染证据，本轮没有 Mac 原生运行。

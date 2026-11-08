@@ -2353,6 +2353,8 @@
     "preferencesTitle": "Recognition preferences",
     "preferencesHint": "Language and specialized terms",
     "shortcutGuide": "Shortcut format guide",
+    "shortcutEditHint": "Click to edit; apply your changes together.",
+    "shortcutNotSet": "Not set",
     "inputMethodsHint": "System shortcuts and an external keyboard work independently.",
     "externalDetails": "Device details",
     "externalKeys": "Key actions",

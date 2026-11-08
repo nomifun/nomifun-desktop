@@ -84,6 +84,12 @@ const show = async (tab: SettingsTab = 'voice') => {
   await visitTab(tab);
   return view;
 };
+const editShortcut = async (label: string) => {
+  const editing = screen.queryByRole('textbox', { name: label });
+  if (editing) return editing as HTMLInputElement;
+  fireEvent.click(await screen.findByRole('button', { name: label }));
+  return await screen.findByRole('textbox', { name: label }) as HTMLInputElement;
+};
 
 describe('system microphone keyboard settings', () => {
   test('the default recognition pane explains a missing input before entering diagnostics', async () => {
@@ -108,11 +114,80 @@ describe('system microphone keyboard settings', () => {
     expect(updates).toHaveLength(0); expect(actions).toHaveLength(0); expect(permissionRequests).toHaveLength(0);
   });
 
+  test('default shortcut previews use native keycaps and reveal unchanged raw bindings only when edited', async () => {
+    await show('input');
+    await waitFor(() => expect(screen.getByRole('button', { name: en.keyboard.shortcut_toggle }).querySelector('kbd')?.textContent).toBe('⌘'));
+    for (const [action, label, key] of [
+      ['toggle', en.keyboard.shortcut_toggle, 'K'], ['dictate', en.keyboard.shortcut_dictate, 'Space'],
+      ['beautify', en.keyboard.shortcut_beautify, 'B'], ['cancel', en.keyboard.shortcut_cancel, 'X'],
+    ] as const) {
+      const preview = screen.getByRole('button', { name: label });
+      expect(Array.from(preview.querySelectorAll('kbd'), cap => cap.textContent)).toEqual(['⌘', '⇧', key]);
+      expect(preview.textContent).not.toContain('CommandOrControl');
+      expect(screen.queryByRole('textbox', { name: label })).toBeNull();
+      const input = await editShortcut(label);
+      expect(input.value).toBe(defaultVoiceKeyboardShortcuts[action]);
+      fireEvent.blur(input);
+    }
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+  });
+
+  test.each(['blur', 'Enter'] as const)('leaving shortcut editing with %s returns to its preview without applying', async exit => {
+    await show('input');
+    const input = await editShortcut(en.keyboard.shortcut_dictate);
+    fireEvent.change(input, { target: { value: 'Control+Alt+D' } });
+    if (exit === 'blur') fireEvent.blur(input);
+    else fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.queryByRole('textbox', { name: en.keyboard.shortcut_dictate })).toBeNull();
+    const preview = screen.getByRole('button', { name: en.keyboard.shortcut_dictate });
+    expect(Array.from(preview.querySelectorAll('kbd'), cap => cap.textContent)).toEqual(['⌃', '⌥', 'D']);
+    if (exit === 'Enter') expect(document.activeElement).toBe(preview);
+    expect(screen.getByRole('button', { name: en.keyboard.applyShortcuts }).hasAttribute('disabled')).toBe(false);
+    expect(updates).toHaveLength(0); expect(current.settings.shortcuts.dictate).toBe(defaultVoiceKeyboardShortcuts.dictate);
+    expect((await editShortcut(en.keyboard.shortcut_dictate)).value).toBe('Control+Alt+D');
+  });
+
+  test('an IME Enter keeps the shortcut editor open and does not register its composing value', async () => {
+    await show('input');
+    const input = await editShortcut(en.keyboard.shortcut_dictate);
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: 'Control+Alt+D' } });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    expect(screen.getByRole('textbox', { name: en.keyboard.shortcut_dictate })).toBe(input);
+    expect(input.value).toBe('Control+Alt+D'); expect(updates).toHaveLength(0);
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(screen.queryByRole('textbox', { name: en.keyboard.shortcut_dictate })).toBeNull();
+    expect(updates).toHaveLength(0);
+  });
+
+  test('native recording disables shortcut previews and an open editor until capture stops', async () => {
+    await show('input');
+    const input = await editShortcut(en.keyboard.shortcut_dictate);
+    fireEvent.change(input, { target: { value: 'Control+Alt+D' } });
+    emit({ phase: 'recording', audioState: { state: 'capturing', detail: null } });
+    expect(screen.getByRole('textbox', { name: en.keyboard.shortcut_dictate }).hasAttribute('disabled')).toBe(true);
+    for (const label of [en.keyboard.shortcut_toggle, en.keyboard.shortcut_beautify, en.keyboard.shortcut_cancel]) {
+      const preview = screen.getByRole('button', { name: label });
+      expect(preview.hasAttribute('disabled')).toBe(true);
+      fireEvent.click(preview);
+      expect(screen.queryByRole('textbox', { name: label })).toBeNull();
+    }
+    expect(screen.getByRole('button', { name: en.keyboard.applyShortcuts }).hasAttribute('disabled')).toBe(true);
+    expect(updates).toHaveLength(0);
+    emit({ phase: 'idle', audioState: { state: 'stopped', detail: null } });
+    fireEvent.blur(input);
+    expect((await editShortcut(en.keyboard.shortcut_dictate)).value).toBe('Control+Alt+D');
+    expect(updates).toHaveLength(0);
+  });
+
   test('an unapplied shortcut draft survives navigation and registers only on explicit apply', async () => {
     await show('input');
-    fireEvent.change(screen.getByRole('textbox', { name: en.keyboard.shortcut_dictate }), { target: { value: 'Control+Alt+D' } });
+    const input = await editShortcut(en.keyboard.shortcut_dictate);
+    fireEvent.change(input, { target: { value: 'Control+Alt+D' } });
+    fireEvent.blur(input);
     await visitTab('appearance'); await visitTab('diagnostics'); await visitTab('input');
-    expect((screen.getByRole('textbox', { name: en.keyboard.shortcut_dictate }) as HTMLInputElement).value).toBe('Control+Alt+D');
+    expect((await editShortcut(en.keyboard.shortcut_dictate)).value).toBe('Control+Alt+D');
     expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: en.keyboard.applyShortcuts }));
     await waitFor(() => expect(updates).toHaveLength(1));
@@ -283,9 +358,8 @@ describe('system microphone keyboard settings', () => {
     const enabled = shortcuts.getByRole('switch', { name: 'Enable voice shortcuts' });
     expect(enabled.getAttribute('aria-checked')).toBe('true');
     expect(enabled.hasAttribute('disabled')).toBe(false);
-    const dictate = shortcuts.getByRole('textbox', { name: 'Dictation shortcut' });
-    expect(dictate.hasAttribute('disabled')).toBe(false);
-    expect(dictate.getAttribute('value')).toBe(defaultVoiceKeyboardShortcuts.dictate);
+    expect(shortcuts.getByRole('button', { name: en.keyboard.shortcut_dictate }).hasAttribute('disabled')).toBe(false);
+    expect((await editShortcut(en.keyboard.shortcut_dictate)).value).toBe(defaultVoiceKeyboardShortcuts.dictate);
     expect(updates).toHaveLength(0);
     await visitTab('diagnostics');
     const start = screen.getByRole('button', { name: 'Test cloud transcription' });
@@ -305,7 +379,7 @@ describe('system microphone keyboard settings', () => {
     expect(screen.getByText('K1 · Show or hide main window')).toBeTruthy();
     expect(screen.getByText('Show or hide the NomiFun main window while the app is running.')).toBeTruthy();
     expect(screen.getByText('Hold K4 to open the subtitle board and speak; release to finish recognition.')).toBeTruthy();
-    expect((screen.getByRole('textbox', { name: 'Subtitle shortcut' }) as HTMLInputElement).value).toBe(defaultVoiceKeyboardShortcuts.toggle);
+    expect((await editShortcut(en.keyboard.shortcut_toggle)).value).toBe(defaultVoiceKeyboardShortcuts.toggle);
   });
 
   test('voice input is available without external device controls or startup dependencies', async () => {
@@ -314,7 +388,7 @@ describe('system microphone keyboard settings', () => {
     expect(screen.queryByRole('region', { name: 'Keyboard device' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Background device service' })).toBeNull();
     expect(screen.queryByRole('switch', { name: 'Start at user login' })).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'Dictation shortcut' }).getAttribute('value')).toBe(defaultVoiceKeyboardShortcuts.dictate);
+    expect((await editShortcut(en.keyboard.shortcut_dictate)).value).toBe(defaultVoiceKeyboardShortcuts.dictate);
     expect(screen.getByRole('switch', { name: 'Enable voice shortcuts' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Open subtitle board' }));
     await waitFor(() => expect(actions).toEqual([{ action: 'open' }]));
@@ -343,9 +417,13 @@ describe('system microphone keyboard settings', () => {
 
   test('shortcut bindings are applied together and incomplete typing is not registered', async () => {
     await show('input');
-    const dictate = await screen.findByRole('textbox', { name: 'Dictation shortcut' });
+    const dictate = await editShortcut(en.keyboard.shortcut_dictate);
     fireEvent.change(dictate, { target: { value: 'Control+Alt+D' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Cancellation shortcut' }), { target: { value: '' } });
+    fireEvent.blur(dictate);
+    const cancel = await editShortcut(en.keyboard.shortcut_cancel);
+    fireEvent.change(cancel, { target: { value: '' } });
+    fireEvent.blur(cancel);
+    expect(screen.getByRole('button', { name: en.keyboard.shortcut_cancel }).textContent).toContain(en.keyboard.shortcutNotSet);
     expect(updates).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'Apply shortcuts' }));
     await waitFor(() => expect(updates).toHaveLength(1));
@@ -356,11 +434,12 @@ describe('system microphone keyboard settings', () => {
   test('a shortcut conflict keeps the requested combination editable and the saved binding unchanged', async () => {
     keyboard.updateSettings = async settings => { updates.push(settings); throw new Error('Shortcut already registered by another application'); };
     await show('input');
-    const dictate = await screen.findByRole('textbox', { name: 'Dictation shortcut' });
+    const dictate = await editShortcut(en.keyboard.shortcut_dictate);
     fireEvent.change(dictate, { target: { value: 'Control+Alt+D' } });
+    fireEvent.blur(dictate);
     fireEvent.click(screen.getByRole('button', { name: 'Apply shortcuts' }));
     await screen.findByText('Shortcut already registered by another application');
-    expect((dictate as HTMLInputElement).value).toBe('Control+Alt+D');
+    expect((await editShortcut(en.keyboard.shortcut_dictate)).value).toBe('Control+Alt+D');
     expect(current.settings.shortcuts.dictate).toBe(defaultVoiceKeyboardShortcuts.dictate);
     expect(screen.getByRole('button', { name: 'Retry saving' })).toBeTruthy();
   });

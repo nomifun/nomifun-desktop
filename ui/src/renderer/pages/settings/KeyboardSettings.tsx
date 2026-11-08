@@ -1,4 +1,5 @@
 import { Alert, Button, Input, Select, Spin } from '@arco-design/web-react';
+import { Write } from '@icon-park/react';
 import { useEffect, useId, useMemo, useRef, useState, type CompositionEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
@@ -50,23 +51,76 @@ function ModelSelect({ models, value, label, disabled, onChange }: {
   </Select>;
 }
 
-function ShortcutBindings({ shortcuts, disabled, onApply }: {
-  shortcuts: VoiceKeyboardShortcuts; disabled: boolean; onApply: (next: VoiceKeyboardShortcuts) => void;
+function shortcutKeyLabels(value: string, platform: string | undefined): string[] {
+  const raw = value.trim();
+  if (!raw) return [];
+  const parts = raw.split('+').map(part => part.trim());
+  // Display incomplete/unknown input honestly; only the native parser decides
+  // whether the unchanged binding is valid when the group is applied.
+  if (parts.some(part => !part)) return [raw];
+  const mac = platform === 'macos';
+  const commandOrControl = mac ? '⌘' : platform === 'windows' || platform === 'linux' ? 'Ctrl' : 'Ctrl/⌘';
+  const command = mac ? '⌘' : platform === 'windows' ? 'Win' : 'Super';
+  const names: Record<string, string> = {
+    commandorcontrol: commandOrControl, cmdorctrl: commandOrControl,
+    control: mac ? '⌃' : 'Ctrl', ctrl: mac ? '⌃' : 'Ctrl',
+    command, cmd: command, super: command, meta: command,
+    shift: mac ? '⇧' : 'Shift', alt: mac ? '⌥' : 'Alt', option: mac ? '⌥' : 'Alt',
+    space: 'Space', spacebar: 'Space', return: 'Enter', escape: 'Esc', esc: 'Esc',
+    arrowup: '↑', up: '↑', arrowdown: '↓', down: '↓', arrowleft: '←', left: '←', arrowright: '→', right: '→',
+    plus: '+', backspace: mac ? '⌫' : 'Backspace', delete: mac ? '⌦' : 'Delete',
+  };
+  return parts.map(part => names[part.toLowerCase()] ?? (part.length === 1 ? part.toUpperCase() : part));
+}
+
+function ShortcutBindings({ shortcuts, platform, disabled, onApply }: {
+  shortcuts: VoiceKeyboardShortcuts; platform?: string; disabled: boolean; onApply: (next: VoiceKeyboardShortcuts) => void;
 }) {
   const { t } = useTranslation();
   const [edited, setEdited] = useState(shortcuts);
+  const [editing, setEditing] = useState<keyof VoiceKeyboardShortcuts | null>(null);
+  const previewRefs = useRef<Partial<Record<keyof VoiceKeyboardShortcuts, HTMLButtonElement | null>>>({});
+  const returnFocus = useRef<keyof VoiceKeyboardShortcuts | null>(null);
   const bindingId = useId();
   const saved = JSON.stringify(shortcuts);
   useEffect(() => { setEdited(shortcuts); }, [saved]);
+  useEffect(() => {
+    if (editing === null && returnFocus.current) {
+      previewRefs.current[returnFocus.current]?.focus();
+      returnFocus.current = null;
+    }
+  }, [editing]);
   return <>
-    <div className='voice-shortcut-grid'>{(['toggle', 'dictate', 'beautify', 'cancel'] as const).map(action =>
-      <div key={action} className='voice-shortcut-field'>
-        <label htmlFor={bindingId + '-' + action}>{t(`settings.keyboard.shortcut_${action}`)}</label>
-        <Input id={bindingId + '-' + action} aria-describedby={bindingId + '-' + action + '-hint'} className='keyboard-shortcut-input' aria-label={t(`settings.keyboard.shortcut_${action}`)} value={edited[action]}
-          disabled={disabled} onChange={value => setEdited(current => ({ ...current, [action]: value }))}
-          placeholder={t('settings.keyboard.shortcutEmpty')} spellCheck={false} />
+    <div className='voice-shortcut-grid'>{(['toggle', 'dictate', 'beautify', 'cancel'] as const).map(action => {
+      const id = bindingId + '-' + action;
+      const keys = shortcutKeyLabels(edited[action], platform);
+      const isEditing = editing === action;
+      return <div key={action} className='voice-shortcut-field'>
+        <label htmlFor={isEditing ? id + '-input' : id}>{t(`settings.keyboard.shortcut_${action}`)}</label>
+        <div className='voice-shortcut-control'>
+          <button type='button' id={id} className='voice-shortcut-preview' aria-label={t(`settings.keyboard.shortcut_${action}`)}
+            aria-describedby={id + '-keys ' + id + '-hint'} aria-hidden={isEditing || undefined} tabIndex={isEditing ? -1 : undefined}
+            disabled={disabled || isEditing} title={(keys.length ? keys.join(' + ') : t('settings.keyboard.shortcutNotSet')) + ' · ' + t('settings.keyboard.shortcutEditHint')}
+            ref={node => { previewRefs.current[action] = node; }} onClick={() => setEditing(action)}>
+            <span className='voice-shortcut-keys' id={id + '-keys'}>
+              {keys.length ? keys.map((key, index) => <span className='voice-shortcut-part' key={index}>
+                {index > 0 && <span className='voice-shortcut-plus' aria-hidden='true'>+</span>}<kbd>{key}</kbd>
+              </span>) : <span className='voice-shortcut-empty'>{t('settings.keyboard.shortcutNotSet')}</span>}
+            </span>
+            <span className='voice-shortcut-edit-icon' aria-hidden='true'><Write theme='outline' size={13} /></span>
+          </button>
+          {isEditing && <Input id={id + '-input'} aria-describedby={id + '-hint'} className='keyboard-shortcut-input'
+            aria-label={t(`settings.keyboard.shortcut_${action}`)} value={edited[action]} autoFocus
+            disabled={disabled} onFocus={event => event.target.select()} onChange={value => setEdited(current => ({ ...current, [action]: value }))}
+            onBlur={() => setEditing(null)} onKeyDown={event => {
+              if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                event.preventDefault(); returnFocus.current = action; setEditing(null);
+              }
+            }} placeholder={t('settings.keyboard.shortcutEmpty')} spellCheck={false} />}
+        </div>
         <span id={bindingId + '-' + action + '-hint'}>{t(`settings.keyboard.shortcutHint_${action}`)}</span>
-      </div>)}</div>
+      </div>;
+    })}</div>
     <div className='keyboard-form-actions'>
       <Button disabled={disabled || JSON.stringify(edited) === saved} onClick={() => onApply(edited)}>{t('settings.keyboard.applyShortcuts')}</Button>
     </div>
@@ -382,7 +436,9 @@ export default function KeyboardSettings() {
             <VisualRow label={t('settings.keyboard.enabled')} description={t('settings.keyboard.enabledHint')}>
               <VisualSwitch label={t('settings.keyboard.enabled')} checked={draft.enabled} onChange={value => change('enabled', value)} />
             </VisualRow>
-            <ShortcutBindings shortcuts={draft.shortcuts} disabled={native.busy || recognitionBusy}
+            <ShortcutBindings shortcuts={draft.shortcuts}
+              platform={permissions.status?.platform ?? (typeof window === 'undefined' ? undefined : (window as Window & { __os?: string }).__os)}
+              disabled={native.busy || recognitionBusy}
               onApply={shortcuts => change('shortcuts', shortcuts)} />
             {state.shortcutState?.detail && <p className='voice-context-note'>{state.shortcutState.detail}</p>}
             <p className='voice-context-note'>{t('settings.keyboard.disableHint')}</p>
