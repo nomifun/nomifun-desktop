@@ -432,20 +432,35 @@ fn emit(subscriber: &mut Option<SyncSender<Event>>, event: Event) -> Result<()> 
     }
     Ok(())
 }
-fn discover() -> Result<Option<Device>> {
-    for info in serialport::available_ports()? {
-        if !matches!(&info.port_type,serialport::SerialPortType::UsbPort(usb) if usb.vid==0x303a&&usb.pid==0x1001)
-        {
+/// An absent device and a present-but-unavailable port are different states.
+/// Keep trying matching candidates so one occupied interface cannot hide a
+/// usable keyboard, then preserve every actual cause if none could connect.
+fn discover_candidates<T>(
+    ports: impl IntoIterator<Item = serialport::SerialPortInfo>,
+    mut connect: impl FnMut(&serialport::SerialPortInfo) -> Result<T>,
+) -> Result<Option<T>> {
+    let mut failures = Vec::new();
+    for info in ports {
+        if !matches!(&info.port_type, serialport::SerialPortType::UsbPort(usb) if usb.vid == 0x303a && usb.pid == 0x1001) {
             continue;
         }
-        let port = match serialport::new(&info.port_name, 115200)
+        match connect(&info) {
+            Ok(device) => return Ok(Some(device)),
+            Err(error) => failures.push(format!("{}：{error:#}", info.port_name)),
+        }
+    }
+    ensure!(failures.is_empty(),
+        "已检测到外置键盘串口，但连接失败。端口可能正被另一个 NomiFun 实例或串口工具占用，也请检查设备连接和访问权限；程序会自动重试。{}",
+        failures.join("；"));
+    Ok(None)
+}
+fn discover() -> Result<Option<Device>> {
+    discover_candidates(serialport::available_ports()?, |info| {
+        let port = serialport::new(&info.port_name, 115200)
             .timeout(Duration::from_millis(20))
             .dtr_on_open(false)
             .open()
-        {
-            Ok(port) => port,
-            Err(_) => continue,
-        };
+            .map_err(|error| anyhow::anyhow!("打开串口失败（{:?}）：{}", error.kind(), error))?;
         // A previous connection may have ended inside a frame. Discard its
         // received bytes before the new transport handshake and parser exist.
         port.clear(serialport::ClearBuffer::Input)
@@ -468,15 +483,14 @@ fn discover() -> Result<Option<Device>> {
             pressed: [false; 4],
             click_armed: [false; 4],
             status: DeviceStatus {
-                port: Some(info.port_name),
+                port: Some(info.port_name.clone()),
                 ..Default::default()
             },
         };
         device.send(json!({"event":"transport","kind":"usb"}))?;
         device.send(json!({"event":"get_device_info"}))?;
-        return Ok(Some(device));
-    }
-    Ok(None)
+        Ok(device)
+    })
 }
 
 /// Every terminal failure retains the serial device until bounded NONE cleanup
@@ -805,6 +819,47 @@ mod validation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn candidate(name: &str, vid: u16, pid: u16) -> serialport::SerialPortInfo {
+        serialport::SerialPortInfo { port_name: name.into(), port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid, pid, serial_number: None, manufacturer: None, product: None,
+        }) }
+    }
+    #[test]
+    fn discovery_without_a_matching_device_does_not_attempt_open() {
+        let unrelated = [candidate("COM1", 0x1234, 0x1001), candidate("COM2", 0x303a, 0x0001),
+            serialport::SerialPortInfo { port_name: "COM3".into(), port_type: serialport::SerialPortType::Unknown }];
+        let result = discover_candidates::<()>(unrelated, |_| panic!("unrelated ports must not be opened")).unwrap();
+        assert!(result.is_none());
+        assert!(discover_candidates::<()>([], |_| unreachable!()).unwrap().is_none());
+    }
+    #[test]
+    fn discovery_tries_the_next_matching_port_when_the_first_is_occupied() {
+        let mut attempted = Vec::new();
+        let connected = discover_candidates([candidate("COM4", 0x303a, 0x1001), candidate("COM5", 0x303a, 0x1001)], |info| {
+            attempted.push(info.port_name.clone());
+            if info.port_name == "COM4" { anyhow::bail!("fixture port is already occupied"); }
+            Ok(info.port_name.clone())
+        }).unwrap();
+        assert_eq!(attempted, ["COM4", "COM5"]);
+        assert_eq!(connected.as_deref(), Some("COM5"));
+    }
+    #[test]
+    fn discovery_reports_matching_ports_and_complete_failure_causes() {
+        let error = discover_candidates::<()>([candidate("COM4", 0x303a, 0x1001), candidate("COM5", 0x303a, 0x1001)], |info| {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("fixture {} access denied", info.port_name)))
+                .context("fixture open failed")
+        }).unwrap_err().to_string();
+        for expected in ["COM4", "COM5", "fixture open failed", "fixture COM4 access denied", "fixture COM5 access denied", "占用", "自动重试"] {
+            assert!(error.contains(expected), "missing actual failure detail: {expected}; {error}");
+        }
+    }
+    #[test]
+    fn discovery_can_connect_on_the_next_scan_after_a_port_is_released() {
+        let busy = discover_candidates::<()>([candidate("COM4", 0x303a, 0x1001)], |_| anyhow::bail!("fixture occupied"));
+        assert!(busy.is_err());
+        let available = discover_candidates([candidate("COM4", 0x303a, 0x1001)], |info| Ok(info.port_name.clone())).unwrap();
+        assert_eq!(available.as_deref(), Some("COM4"));
+    }
     #[test]
     fn transport_stop_joins_owner_and_releases_lock_without_a_daemon_descriptor() {
         let root = tempfile::tempdir().unwrap();

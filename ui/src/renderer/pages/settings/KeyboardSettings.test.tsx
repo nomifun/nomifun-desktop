@@ -123,6 +123,31 @@ describe('system microphone keyboard settings', () => {
     await waitFor(() => expect(actions).toEqual([{ action: 'test_start' }]));
   });
 
+  test('a busy external COM4 shows its cause while connecting and leaves voice shortcuts available', async () => {
+    const detail = '已检测到 COM4，但串口正被另一个 NomiFun 实例占用（PermissionDenied）；程序会自动重试。';
+    current.settings.externalKeyboardEnabled = true;
+    current.externalKeyboard = { state: 'connecting', detail };
+    current.shortcutState = { registered: 4, detail: null };
+    current.service = { running: true, ready: true, detail: null };
+    show();
+    const external = within(await screen.findByRole('region', { name: 'External keyboard connection (optional)' }));
+    expect(external.getByText('Waiting for an external keyboard')).toBeTruthy();
+    expect(external.getByText(detail)).toBeTruthy();
+    const shortcuts = within(screen.getByRole('region', { name: 'System shortcuts' }));
+    expect(shortcuts.getByText('Ready')).toBeTruthy();
+    const enabled = shortcuts.getByRole('switch', { name: 'Enable voice shortcuts' });
+    expect(enabled.getAttribute('aria-checked')).toBe('true');
+    expect(enabled.hasAttribute('disabled')).toBe(false);
+    const dictate = shortcuts.getByRole('textbox', { name: 'Dictation shortcut' });
+    expect(dictate.hasAttribute('disabled')).toBe(false);
+    expect(dictate.getAttribute('value')).toBe(defaultVoiceKeyboardShortcuts.dictate);
+    expect(updates).toHaveLength(0);
+    const start = screen.getByRole('button', { name: 'Test cloud transcription' });
+    await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(actions).toEqual([{ action: 'test_start' }]));
+  });
+
   test('external K4 preference changes leave system shortcut configuration and microphone selection intact', async () => {
     current.settings.externalKeyboardEnabled = true;
     current.externalKeyboard = { state: 'connecting', detail: null };
