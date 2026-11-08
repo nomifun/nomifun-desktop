@@ -5,6 +5,21 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.21 - 2026-11-09
+
+- Make voice input shortcut-first, with customizable system shortcuts and a
+  focused voice keyboard settings page; display shortcuts as platform keycaps.
+- Add an opt-in external keyboard adapter, restore K1 main-window controls and
+  report occupied serial ports without blocking software voice input.
+- Separate application maintenance from voice/device readiness and isolate
+  macOS legacy keyboard state from startup, shutdown and update admission.
+- Preserve actionable ASR handshake failures and provider diagnostics.
+- Isolate development runtime scopes and harden Windows dev startup and
+  disconnected upgrade sockets during restart.
+- Publish signed and notarized Apple Silicon and Intel macOS installers with
+  signed updater archives. Windows, Linux and AppImage are not built for this
+  initial publication.
+
 ## v0.8.20 - 2026-11-05
 
 - Connect new SSH sessions immediately, add explicit connect/disconnect controls,
