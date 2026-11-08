@@ -679,6 +679,155 @@ fn local_stepfun_call(address: std::net::SocketAddr) -> ResolvedTaskConfig {
     }
 }
 
+fn assert_safe_preparation_error(error: &InvokeError) {
+    let rendered = format!("{error}\n{}", serde_json::to_string(&error.model_failure_diagnostic()).unwrap());
+    assert!(!rendered.contains("local-fixture-only"), "runtime key escaped: {rendered}");
+    assert!(!rendered.contains("local-fixture-only%2B"));
+    assert!(!rendered.contains("noise_that_is_not_error_detail"), "raw envelope escaped: {rendered}");
+}
+
+#[tokio::test]
+async fn handshake_http_errors_keep_status_kind_and_only_redacted_provider_evidence() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::method;
+    for (status, kind, code) in [
+        (401, InvokeErrorKind::Auth, "invalid_api_key"),
+        (400, InvokeErrorKind::InvalidParams, "invalid_request_error"),
+        (429, InvokeErrorKind::RateLimited, "rate_limit_exceeded"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(status)
+            .insert_header("x-request-id", "owned-asr-request")
+            .insert_header("retry-after", "2")
+            .set_body_json(json!({"error":{"code":code,"param":"language",
+                "message":"服务拒绝此设置 local-fixture-only local-fixture-only%2B%2F%3D"},
+                "noise_that_is_not_error_detail":"unrelated provider payload"})))
+            .mount(&server).await;
+        let mut call = local_stepfun_call(*server.address());
+        call.connection.auth.credentials = json!({"api_keys":["local-fixture-only+/="]});
+        call.transport.realtime_endpoint = Some(format!("ws://{}/stream?key=local-fixture-only", server.address()));
+        // The provider also reflects a different exact runtime credential.
+        // Both keys are authority even when only the first key is used.
+        call.connection.auth.credentials["api_keys"] = json!(["local-fixture-only+/=", "local-fixture-only"]);
+        let error = prepare_session(async { Ok(call) }, &StreamingAsrConfig::default()).await
+            .err().expect("HTTP refusal must not grant capture readiness");
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.http_status, Some(status));
+        assert_eq!(error.retry_after_ms, Some(2000));
+        assert!(error.message.contains(&format!("HTTP {status}")));
+        assert!(error.message.contains(code));
+        assert!(error.message.contains("服务拒绝此设置"));
+        let diagnostic = error.model_failure_diagnostic();
+        assert_eq!(diagnostic.provider_code.as_deref(), Some(code));
+        assert_eq!(diagnostic.request_id.as_deref(), Some("owned-asr-request"));
+        assert_eq!(diagnostic.protocol.as_deref(), Some("stepfun.asr_stream"));
+        assert_eq!(diagnostic.endpoint.as_deref(), Some(format!("ws://{}/stream", server.address()).as_str()));
+        assert_safe_preparation_error(&error);
+    }
+}
+
+#[tokio::test]
+async fn oversized_http_handshake_error_cannot_surface_unbounded_or_partial_secrets() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::method;
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(400)
+        .set_body_json(json!({"error":{"code":"invalid_request_error",
+            "message":format!("{}local-fixture-only", "x".repeat(70 * 1024))}})))
+        .mount(&server).await;
+    let call = local_stepfun_call(*server.address());
+    let error = prepare_session(async { Ok(call) }, &StreamingAsrConfig::default()).await
+        .err().expect("oversized rejection must not grant readiness");
+    assert_eq!(error.kind, InvokeErrorKind::InvalidParams);
+    assert_eq!(error.http_status, Some(400));
+    assert!(error.model_failure_diagnostic().provider_detail.is_none());
+    assert!(error.to_string().len() < 2000);
+    assert_safe_preparation_error(&error);
+}
+
+#[tokio::test]
+async fn configuration_error_events_keep_bounded_provider_reason_without_echoing_secrets() {
+    for flat in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let update: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(update["type"], "session.update");
+            let details = json!({"code":"invalid_api_key","param":"language",
+                "message":format!("未开通模型 local-fixture-only {}", "中".repeat(1500)),
+                "noise_that_is_not_error_detail":"never return raw event"});
+            let event = if flat {
+                let mut event = details; event["type"] = json!("error"); event
+            } else { json!({"type":"error","error":details}) };
+            socket.send(Message::Text(event.to_string().into())).await.unwrap();
+            assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))),
+                "configuration rejection must never receive microphone PCM");
+        });
+        let call = local_stepfun_call(address);
+        let error = prepare_session(async { Ok(call) }, &StreamingAsrConfig::default()).await
+            .err().expect("provider error must not grant capture readiness");
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert_eq!(error.http_status, None);
+        assert!(error.message.contains("未开通模型"));
+        assert!(error.message.contains("invalid_api_key"));
+        let diagnostic = error.model_failure_diagnostic();
+        assert_eq!(diagnostic.reason, crate::error::ModelFailureReason::InvalidKey);
+        assert!(diagnostic.provider_detail.unwrap().chars().count() <= 1000);
+        assert_safe_preparation_error(&error);
+        peer.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn configuration_acknowledgement_contract_stays_strict_and_never_dumps_unrelated_fields() {
+    for (ack, expected) in [
+        (json!({"type":"session.updated","session":{"audio":{"input":{"format":{"rate":16000}}}}}), None),
+        (json!({"type":"session.updated","session":{"audio":{"input":{"format":{"rate":"16000"}}}}}), Some("format.rate=16000")),
+        (json!({"type":"session.updated","session":{}}), Some("format.rate=16000")),
+        (json!({"type":"session.updated","session":{"audio":{"input":{"format":{"rate":16000},"turn_detection":{"type":"server_vad"}}}}}), Some("did not disable server VAD")),
+        (json!({"type":"local-fixture-only","noise_that_is_not_error_detail":"hidden"}), Some("<missing or invalid type>")),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let _update = socket.next().await.unwrap().unwrap();
+            socket.send(Message::Text(ack.to_string().into())).await.unwrap();
+            let _closed = socket.next().await;
+        });
+        let call = local_stepfun_call(address);
+        let result = prepare_session(async { Ok(call) }, &StreamingAsrConfig::default()).await;
+        if let Some(expected) = expected {
+            let error = result.err().expect("invalid acknowledgement must not grant readiness");
+            assert!(error.message.contains(expected), "{}", error.message);
+            assert_safe_preparation_error(&error);
+        } else { drop(result.ok().expect("independent 16 kHz acknowledgement remains valid")); }
+        peer.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn refused_network_connection_keeps_native_cause_and_safe_endpoint_context() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut call = local_stepfun_call(address);
+    call.transport.realtime_endpoint = Some(format!("ws://{address}/stream?key=local-fixture-only"));
+    let error = prepare_session(async { Ok(call) }, &StreamingAsrConfig::default()).await
+        .err().expect("refused loopback port must fail before readiness");
+    assert_eq!(error.kind, InvokeErrorKind::Network);
+    let diagnostic = error.model_failure_diagnostic();
+    let detail = diagnostic.transport_detail.expect("preserve actionable native error");
+    assert!(!detail.is_empty());
+    assert!(error.message.contains(&detail));
+    assert!(detail.len() < 4000);
+    assert_eq!(diagnostic.endpoint.as_deref(), Some(format!("ws://{address}/stream").as_str()));
+    assert_safe_preparation_error(&error);
+}
+
 #[tokio::test]
 async fn preparation_deadline_includes_catalog_resolution() {
     struct ResolutionLease(Arc<std::sync::atomic::AtomicBool>);

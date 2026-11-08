@@ -17,6 +17,7 @@ use crate::{
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use nomifun_api_types::ModelTask;
+use reqwest::ResponseBuilderExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -338,15 +339,24 @@ async fn prepare_session(
 ) -> Result<(Socket, Wire), InvokeError> {
     tokio::time::timeout(OPEN_TIMEOUT, async {
         let call = resolve.await?;
-        validate_model(&call)?;
-        validate_config(config)?;
-        let wire = wire(&call.protocol);
-        let url = session_url(&call, config)?;
-        let mut socket = connect(&call, &url).await?;
-        if wire != Wire::Deepgram {
-            configure_session(&mut socket, &call, config).await?;
-        }
-        Ok((socket, wire))
+        let redactor = call.connection.auth.secret_redactor();
+        let result = async {
+            validate_model(&call)?;
+            validate_config(config)?;
+            let wire = wire(&call.protocol);
+            let url = session_url(&call, config)?;
+            let result = async {
+                let mut socket = connect(&call, &url).await?;
+                if wire != Wire::Deepgram {
+                    configure_session(&mut socket, &call, config).await?;
+                }
+                Ok((socket, wire))
+            }.await;
+            result.map_err(|error: InvokeError| error.with_request_context(
+                url.as_str(), &call.protocol, Some(call.connection.auth.scheme.diagnostic_id())))
+        }.await;
+        result.map_err(|error: InvokeError| error.with_provider_id(&call.provider_id)
+            .with_model_name(&call.model).redacted(&redactor))
     })
     .await
     .map_err(|_| {
@@ -528,27 +538,75 @@ async fn connect(call: &ResolvedTaskConfig, url: &reqwest::Url) -> Result<Socket
                 if matches!(status, 401 | 403 | 429) && index + 1 < secrets.len() {
                     continue;
                 }
-                let kind = match status {
-                    401 | 403 => InvokeErrorKind::Auth,
-                    429 => InvokeErrorKind::RateLimited,
-                    _ => InvokeErrorKind::ProviderError,
-                };
-                return Err(InvokeError::new(
-                    kind,
-                    format!("streaming ASR handshake rejected with HTTP {status}"),
-                ));
+                // Reuse the HTTP transport's bounded, credential-aware error
+                // parser rather than displaying an untrusted response body.
+                let (parts, body) = response.into_parts();
+                let mut builder = tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(parts.status).version(parts.version).url(url.clone());
+                *builder.headers_mut().expect("upstream response parts are valid") = parts.headers;
+                let mut response: reqwest::Response = builder.body(body.unwrap_or_default())
+                    .expect("upstream response parts are valid").into();
+                response.extensions_mut().insert(call.connection.auth.secret_redactor());
+                let mut error = crate::transport::error_from_response_with_timeout(
+                    response, WRITE_TIMEOUT, &call.protocol).await;
+                error.message = provider_failure_message(
+                    &format!("streaming ASR handshake rejected with HTTP {status}"), &error);
+                return Err(error);
             }
-            Ok(Err(_)) => {
-                return Err(InvokeError::new(
-                    InvokeErrorKind::Network,
-                    "streaming ASR WebSocket connection failed",
-                ));
+            Ok(Err(error)) => {
+                let kind = if matches!(&error, tokio_tungstenite::tungstenite::Error::Io(io)
+                    if io.kind() == std::io::ErrorKind::TimedOut) {
+                    InvokeErrorKind::Timeout
+                } else { InvokeErrorKind::Network };
+                // Keep the cause chain, but redact before limiting it so a
+                // reflected credential cannot straddle the display boundary.
+                let mut causes = vec![error.to_string()];
+                let mut source = std::error::Error::source(&error);
+                while let Some(cause) = source {
+                    let text = cause.to_string();
+                    if !causes.contains(&text) { causes.push(text); }
+                    source = cause.source();
+                }
+                let detail: String = call.connection.auth.secret_redactor()
+                    .redact(&causes.join(": ")).chars().filter(|c| !c.is_control()).take(1000).collect();
+                let mut error = InvokeError::new(kind,
+                    format!("streaming ASR WebSocket connection failed: {detail}"));
+                let mut diagnostic = error.model_failure_diagnostic();
+                diagnostic.transport_detail = Some(detail);
+                error.diagnostic = Some(diagnostic);
+                return Err(error);
             }
         }
     }
     Err(InvokeError::config(
         "streaming ASR connection has no usable credentials",
     ))
+}
+
+/// Provider evidence has already passed the shared bounded diagnostic parser.
+/// Never append raw JSON, headers, audio, or arbitrary acknowledgement fields.
+fn provider_failure_message(context: &str, error: &InvokeError) -> String {
+    let Some(diagnostic) = error.diagnostic.as_ref() else { return context.to_owned(); };
+    let mut details = Vec::new();
+    if let Some(code) = diagnostic.provider_code.as_deref() { details.push(format!("code={code}")); }
+    if let Some(param) = diagnostic.provider_param.as_deref() { details.push(format!("param={param}")); }
+    if let Some(detail) = diagnostic.provider_detail.as_deref() { details.push(detail.to_owned()); }
+    if details.is_empty() { context.to_owned() } else { format!("{context}: {}", details.join("; ")) }
+}
+
+fn configuration_provider_error(raw: &Value, call: &ResolvedTaskConfig) -> InvokeError {
+    let redactor = call.connection.auth.secret_redactor();
+    // Some providers use a flat error event; normalize only that explicit
+    // failure envelope for the existing shared diagnostic extractor.
+    let normalized;
+    let raw = if raw.get("error").is_none() && raw["type"] == "error" {
+        normalized = json!({"error":raw}); &normalized
+    } else { raw };
+    let mut error = InvokeError::new(InvokeErrorKind::ProviderError, "ASR session configuration rejected");
+    error.diagnostic = Some(crate::provider_diagnostic::refine_from_body(
+        error.model_failure_diagnostic(), raw, Some(&call.protocol), &redactor));
+    error.message = provider_failure_message("ASR session configuration rejected", &error);
+    error.redacted(&redactor)
 }
 
 async fn send(
@@ -614,12 +672,15 @@ async fn configure_session(
             Message::Text(update.to_string().into()),
             &CancellationToken::new(),
         )
-        .await?;
+        .await.map_err(InvokeError::config)?;
         loop {
             match socket.next().await {
                 Some(Ok(Message::Text(text))) => {
                     let raw: Value = serde_json::from_str(&text)
-                        .map_err(|_| "invalid ASR configuration acknowledgement".to_string())?;
+                        .map_err(|_| InvokeError::parse("invalid JSON in ASR configuration acknowledgement"))?;
+                    if crate::provider_diagnostic::frame_is_error("", &raw) {
+                        return Err(configuration_provider_error(&raw, call));
+                    }
                     match raw["type"].as_str() {
                         Some("session.updated")
                             if (stepfun
@@ -630,25 +691,40 @@ async fn configure_session(
                                 && raw["session"]["audio"]["input"]["turn_detection"]["type"]
                                     == "server_vad"
                             {
-                                return Err(
-                                    "StepFun did not disable server VAD for held-key recording"
-                                        .into(),
-                                );
+                                return Err(InvokeError::config(
+                                    "StepFun did not disable server VAD for held-key recording"));
                             }
-                            return Ok::<(), String>(());
+                            return Ok::<(), InvokeError>(());
                         }
                         Some("session.created") => {}
+                        Some("session.updated") => {
+                            return Err(InvokeError::config(if stepfun {
+                                "ASR session.updated is missing the required session.audio.input.format.rate=16000 acknowledgement"
+                            } else {
+                                "ASR session.updated is missing the required session.type=transcription acknowledgement"
+                            }));
+                        }
                         _ => {
-                            return Err(
-                                "ASR rejected the transcription session configuration".into()
-                            );
+                            let event = raw["type"].as_str().and_then(|event|
+                                crate::provider_diagnostic::identifier(event, &call.connection.auth.secret_redactor()))
+                                .unwrap_or_else(|| "<missing or invalid type>".into());
+                            return Err(InvokeError::config(format!(
+                                "ASR expected session.updated but received {event}")));
                         }
                     }
                 }
                 Some(Ok(Message::Ping(payload))) => {
-                    send(socket, Message::Pong(payload), &CancellationToken::new()).await?
+                    send(socket, Message::Pong(payload), &CancellationToken::new()).await
+                        .map_err(InvokeError::config)?
                 }
-                _ => return Err("ASR disconnected during session configuration".into()),
+                Some(Ok(Message::Close(frame))) => return Err(InvokeError::config(format!(
+                    "ASR disconnected during session configuration (close code {})",
+                    frame.map(|frame| u16::from(frame.code).to_string()).unwrap_or_else(|| "absent".into())))),
+                Some(Err(error)) => return Err(InvokeError::new(InvokeErrorKind::Network,
+                    format!("ASR transport failed during session configuration: {error}"))),
+                Some(Ok(_)) => return Err(InvokeError::config(
+                    "ASR received an unexpected non-text configuration acknowledgement")),
+                None => return Err(InvokeError::config("ASR disconnected during session configuration (EOF)")),
             }
         }
     };
@@ -660,7 +736,6 @@ async fn configure_session(
                 "ASR session configuration timed out",
             )
         })?
-        .map_err(InvokeError::config)
 }
 
 #[derive(Default)]

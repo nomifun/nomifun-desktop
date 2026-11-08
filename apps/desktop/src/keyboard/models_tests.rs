@@ -10,6 +10,56 @@ use nomifun_model_invoke::{
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 #[test]
+fn asr_diagnostics_preserve_typed_failure_and_http_status() {
+    for (source, status, expected, guidance) in [
+        (InvokeErrorKind::Auth, Some(401), "auth", "API 密钥"),
+        (InvokeErrorKind::Auth, Some(403), "auth", "权限"),
+        (InvokeErrorKind::RateLimited, Some(429), "rate_limited", "稍候重试"),
+        (InvokeErrorKind::QuotaExhausted, None, "quota", "余额"),
+        (InvokeErrorKind::ProviderError, Some(402), "quota", "余额"),
+        (InvokeErrorKind::Config, None, "config", "配置"),
+        (InvokeErrorKind::MissingConnection, None, "config", "连接设置"),
+        (InvokeErrorKind::Network, None, "transport", "网络"),
+        (InvokeErrorKind::Timeout, None, "timeout", "超时"),
+        (InvokeErrorKind::ProviderError, Some(503), "http", "HTTP 503"),
+        (InvokeErrorKind::ParseError, None, "protocol", "会话"),
+    ] {
+        // Deliberately misleading prose must not override the typed failure.
+        let mut error = InvokeError::new(source, "safe sanitized provider reason: socket queue timed out");
+        error.http_status = status;
+        let failure = AsrFailureDiagnostic::invocation(error);
+        assert_eq!(failure.kind, expected);
+        assert_eq!(failure.invocation_kind, Some(source));
+        assert_eq!(failure.http_status, status);
+        let before_capture = failure.user_message(false);
+        assert!(before_capture.contains("尚未开始录音") && before_capture.contains(guidance));
+        assert!(before_capture.contains("safe sanitized provider reason"));
+        let active_capture = failure.user_message(true);
+        assert!(active_capture.contains("本段未写入，已有文字已保留"));
+        assert!(!active_capture.contains("尚未开始录音"));
+    }
+}
+
+#[test]
+fn runtime_asr_diagnostics_are_case_insensitive_and_display_is_bounded() {
+    for (error, expected) in [
+        ("ASR WebSocket connection failed", "transport"),
+        ("ASR TRANSPORT failed", "transport"),
+        ("AUDIO Queue overflow", "backpressure"),
+        ("ASR TIMED OUT", "timeout"),
+        ("实时识别准备超时", "timeout"),
+    ] {
+        assert_eq!(AsrFailureDiagnostic::runtime(error).kind, expected);
+    }
+    let failure = AsrFailureDiagnostic::invocation(InvokeError::config(
+        format!("safe detail\r\n\0{}", "语".repeat(600)),
+    ));
+    assert!(failure.detail.chars().count() <= 512);
+    assert!(!failure.detail.chars().any(char::is_control));
+    assert!(failure.detail.starts_with("safe detail "));
+}
+
+#[test]
 fn selection_uses_existing_catalog_identity_and_instruction_retains_invariants() {
     let selected: KeyboardModelSelection = serde_json::from_value(
         serde_json::json!({"providerId":"exact-provider","model":"exact-model"}),
@@ -236,7 +286,9 @@ async fn platform_upload_preserves_config_and_rejects_failure_cancel_and_late_re
             .await
             .is_err()
     );
-    assert!(models.open_asr(&file, config()).await.is_err());
+    let file_as_live_error = models.open_asr(&file, config()).await.err().expect("file protocol cannot stream audio");
+    assert_eq!(file_as_live_error.kind, InvokeErrorKind::Config);
+    assert_eq!(file_as_live_error.http_status, None);
     assert_eq!(calls.load(Ordering::Acquire), 0);
     let result = models
         .transcribe_platform(&file, wave(), config(), CancellationToken::new())

@@ -184,3 +184,15 @@ UI 映射与外置状态相关 7 项测试通过（44 个断言），翻译生�
 增加仅 `apply:serve` 的服务器 upgrade socket 守卫：已有 WS/proxy 处理者继续处理；无人接管的断连只结束本连接并记录原因，意外错误保留错误码与堆栈。不添加进程级异常捕获，不改变 Host/Origin/token 检查或依赖版本。6 项测试、25 个断言和 typecheck 通过；独立 Vite 与项目原配置均在真实 RST 后继续 HTTP 200、认证 HMR 101。证据含源码哈希，位于 `C:\Users\rika0\AppData\Local\Temp\nomifun-vite-reset-c469b12374bf4d149e23091428945acb\report.json`。
 
 随后正常停止 no-watch 开发实例并退出 0，恢复普通 `bun run dev`。实际 watcher 经 `mod.rs`、原生验证例子及内容不变的专属窗口例子时间戳三次触发后端重启，三次均记录守卫接住 `ECONNRESET`，Vite 持续在线，最终 `/` 与 `/@vite/client` 均为 HTTP 200，开发主进程 PID 40920 存活并响应 API 200。完整日志为同一 K1 证据目录内 `dev-watch.log`。该结果是实际热重启证据，不以临时关闭 watcher 作为最终修复。
+
+## 真实 StepFun ASR 握手与额度拒绝（2026-11-08）
+
+用户按住实体 K4 后，旧提示仅显示“暂时无法连接语音识别服务，尚未开始录音”。实际日志在收到按住后约 150ms 报准备失败，`active_capture=false`、没有麦克风 owner；错误发生在 ASR 准备阶段，不能据此认定串口断开或录音设备失败。旧 Actor 将 typed InvokeError 转成字符串后只按关键词分类，认证、HTTP 拒绝甚至含 `WebSocket` 的网络失败都可能误标 `protocol`，并且丢弃具体原因。
+
+只读核对本次已存模型配置：普通 StepFun、官方 `/v1` 基础地址、`stepaudio-2.5-asr-stream` 与 `stepfun.asr_stream` 匹配，无自定义 endpoint 或额外供应商参数。官方当前[双向流式 ASR 文档](https://platform.stepfun.com/docs/zh/api-reference/audio/asr-stream)仍支持此模型，16k PCM 与客户端 commit 的配置符合规范；未据此猜测模型下线或改动固件。
+
+从实际开发窗口的“供应商与密钥”展开同一已存模型，执行“健康检测”。该既有入口只做相同流式握手并关闭，不打开 OS 麦克风、不上传环境音频；它会写回能力健康观测。真实请求在 177ms 后得到 `HTTP 402`，脱敏后的服务端原因为 `You exceeded your current quota, please check your plan and billing details`，健康分类 `insufficient_quota`。这证明当前 API Key 所用服务账户/项目受到额度或计费拒绝；没有读取或修改密钥、充值、切换供应商或静默改用其他可能计费的模型。远端具体余额、预算与账户状态未查询。
+
+修复保留 typed kind、HTTP 状态、已有脱敏边界内的有界供应商诊断；HTTP 402 显示中文额度/余额排查提示，失败前后仍明确未开始录音或保留已有正文。生命周期日志只记录类型、HTTP 和真实失败代次，不记录服务端正文、用户词典、声音或凭据。握手端复用统一有界错误解析与凭据脱敏，严格配置回执及原有录音准入不放宽。
+
+本次定向协议测试 `cargo test --locked --offline -p nomifun-model-invoke streaming_asr::tests --lib` 为 23/23 通过，包含 HTTP 拒绝、错误响应体上限、服务端错误与密钥回显脱敏、严格回执和网络原因。桌面 `keyboard::models::tests` 6/6 通过，覆盖 typed 分类、HTTP 402、提示边界、流式/文件协议隔离与原有模型操作；以 `cargo test --profile dev --no-default-features -p nomifun-desktop --bin nomifun-desktop keyboard::models::tests -- --test-threads=1` 执行，只运行所选测试。桌面检查日志保存在仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-asr-handshake-40d6d2c28c224521922e2dfca854790f\desktop-model-tests.log`；原始运行日志仍在前述 `dev-watch.log`。账户额度恢复后的真实语音转写、macOS/Linux 本次运行未验证，不能将模拟测试或一次额度拒绝写成真实识别成功。

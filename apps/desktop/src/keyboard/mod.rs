@@ -12,7 +12,7 @@ mod update_pause;
 use key_hold::KeyHold;
 use microphone_check::{MicrophoneCheck, MicrophoneTestState};
 use models::{
-    DesktopModels, KeyboardModelSelection, StreamingAsrConfig, StreamingAsrEvent,
+    AsrFailureDiagnostic, DesktopModels, KeyboardModelSelection, StreamingAsrConfig, StreamingAsrEvent,
     StreamingAsrInput, StreamingAsrSession,
 };
 use nomifun_keyboard::{
@@ -21,6 +21,7 @@ use nomifun_keyboard::{
     },
     service::{Commands, Control, DeviceStatus, Event, Transport},
 };
+use nomifun_model_invoke::InvokeError;
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -159,7 +160,7 @@ enum Message {
         reply: oneshot::Sender<Result<KeyboardState, String>>,
     },
     Settings(Settings, oneshot::Sender<Result<KeyboardState, String>>),
-    AsrReady(u64, Result<StreamingAsrSession, String>),
+    AsrReady(u64, Result<StreamingAsrSession, AsrOpenFailure>),
     Asr(u64, StreamingAsrEvent),
     Shutdown(oneshot::Sender<Result<(), String>>),
     PrepareUpdate(oneshot::Sender<Result<(), String>>),
@@ -173,6 +174,10 @@ enum Message {
     PlatformAsrFinished(Identity, Result<String, String>),
     Candidate(Identity, String),
     Polished(Identity, Result<String, String>),
+}
+enum AsrOpenFailure {
+    Invocation(InvokeError),
+    Preparation(String),
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InputSource { #[default] Ui, Hardware, Shortcut }
@@ -1238,7 +1243,7 @@ impl Actor {
                             if let Ok(session) = result {
                                 session.cancel();
                             }
-                            Err("实时识别准备超过20秒，未打开麦克风，请重试".into())
+                            Err(AsrOpenFailure::Preparation("实时识别准备超过20秒，未打开麦克风，请重试".into()))
                         };
                         self.opening = false;
                         self.opening_abort = None;
@@ -1297,7 +1302,10 @@ impl Actor {
                                     }
                                 }
                             }
-                            Err(error) => self.asr_failed(error, false),
+                            Err(error) => self.asr_failure(match error {
+                                AsrOpenFailure::Invocation(error) => AsrFailureDiagnostic::invocation(error),
+                                AsrOpenFailure::Preparation(message) => AsrFailureDiagnostic::runtime(&message),
+                            }, false),
                         }
                     } else if let Ok(session) = result {
                         session.cancel();
@@ -1636,10 +1644,14 @@ impl Actor {
             async move {
                 tracing::info!(target: "nomifun_keyboard", stage = "asr_task_polled",
                     asr_generation = generation, "capture lifecycle");
-                models.open_asr(&selection(&model), config).await
+                Ok(models.open_asr(&selection(&model), config).await)
             },
             self.opening_since.unwrap() + Duration::from_secs(20),
             move |result| {
+                let result = match result {
+                    Ok(result) => result.map_err(AsrOpenFailure::Invocation),
+                    Err(message) => Err(AsrOpenFailure::Preparation(message)),
+                };
                 tracing::info!(target: "nomifun_keyboard", stage = "asr_task_finished",
                     asr_generation = generation, success = result.is_ok(), "capture lifecycle");
                 let _ = ready_tx.send(Message::AsrReady(generation, result));
@@ -1672,24 +1684,16 @@ impl Actor {
         }
     }
     fn asr_failed(&mut self, error: String, requested: bool) {
+        self.asr_failure(AsrFailureDiagnostic::runtime(&error), requested);
+    }
+    fn asr_failure(&mut self, failure: AsrFailureDiagnostic, requested: bool) {
+        let failed_generation = self.asr_generation;
         let active = self.asr_document.is_some();
         let requested_source = self
             .pending_start
             .as_ref()
             .map(|pending| pending.source);
         let requested = requested || self.pending_start.is_some() || active;
-        let timed_out = error.to_ascii_lowercase().contains("timed out")
-            || error.contains("超时")
-            || error.contains("超过20秒");
-        let kind = if timed_out {
-            "timeout"
-        } else if error.contains("queue") || error.contains("backlog") {
-            "backpressure"
-        } else if error.contains("transport") || error.contains("socket") {
-            "transport"
-        } else {
-            "protocol"
-        };
         if active {
             self.abort(false);
         } else {
@@ -1697,32 +1701,17 @@ impl Actor {
         }
         self.retry_at = Instant::now() + Duration::from_secs(15);
         tracing::warn!(target: "nomifun_keyboard", stage = "asr_failure",
-            asr_generation = self.asr_generation, user_requested = requested,
-            active_capture = active, timed_out, kind, "recognition lifecycle");
+            asr_generation = failed_generation, user_requested = requested,
+            active_capture = active, timed_out = failure.kind == "timeout", kind = failure.kind,
+            invoke_kind = ?failure.invocation_kind, http_status = failure.http_status,
+            "recognition lifecycle");
         // A retired connection must not cancel editing/polishing or replace a
         // real operation error after its capture request has been revoked.
         if !requested {
             return;
         }
         if let Some(source) = requested_source { self.consume_source(source); }
-        let message = if active && kind == "backpressure" {
-            "语音识别处理暂时跟不上，本段未写入，已有文字已保留。请稍候重试。"
-        } else { match (active, timed_out) {
-            (false, true) => {
-                "连接语音识别服务超时，尚未开始录音。请检查网络和所选 ASR 模型设置后重试。"
-            }
-            (false, false) => {
-                "暂时无法连接语音识别服务，尚未开始录音。请检查网络和所选 ASR 模型设置后重试。"
-            }
-            (true, true) => {
-                "语音识别超时，本段未写入，已有文字已保留。请检查网络和所选 ASR 模型设置后重试。"
-            }
-            (true, false) => {
-                "语音识别中断，本段未写入，已有文字已保留。请检查网络和所选 ASR 模型设置后重试。"
-            }
-        }}
-        .to_owned();
-        self.state.document.error = Some(message);
+        self.state.document.error = Some(failure.user_message(active));
     }
     fn capture_failed(&mut self, id: Identity, failure: audio::CaptureStartFailure) {
         if self.microphone_check.as_ref().is_some_and(|check| check.owner == id) {

@@ -6,7 +6,7 @@ pub use nomifun_model_invoke::streaming_asr::{
     StreamingAsrConfig, StreamingAsrEvent, StreamingAsrInput, StreamingAsrSession,
 };
 use nomifun_model_invoke::{
-    AsrRequest, InputAsset, ModelInvokeService, ModelRef, ProtocolExecutorKind, TaskOutcome,
+    AsrRequest, InputAsset, InvokeError, InvokeErrorKind, ModelInvokeService, ModelRef, ProtocolExecutorKind, TaskOutcome,
     TaskRequest, TaskResult, TextTransformRequest, protocol_task_descriptor,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,67 @@ const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const POLISH_TIMEOUT: Duration = Duration::from_secs(120);
 const PLATFORM_ASR_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PCM_SAMPLES: usize = 16_000 * 600;
+
+/// Ephemeral presentation of an invocation-layer failure, never configuration
+/// or a second error ledger. Invocation messages have already crossed its
+/// credential-redaction boundary; do not format the error's Debug payload.
+pub(super) struct AsrFailureDiagnostic {
+    pub kind: &'static str,
+    pub invocation_kind: Option<InvokeErrorKind>,
+    pub http_status: Option<u16>,
+    pub detail: String,
+}
+impl AsrFailureDiagnostic {
+    pub fn invocation(error: InvokeError) -> Self {
+        let kind = match (error.kind, error.http_status) {
+            (InvokeErrorKind::Auth, _) | (_, Some(401 | 403)) => "auth",
+            (InvokeErrorKind::RateLimited, _) | (_, Some(429)) => "rate_limited",
+            (InvokeErrorKind::QuotaExhausted, _) | (_, Some(402)) => "quota",
+            (InvokeErrorKind::Timeout, _) => "timeout",
+            (InvokeErrorKind::Network, _) => "transport",
+            (InvokeErrorKind::Config | InvokeErrorKind::UnsupportedTask
+                | InvokeErrorKind::NoAdapter | InvokeErrorKind::MissingConnection, _) => "config",
+            (_, Some(_)) => "http",
+            (InvokeErrorKind::InvalidParams | InvokeErrorKind::NonApiResponse, _) => "config",
+            _ => "protocol",
+        };
+        Self { kind, invocation_kind: Some(error.kind), http_status: error.http_status,
+            detail: bounded_asr_detail(&error.message) }
+    }
+    pub fn runtime(error: &str) -> Self {
+        let lower = error.to_ascii_lowercase();
+        let kind = if lower.contains("timed out") || error.contains("超时") || error.contains("超过20秒") {
+            "timeout"
+        } else if lower.contains("queue") || lower.contains("backlog") {
+            "backpressure"
+        } else if lower.contains("transport") || lower.contains("socket") {
+            "transport"
+        } else { "protocol" };
+        Self { kind, invocation_kind: None, http_status: None, detail: bounded_asr_detail(error) }
+    }
+    pub fn user_message(&self, active: bool) -> String {
+        let boundary = if active {
+            "语音识别中断，本段未写入，已有文字已保留。"
+        } else { "无法开始语音识别，尚未开始录音。" };
+        let guidance = match self.kind {
+            "auth" => "认证或访问权限被拒绝，请检查 API 密钥及所选模型的权限。".to_owned(),
+            "rate_limited" => "语音识别服务请求过于频繁，请稍候重试。".to_owned(),
+            "quota" => "语音识别服务额度不足，请检查账户余额及配额。".to_owned(),
+            "config" => "ASR 配置无效，请检查所选模型、协议和连接设置。".to_owned(),
+            "transport" => "无法连接语音识别服务，请检查网络、代理和服务地址。".to_owned(),
+            "timeout" => "连接或识别超时，请检查网络和 ASR 模型设置后重试。".to_owned(),
+            "backpressure" => "语音识别处理暂时跟不上，请稍候重试。".to_owned(),
+            "http" => format!("语音识别服务拒绝请求（HTTP {}），请检查服务状态及模型设置。", self.http_status.unwrap_or_default()),
+            _ => "语音识别服务未能接受或完成本次会话，请检查模型设置后重试。".to_owned(),
+        };
+        if self.detail.is_empty() { format!("{boundary}{guidance}") }
+        else { format!("{boundary}{guidance} 详情：{}", self.detail) }
+    }
+}
+fn bounded_asr_detail(detail: &str) -> String {
+    detail.split_whitespace().collect::<Vec<_>>().join(" ")
+        .chars().filter(|character| !character.is_control()).take(512).collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -115,11 +176,10 @@ impl DesktopModels {
         &self,
         selection: &KeyboardModelSelection,
         config: StreamingAsrConfig,
-    ) -> Result<StreamingAsrSession, String> {
+    ) -> Result<StreamingAsrSession, InvokeError> {
         self.invoke
             .open_streaming_asr(&selection.model_ref(), config)
             .await
-            .map_err(|e| e.to_string())
     }
 
     /// Ordinary platform ASR: upload one complete in-memory WAV after native
