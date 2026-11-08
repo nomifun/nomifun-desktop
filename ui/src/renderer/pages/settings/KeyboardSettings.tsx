@@ -1,5 +1,5 @@
 import { Alert, Button, Input, Select, Spin } from '@arco-design/web-react';
-import { useEffect, useMemo, useRef, useState, type CompositionEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type CompositionEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import useSWR from 'swr';
@@ -10,11 +10,18 @@ import { useKeyboardSettingsAutosave } from './useKeyboardSettingsAutosave';
 import { useKeyboardMicrophoneTest } from './useKeyboardMicrophoneTest';
 import { useKeyboard } from '@/renderer/hooks/keyboard/useKeyboard';
 import PageHeader from '@/renderer/components/layout/PageHeader';
-import { VisualPanel, VisualRow, VisualStatus, VisualSwitch } from './components/CodeVisualPrimitives';
+import { VisualChoice, VisualPanel, VisualRow, VisualStatus, VisualSwitch, VisualTabs } from './components/CodeVisualPrimitives';
 import SettingsPageWrapper from './components/SettingsPageWrapper';
 import './keyboard-settings.css';
 
 type CloudTestBaseline = { revision: number; text: string; selection: KeyboardSelection | null };
+type SettingsTab = 'voice' | 'input' | 'appearance' | 'diagnostics';
+
+function SettingField({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+  return <div className='voice-field'><div className='voice-field__label'>{label}</div>{children}
+    {hint && <div className='voice-field__hint'>{hint}</div>}
+  </div>;
+}
 type CloudTestRequest = {
   sequence: number;
   documentId: string | null;
@@ -48,19 +55,24 @@ function ShortcutBindings({ shortcuts, disabled, onApply }: {
 }) {
   const { t } = useTranslation();
   const [edited, setEdited] = useState(shortcuts);
+  const bindingId = useId();
   const saved = JSON.stringify(shortcuts);
   useEffect(() => { setEdited(shortcuts); }, [saved]);
   return <>
-    {(['toggle', 'dictate', 'beautify', 'cancel'] as const).map(action =>
-      <VisualRow key={action} label={t(`settings.keyboard.shortcut_${action}`)} description={t(`settings.keyboard.shortcutHint_${action}`)}>
-        <Input className='keyboard-shortcut-input' aria-label={t(`settings.keyboard.shortcut_${action}`)} value={edited[action]}
+    <div className='voice-shortcut-grid'>{(['toggle', 'dictate', 'beautify', 'cancel'] as const).map(action =>
+      <div key={action} className='voice-shortcut-field'>
+        <label htmlFor={bindingId + '-' + action}>{t(`settings.keyboard.shortcut_${action}`)}</label>
+        <Input id={bindingId + '-' + action} aria-describedby={bindingId + '-' + action + '-hint'} className='keyboard-shortcut-input' aria-label={t(`settings.keyboard.shortcut_${action}`)} value={edited[action]}
           disabled={disabled} onChange={value => setEdited(current => ({ ...current, [action]: value }))}
           placeholder={t('settings.keyboard.shortcutEmpty')} spellCheck={false} />
-      </VisualRow>)}
+        <span id={bindingId + '-' + action + '-hint'}>{t(`settings.keyboard.shortcutHint_${action}`)}</span>
+      </div>)}</div>
     <div className='keyboard-form-actions'>
       <Button disabled={disabled || JSON.stringify(edited) === saved} onClick={() => onApply(edited)}>{t('settings.keyboard.applyShortcuts')}</Button>
     </div>
-    <p className='cv-note'>{t('settings.keyboard.shortcutFormat')}</p>
+    <details className='voice-disclosure voice-shortcut-guide'><summary>{t('settings.keyboard.shortcutGuide')}</summary>
+      <p>{t('settings.keyboard.shortcutFormat')}</p>
+    </details>
   </>;
 }
 
@@ -72,7 +84,7 @@ function ExternalKeyboardPanel({ state, draft, onChange }: {
   const stopping = status === 'stopping';
   const showDevice = draft.externalKeyboardEnabled || status !== 'disabled';
   const detail = state.externalKeyboard.detail;
-  return <VisualPanel title={t('settings.keyboard.externalTitle')} description={t('settings.keyboard.externalHint')} className='keyboard-section-target'>
+  return <VisualPanel title={t('settings.keyboard.externalTitle')} description={t('settings.keyboard.externalHint')}>
     <VisualRow label={t('settings.keyboard.externalEnabled')} description={t('settings.keyboard.externalEnabledHint')}>
       <VisualSwitch label={t('settings.keyboard.externalEnabled')} checked={draft.externalKeyboardEnabled} disabled={stopping}
         onChange={externalKeyboardEnabled => onChange({ externalKeyboardEnabled })} />
@@ -84,25 +96,37 @@ function ExternalKeyboardPanel({ state, draft, onChange }: {
     </VisualRow>
     {status === 'error' && detail && <Alert type='warning' content={detail} />}
     {showDevice && <>
-      {state.device.connected && <>
-        <VisualRow label={t('settings.keyboard.externalDevice')} description={[state.device.id, state.device.port].filter(Boolean).join(' · ')} />
-        {state.device.firmware && <VisualRow label={t('settings.keyboard.externalFirmware')} description={state.device.firmware} />}
-      </>}
       {state.device.detail && state.device.detail !== detail && <p className='cv-note'>{state.device.detail}</p>}
-      <VisualRow label={t('settings.keyboard.externalK1')} description={t('settings.keyboard.externalK1Hint')} />
-      {(['k2Enabled', 'k3Enabled', 'k4Enabled'] as const).map(key => <VisualRow key={key} label={t(`settings.keyboard.${key}`)}
-        description={key === 'k4Enabled' ? t('settings.keyboard.externalK4Hint') : undefined}
-        disabled={!draft.externalKeyboardEnabled || stopping}>
-        <VisualSwitch label={t(`settings.keyboard.${key}`)} checked={draft[key]} disabled={!draft.externalKeyboardEnabled || stopping}
-          onChange={value => onChange({ [key]: value })} />
-      </VisualRow>)}
+      <div className='voice-hardware-keys' role='group' aria-label={t('settings.keyboard.externalKeys')}>
+        <VisualRow label={t('settings.keyboard.externalK1')} description={t('settings.keyboard.externalK1Hint')} />
+        {(['k2Enabled', 'k3Enabled', 'k4Enabled'] as const).map(key => <VisualRow key={key} label={t(`settings.keyboard.${key}`)}
+          description={key === 'k4Enabled' ? t('settings.keyboard.externalK4Hint') : undefined}
+          disabled={!draft.externalKeyboardEnabled || stopping}>
+          <VisualSwitch label={t(`settings.keyboard.${key}`)} checked={draft[key]} disabled={!draft.externalKeyboardEnabled || stopping}
+            onChange={value => onChange({ [key]: value })} />
+        </VisualRow>)}
+      </div>
       {draft.externalKeyboardEnabled && !draft.k4Enabled && <p className='cv-note'>{t('settings.keyboard.externalDictationDisabled')}</p>}
+      {state.device.connected && <details className='voice-disclosure'>
+        <summary>{t('settings.keyboard.externalDetails')}</summary>
+        <dl className='voice-device-details'>
+          <dt>{t('settings.keyboard.externalDevice')}</dt><dd>{[state.device.id, state.device.port].filter(Boolean).join(' · ')}</dd>
+          {state.device.firmware && <><dt>{t('settings.keyboard.externalFirmware')}</dt><dd>{state.device.firmware}</dd></>}
+        </dl>
+      </details>}
     </>}
   </VisualPanel>;
 }
 
 export default function KeyboardSettings() {
   const { t } = useTranslation();
+  const tabsId = useId();
+  const [activeTab, setActiveTab] = useState<SettingsTab>('voice');
+  const navigationRef = useRef<HTMLDivElement>(null);
+  const selectTab = (tab: SettingsTab) => {
+    setActiveTab(tab);
+    navigationRef.current?.closest<HTMLElement>('.settings-page-wrapper')?.scrollTo?.({ top: 0 });
+  };
   const native = useKeyboard();
   const { data: catalog, error: catalogError, isLoading: catalogLoading, mutate: refreshCatalog } = useSWR(
     native.available ? 'keyboard-model-catalog' : null, keyboard.getCatalog,
@@ -117,11 +141,6 @@ export default function KeyboardSettings() {
   const state = useMemo(() => nativeState && autosave.saved ? { ...nativeState, settings: autosave.saved } : nativeState, [nativeState, autosave.saved]);
   const permissions = useSystemPermissions(native.available, 'keyboard-settings');
   const permission = permissions.status?.permissions.find(entry => entry.kind === 'microphone');
-  const microphoneRef = useRef<HTMLDivElement>(null);
-  const modelsRef = useRef<HTMLDivElement>(null);
-  const shortcutsRef = useRef<HTMLDivElement>(null);
-  const cloudRef = useRef<HTMLDivElement>(null);
-  const visit = (target: { current: HTMLDivElement | null }) => { target.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }); target.current?.focus({ preventScroll: true }); };
   const { data: audioDevices, error: audioDevicesError, isValidating: audioDevicesLoading, mutate: refreshAudioDevices } = useSWR(
     native.available ? 'keyboard-audio-devices' : null, keyboard.getAudioDevices,
     { revalidateOnFocus: false, shouldRetryOnError: false }
@@ -230,178 +249,240 @@ export default function KeyboardSettings() {
     : local.result.state === 'stopping' ? 'localStopping' : 'localUnverified';
   const blockerText = (reason: string) => t(`settings.keyboard.block_${reason}` as 'settings.keyboard.block_busy');
 
-  return <SettingsPageWrapper>
-    <PageHeader title={t('settings.keyboard.title')} actions={<Button size='small' loading={native.busy}
-      onClick={() => { void native.refresh(); void refreshCatalog(); void refreshAudioDevices(); void permissions.refresh(); }} disabled={!native.available}>{t('settings.keyboard.refresh')}</Button>} />
-    <div className='cv-stack'>
-      {!native.available && <Alert type='info' content={t('settings.keyboard.desktopOnly')} />}
-      {native.error && <Alert type='error' content={native.error} />}
-      {native.available && !state && !native.error && <div className='keyboard-loading' role='status'><Spin />{t('settings.keyboard.loading')}</div>}
-      {state && draft && readiness && <>
-        <section role='status' aria-live='polite' aria-label={t('settings.keyboard.saveStatus')} className='keyboard-save-status'>
-          <p>{t(autosave.status === 'failed' ? 'settings.keyboard.autosaveFailed' : autosave.deferred ? 'settings.keyboard.autosaveDeferred'
-            : autosave.status === 'saving' ? 'settings.keyboard.autosaveSaving' : autosave.status === 'pending' ? 'settings.keyboard.autosavePending'
-            : autosave.status === 'saved' ? 'settings.keyboard.autosaveSaved' : 'settings.keyboard.autosaveIdle')}</p>
-          {autosave.error && <p>{autosave.error}</p>}
-          {autosave.status === 'failed' && <Button size='small' onClick={() => { void autosave.retry(); }}>{t('settings.keyboard.retrySave')}</Button>}
-        </section>
-        {native.busy && <p className='cv-note' role='status'>{t('settings.keyboard.block_busy')}</p>}
-        <VisualPanel title={t('settings.keyboard.setupTitle')} description={t('settings.keyboard.setupHint')}>
-          <ol className='keyboard-setup-list'>
-            <li><VisualRow label={t('settings.keyboard.setupShortcuts')} description={t(readiness.shortcutsReady ? 'settings.keyboard.shortcutsReady' : 'settings.keyboard.shortcutsPending')}>
-              <Button size='small' onClick={() => visit(shortcutsRef)}>{t('settings.keyboard.checkShortcuts')}</Button>
-            </VisualRow></li>
-            <li><VisualRow label={t('settings.keyboard.setupMicrophone')} description={t(readiness.permissionBlocked ? 'settings.keyboard.block_permission' : !readiness.deviceAvailable ? 'settings.keyboard.block_device' : localVerified ? 'settings.keyboard.localPassed' : 'settings.keyboard.localUnverified')}>
-              <Button size='small' onClick={() => visit(microphoneRef)}>{t('settings.keyboard.checkMicrophone')}</Button>
-            </VisualRow></li>
-            <li><VisualRow label={t('settings.keyboard.setupModel')} description={t(readiness.savedModelAvailable ? 'settings.keyboard.modelReady' : 'settings.keyboard.block_model')}>
-              <Button size='small' onClick={() => visit(modelsRef)}>{t('settings.keyboard.checkModels')}</Button>
-            </VisualRow></li>
-            <li><VisualRow label={t('settings.keyboard.setupCloud')} description={t(cloudResult.state === 'completed' ? 'settings.keyboard.cloudPassed' : 'settings.keyboard.cloudUnverified')}>
-              <Button size='small' onClick={() => visit(cloudRef)}>{t('settings.keyboard.checkCloud')}</Button>
-            </VisualRow></li>
-          </ol>
-        </VisualPanel>
-        {state.error && <VisualPanel title={t('settings.keyboard.hardwareErrorTitle')}>
-          <Alert type='warning' content={state.error} />
-        </VisualPanel>}
-        <div ref={shortcutsRef} tabIndex={-1} className='keyboard-section-target'>
-        <VisualPanel title={t('settings.keyboard.keysTitle')} description={t('settings.keyboard.keysHint')}>
-          <VisualRow label={t('settings.keyboard.enabled')} description={t('settings.keyboard.enabledHint')}>
-            <VisualSwitch label={t('settings.keyboard.enabled')} checked={draft.enabled} onChange={(value) => change('enabled', value)} />
-          </VisualRow>
-          <ShortcutBindings shortcuts={draft.shortcuts} disabled={native.busy || recognitionBusy}
-            onApply={shortcuts => change('shortcuts', shortcuts)} />
-          <VisualRow label={t('settings.keyboard.runtimeStatus')} description={state.shortcutState?.detail}>
-            <VisualStatus tone={state.shortcutState?.registered ? 'success' : 'warning'}>{t(state.shortcutState?.registered ? 'settings.keyboard.ready' : 'settings.keyboard.stopped')}</VisualStatus>
-          </VisualRow>
-          <p className='cv-note'>{t('settings.keyboard.disableHint')}</p>
-        </VisualPanel>
-        </div>
-        <div ref={microphoneRef} tabIndex={-1} className='keyboard-section-target'>
-        <VisualPanel title={t('settings.keyboard.microphoneTitle')} description={t('settings.keyboard.microphoneHint')}
-          action={<Button size='small' loading={audioDevicesLoading} onClick={() => void refreshAudioDevices()}>{t('settings.keyboard.refreshDevices')}</Button>}>
-          {audioDevicesError && <Alert type='error' content={String(audioDevicesError)} />}
-          <VisualRow label={t('settings.keyboard.permissionTitle')} description={t(`settings.keyboard.permission_${permission?.state ?? 'unknown'}`)}>
-            <div className='keyboard-inline-actions'>
-              {permission?.can_request && <Button size='small' disabled={permissions.loading} onClick={() => void permissions.request('microphone')}>{t('settings.keyboard.requestMicrophone')}</Button>}
-              {permission?.can_open_settings && <Button size='small' disabled={permissions.loading} onClick={() => void permissions.openSettings('microphone')}>{t('settings.keyboard.openMicrophoneSettings')}</Button>}
-            </div>
-          </VisualRow>
-          {permissions.loading && <p className='cv-note' role='status'>{t('settings.keyboard.permissionLoading')}</p>}
-          {permissions.error && <Alert type='warning' content={permissions.error} />}
-          {audioDevicesLoading && <p className='cv-note'>{t('settings.keyboard.inputsLoading')}</p>}
-          {recognitionBusy && <p className='cv-note'>{t('settings.keyboard.recognitionEditingBusy')}</p>}
-          <VisualRow label={t('settings.keyboard.audioDevice')}>
-            <Select className='keyboard-model-select' aria-label={t('settings.keyboard.audioDevice')} value={draft.audioDeviceId ?? ''}
-              disabled={recognitionBusy || audioDevicesLoading} onChange={(value: string) => change('audioDeviceId', value || null)}>
-              <Select.Option value=''>{t('settings.keyboard.systemDefault')}</Select.Option>
-              {draft.audioDeviceId && !audioDevices?.some((device) => device.id === draft.audioDeviceId) &&
-                <Select.Option value={draft.audioDeviceId} disabled>{t('settings.keyboard.unavailableAudioDevice')}</Select.Option>}
-              {(audioDevices ?? []).map((device) => <Select.Option key={device.id} value={device.id}>
-                {device.label}{device.isDefault ? ` · ${t('settings.keyboard.defaultDevice')}` : ''}
-              </Select.Option>)}
-            </Select>
-          </VisualRow>
-          <VisualRow label={t('settings.keyboard.microphoneState')} description={state.audioState.detail}>
-            <VisualStatus tone={state.audioState.state === 'error' ? 'danger' : state.audioState.state === 'stopped' ? 'neutral' : 'info'}>
-              {t(`settings.keyboard.audio_${state.audioState.state}`)}
-            </VisualStatus>
-          </VisualRow>
-          <p className='cv-note'>{t('settings.keyboard.microphonePermission')}</p>
-          <section className='keyboard-test-section' aria-label={t('settings.keyboard.localTitle')}>
-            <h3>{t('settings.keyboard.localTitle')}</h3>
-            <p className='cv-note'>{t('settings.keyboard.localHint')}</p>
-            <div className='keyboard-form-actions'>
-              <Button disabled={localBlocked.length > 0} onClick={() => void local.start()}>{t('settings.keyboard.localStart')}</Button>
-              <Button disabled={!local.active || local.result.state === 'stopping'} onClick={() => void local.stop()}>{t('settings.keyboard.localStop')}</Button>
-            </div>
-            {localBlocked.length > 0 && <ul className='keyboard-blockers'>{localBlocked.map(reason => <li key={reason}>{blockerText(reason)}</li>)}</ul>}
-            {!local.active && <p className='cv-note'>{t('settings.keyboard.localStopIdle')}</p>}
-            <div role='status' aria-live='polite'><p>{t(`settings.keyboard.${localMessage}`)}</p>
-              {local.result.detail && <p>{local.result.detail}</p>}
-              {local.result.callbackObserved && <p>{t('settings.keyboard.localCallback')}</p>}
-            </div>
-            {local.result.id && <div className='keyboard-meter'>
-              <meter aria-label={t('settings.keyboard.localLevel')} min={0} max={1} value={Math.min(1, Math.max(0, local.result.peak))} />
-              <span>{t('settings.keyboard.localStats', { seconds: (local.result.elapsedMs / 1000).toFixed(1), samples: local.result.samples })}</span>
-            </div>}
-          </section>
-        </VisualPanel>
-        </div>
-        <div ref={modelsRef} tabIndex={-1} className='keyboard-section-target'>
-        <VisualPanel title={t('settings.keyboard.modelsTitle')} description={t('settings.keyboard.modelsHint')}
-          action={<Link to='/models'>{t('settings.keyboard.manageModels')}</Link>}>
-          {catalogError && <Alert type='error' content={String(catalogError)} />}
-          {recognitionBusy && <p className='cv-note'>{t('settings.keyboard.recognitionEditingBusy')}</p>}
-          {(catalogLoading || !catalog) && <p className='cv-note'>{t('settings.keyboard.catalogLoading')}</p>}
-          {readiness.modelCatalogueEmpty && <Alert type='info' content={t(asrMode === 'platform' ? 'settings.keyboard.emptyPlatform' : 'settings.keyboard.emptyStreaming')} />}
-          {readiness.platformAlternative && <p className='cv-note'>{t('settings.keyboard.platformAlternative', { mode: t('settings.keyboard.asrModePlatform') })}</p>}
-          <VisualRow label={t('settings.keyboard.asrMode')} description={t('settings.keyboard.asrModeHint')}>
-            <Select className='keyboard-model-select' aria-label={t('settings.keyboard.asrMode')} value={asrMode}
-              disabled={recognitionBusy || catalogLoading || !catalog} onChange={changeAsrMode}>
-              <Select.Option value='streaming'>{t('settings.keyboard.asrModeStreaming')}</Select.Option>
-              <Select.Option value='platform'>{t('settings.keyboard.asrModePlatform')}</Select.Option>
-            </Select>
-          </VisualRow>
-          <VisualRow label={t('settings.keyboard.asrModel')} description={t(asrMode === 'platform' ? 'settings.keyboard.asrHintPlatform' : 'settings.keyboard.asrHint')}>
-            <ModelSelect models={asrModels} value={draft.asrModel} label={t('settings.keyboard.asrModel')}
-              disabled={recognitionBusy || catalogLoading || !catalog} onChange={(value) => change('asrModel', value)} />
-          </VisualRow>
-          <VisualRow label={t('settings.keyboard.language')} description={t('settings.keyboard.languageHint')}>
-            <Input aria-label={t('settings.keyboard.language')} value={draft.language} disabled={recognitionBusy} {...textEvents('language')} onChange={(value) => change('language', value, 'debounced')} className='keyboard-short-input' />
-          </VisualRow>
-          <label className='keyboard-field'><span>{t('settings.keyboard.dictionary')}</span>
-            <Input.TextArea value={dictionaryEditing ?? draft.dictionary.join('\n')} disabled={recognitionBusy} {...textEvents('dictionary')}
-              onFocus={() => setDictionaryEditing(draft.dictionary.join('\n'))}
-              onChange={(value) => { setDictionaryEditing(value); change('dictionary', value.split('\n'), 'debounced'); }}
-              autoSize={{ minRows: 3, maxRows: 7 }} aria-label={t('settings.keyboard.dictionary')} placeholder={t('settings.keyboard.dictionaryHint')} />
-          </label>
-          <VisualRow label={t('settings.keyboard.textModel')}>
-            <ModelSelect models={catalog?.text ?? []} value={draft.textModel} label={t('settings.keyboard.textModel')}
-              disabled={catalogLoading || !catalog} onChange={(value) => change('textModel', value)} />
-          </VisualRow>
-          <label className='keyboard-field'><span>{t('settings.keyboard.instruction')}</span>
-            <Input.TextArea value={draft.beautifyInstruction} {...textEvents('beautifyInstruction')} onChange={(value) => change('beautifyInstruction', value, 'debounced')}
-              autoSize={{ minRows: 3, maxRows: 8 }} aria-label={t('settings.keyboard.instruction')} />
-            <small>{t('settings.keyboard.instructionHint')}</small>
-          </label>
-          <p className='cv-note'>{t('settings.keyboard.textModelOptional')}</p>
-          <section ref={cloudRef} tabIndex={-1} className='keyboard-test-section keyboard-section-target' aria-label={t('settings.keyboard.cloudTitle')}>
-            <h3>{t('settings.keyboard.cloudTitle')}</h3>
-            <p className='cv-note'>{t(asrMode === 'platform' ? 'settings.keyboard.testHintPlatform' : 'settings.keyboard.testHint')}</p>
-            <div className='keyboard-form-actions'>
-              <Button disabled={cloudBlocked.length > 0} onClick={() => void startTest()}>{t('settings.keyboard.testStart')}</Button>
-              <Button disabled={!state.capturePreparing && state.phase !== 'recording' && !['starting', 'capturing'].includes(state.audioState.state)} onClick={() => void native.action({ action: 'test_stop', documentId: state.documentId, revision: state.revision })}>{t('settings.keyboard.testStop')}</Button>
-            </div>
-            {cloudBlocked.length > 0 && <ul className='keyboard-blockers'>{cloudBlocked.map(reason => <li key={reason}>{blockerText(reason)}</li>)}</ul>}
-            {!captureOccupied && <p className='cv-note'>{t('settings.keyboard.cloudStopIdle')}</p>}
-            <div role='status' aria-live='polite'>
-              <p>{t(cloudResult.state === 'completed' ? 'settings.keyboard.cloudPassed' : cloudResult.state === 'running' ? 'settings.keyboard.cloudRunning' : cloudResult.state === 'failed' ? 'settings.keyboard.cloudFailed' : cloudResult.state === 'cancelled' ? 'settings.keyboard.cloudCancelled' : 'settings.keyboard.cloudUnverified')}</p>
-              {cloudResult.detail && <p>{cloudResult.detail}</p>}
-            </div>
-          </section>
-        </VisualPanel>
-        </div>
-        <VisualPanel title={t('settings.keyboard.windowTitle')}>
-          <VisualRow label={t('settings.keyboard.subtitleFontSize')} description={t('settings.keyboard.subtitleFontSizeHint')}>
-            <Select className='keyboard-font-select' aria-label={t('settings.keyboard.subtitleFontSize')} value={draft.subtitleFontSize}
-              onChange={(value: number) => change('subtitleFontSize', value)}>
-              {Array.from({ length: 21 }, (_, index) => index + 12).map(size => <Select.Option key={size} value={size}>{size}px</Select.Option>)}
-            </Select>
-          </VisualRow>
-          <VisualRow label={t('settings.keyboard.alwaysOnTop')}>
-            <VisualSwitch label={t('settings.keyboard.alwaysOnTop')} checked={draft.alwaysOnTop} onChange={(value) => change('alwaysOnTop', value)} />
-          </VisualRow>
-          <div className='keyboard-form-actions'>
-            <Button disabled={native.busy} onClick={() => void native.action({ action: 'open' })}>{t('settings.keyboard.open')}</Button>
-            <Button disabled={native.busy} onClick={() => void native.action({ action: 'reset_position' })}>{t('settings.keyboard.resetPosition')}</Button>
+  const saveMessage = t(autosave.status === 'failed' ? 'settings.keyboard.autosaveFailed' : autosave.deferred ? 'settings.keyboard.autosaveDeferred'
+    : autosave.status === 'saving' ? 'settings.keyboard.autosaveSaving' : autosave.status === 'pending' ? 'settings.keyboard.autosavePending'
+    : autosave.status === 'saved' ? 'settings.keyboard.autosaveSaved' : 'settings.keyboard.saveLabel');
+  const localStatusText = t(('settings.keyboard.' + localMessage) as 'settings.keyboard.localUnverified');
+  const permissionDescription = t(('settings.keyboard.permission_' + (permission?.state ?? 'unknown')) as 'settings.keyboard.permission_unknown');
+  const audioStatusText = t(('settings.keyboard.audio_' + (state?.audioState.state ?? 'stopped')) as 'settings.keyboard.audio_stopped');
+  const cloudActive = cloudResult.state === 'running' && !!test.current;
+  const cloudStoppable = !!state && (state.capturePreparing || state.phase === 'recording' || ['starting', 'capturing'].includes(state.audioState.state));
+  const stopCloudTest = () => { if (state) void native.action({ action: 'test_stop', documentId: state.documentId, revision: state.revision }); };
+  const recentError = state?.error ?? '';
+  const detailIndex = recentError.indexOf('详情：');
+  const recentSummary = detailIndex < 0 ? recentError : recentError.slice(0, detailIndex).trimEnd();
+  const recentDetail = detailIndex < 0 ? '' : recentError.slice(detailIndex + '详情：'.length).trim();
+  const showDiagnostics = () => selectTab('diagnostics');
+
+  return <SettingsPageWrapper className='voice-settings-page'>
+    <PageHeader title={t('settings.keyboard.title')} description={t('settings.keyboard.pageHint')}
+      actions={<>
+        {state && <section role='status' aria-live='polite' aria-label={t('settings.keyboard.saveStatus')}
+          className='voice-save-status' data-state={autosave.status}>
+          <span className='voice-save-status__dot' aria-hidden='true' /><span>{saveMessage}</span>
+          {autosave.status === 'failed' && <Button size='mini' onClick={() => { void autosave.retry(); }}>{t('settings.keyboard.retrySave')}</Button>}
+        </section>}
+        <Button size='small' loading={native.busy}
+          onClick={() => { void native.refresh(); void refreshCatalog(); void refreshAudioDevices(); void permissions.refresh(); }}
+          disabled={!native.available}>{t('settings.keyboard.refresh')}</Button>
+        <Button size='small' type='primary' disabled={!state || native.busy}
+          onClick={() => void native.action({ action: 'open' })}>{t('settings.keyboard.open')}</Button>
+      </>} />
+    {!native.available && <Alert type='info' content={t('settings.keyboard.desktopOnly')} />}
+    {native.error && <Alert type='error' content={native.error} />}
+    {native.available && !state && !native.error && <div className='keyboard-loading' role='status'><Spin />{t('settings.keyboard.loading')}</div>}
+    {state && draft && readiness && <>
+      {autosave.error && <Alert type='error' content={autosave.error} />}
+      {native.busy && <p className='voice-context-note' role='status'>{t('settings.keyboard.block_busy')}</p>}
+      {recentError && activeTab !== 'diagnostics' && <div className='voice-notice' role='alert'>
+        <div><span className='voice-eyebrow'>{t('settings.keyboard.hardwareErrorTitle')}</span><p>{recentSummary}</p></div>
+        <Button size='small' onClick={showDiagnostics}>{t('settings.keyboard.recentErrorAction')}</Button>
+      </div>}
+      <div className='voice-settings-navigation' ref={navigationRef}>
+        <VisualTabs id={tabsId} label={t('settings.keyboard.tabsLabel')} activeKey={activeTab}
+          onChange={key => selectTab(key as SettingsTab)} items={[
+            { key: 'voice', label: t('settings.keyboard.tabVoice') },
+            { key: 'input', label: t('settings.keyboard.tabInput') },
+            { key: 'appearance', label: t('settings.keyboard.tabAppearance') },
+            { key: 'diagnostics', label: t('settings.keyboard.tabDiagnostics'), dot: local.active || cloudActive },
+          ]} />
+        {(local.active || cloudActive) && <div className='voice-test-activity' role='status'>
+          <span>{local.active ? localStatusText : t('settings.keyboard.cloudRunning')}</span>
+          {activeTab !== 'diagnostics' && <>
+            <Button size='mini' onClick={showDiagnostics}>{t('settings.keyboard.diagnosticsAction')}</Button>
+            <Button size='mini' disabled={local.active ? local.result.state === 'stopping' : !cloudStoppable}
+              onClick={local.active ? () => void local.stop() : stopCloudTest}>
+              {t(local.active ? 'settings.keyboard.localStop' : 'settings.keyboard.testStop')}
+            </Button>
+          </>}
+        </div>}
+      </div>
+      <div role='tabpanel' id={tabsId + '-panel'} aria-labelledby={tabsId + '-tab-' + activeTab} className='voice-settings-content'>
+        <div hidden={activeTab !== 'voice'} className='voice-pane'>
+          <div className='voice-recognition-grid'>
+            <VisualPanel title={t('settings.keyboard.recognitionTitle')} description={t('settings.keyboard.recognitionHint')}
+              className='voice-recognition-card' action={<Link to='/models'>{t('settings.keyboard.manageModels')}</Link>}>
+              {catalogError && <Alert type='error' content={String(catalogError)} />}
+              {recognitionBusy && <p className='voice-context-note'>{t('settings.keyboard.recognitionEditingBusy')}</p>}
+              {(catalogLoading || !catalog) && <p className='voice-context-note'>{t('settings.keyboard.catalogLoading')}</p>}
+              {readiness.modelCatalogueEmpty && <Alert type='info' content={t(asrMode === 'platform' ? 'settings.keyboard.emptyPlatform' : 'settings.keyboard.emptyStreaming')} />}
+              {readiness.platformAlternative && <p className='voice-context-note'>{t('settings.keyboard.platformAlternative', { mode: t('settings.keyboard.asrModePlatform') })}</p>}
+              <SettingField label={t('settings.keyboard.asrMode')} hint={t(asrMode === 'platform' ? 'settings.keyboard.asrHintPlatform' : 'settings.keyboard.asrHint')}>
+                <VisualChoice label={t('settings.keyboard.asrMode')} value={asrMode} disabled={recognitionBusy || catalogLoading || !catalog}
+                  options={[
+                    { value: 'streaming', label: t('settings.keyboard.asrModeStreaming') },
+                    { value: 'platform', label: t('settings.keyboard.asrModePlatform') },
+                  ]} onChange={changeAsrMode} />
+              </SettingField>
+              <SettingField label={t('settings.keyboard.asrModel')}>
+                <ModelSelect models={asrModels} value={draft.asrModel} label={t('settings.keyboard.asrModel')}
+                  disabled={recognitionBusy || catalogLoading || !catalog} onChange={value => change('asrModel', value)} />
+              </SettingField>
+              <details className='voice-disclosure'>
+                <summary><span>{t('settings.keyboard.preferencesTitle')}</span><span className='voice-disclosure__meta'>{t('settings.keyboard.preferencesHint')}</span></summary>
+                <SettingField label={t('settings.keyboard.language')} hint={t('settings.keyboard.languageHint')}>
+                  <Input aria-label={t('settings.keyboard.language')} value={draft.language} disabled={recognitionBusy}
+                    {...textEvents('language')} onChange={value => change('language', value, 'debounced')} className='keyboard-short-input' />
+                </SettingField>
+                <SettingField label={t('settings.keyboard.dictionary')}>
+                  <Input.TextArea value={dictionaryEditing ?? draft.dictionary.join('\n')} disabled={recognitionBusy}
+                    {...textEvents('dictionary')} onFocus={() => setDictionaryEditing(draft.dictionary.join('\n'))}
+                    onChange={value => { setDictionaryEditing(value); change('dictionary', value.split('\n'), 'debounced'); }}
+                    autoSize={{ minRows: 3, maxRows: 7 }} aria-label={t('settings.keyboard.dictionary')}
+                    placeholder={t('settings.keyboard.dictionaryHint')} />
+                </SettingField>
+              </details>
+            </VisualPanel>
+            <VisualPanel title={t('settings.keyboard.microphoneTitle')} description={t('settings.keyboard.inputDeviceHint')} className='voice-microphone-card'
+              action={<Button size='mini' loading={audioDevicesLoading} onClick={() => void refreshAudioDevices()}>{t('settings.keyboard.refreshDevices')}</Button>}>
+              {audioDevicesError && <Alert type='error' content={String(audioDevicesError)} />}
+              {audioDevicesLoading && <p className='voice-context-note'>{t('settings.keyboard.inputsLoading')}</p>}
+              {!audioDevicesLoading && !readiness.deviceAvailable && <Alert type='warning' content={t('settings.keyboard.block_device')} />}
+              <SettingField label={t('settings.keyboard.audioDevice')}>
+                <Select className='keyboard-model-select' aria-label={t('settings.keyboard.audioDevice')} value={draft.audioDeviceId ?? ''}
+                  disabled={recognitionBusy || audioDevicesLoading} onChange={(value: string) => change('audioDeviceId', value || null)}>
+                  <Select.Option value=''>{t('settings.keyboard.systemDefault')}</Select.Option>
+                  {draft.audioDeviceId && !audioDevices?.some(device => device.id === draft.audioDeviceId) &&
+                    <Select.Option value={draft.audioDeviceId} disabled>{t('settings.keyboard.unavailableAudioDevice')}</Select.Option>}
+                  {(audioDevices ?? []).map(device => <Select.Option key={device.id} value={device.id}>
+                    {device.label}{device.isDefault ? ' · ' + t('settings.keyboard.defaultDevice') : ''}
+                  </Select.Option>)}
+                </Select>
+              </SettingField>
+              <VisualRow label={t('settings.keyboard.microphoneState')} description={state.audioState.detail}>
+                <VisualStatus tone={state.audioState.state === 'error' ? 'danger' : state.audioState.state === 'stopped' ? 'neutral' : 'info'}>
+                  {audioStatusText}
+                </VisualStatus>
+              </VisualRow>
+              {readiness.permissionBlocked && <Alert type='warning' content={permissionDescription} />}
+              <div className='voice-panel-footer'><span>{t(localVerified && readiness.deviceAvailable ? 'settings.keyboard.localPassed' : 'settings.keyboard.localUnverified')}</span>
+                <Button size='small' onClick={showDiagnostics}>{t('settings.keyboard.checkMicrophone')}</Button>
+              </div>
+            </VisualPanel>
           </div>
-        </VisualPanel>
+        </div>
 
-        <ExternalKeyboardPanel state={state} draft={draft} onChange={patch => autosave.change(patch)} />
+        <div hidden={activeTab !== 'input'} className='voice-pane'>
+          <p className='voice-pane-intro'>{t('settings.keyboard.inputMethodsHint')}</p>
+          <div className='voice-input-grid'>
+          <VisualPanel title={t('settings.keyboard.keysTitle')} description={t('settings.keyboard.keysHint')} className='voice-shortcuts-card'
+            action={<VisualStatus tone={state.shortcutState?.registered ? 'success' : 'neutral'}>
+              {t(state.shortcutState?.registered ? 'settings.keyboard.ready' : 'settings.keyboard.stopped')}
+            </VisualStatus>}>
+            <VisualRow label={t('settings.keyboard.enabled')} description={t('settings.keyboard.enabledHint')}>
+              <VisualSwitch label={t('settings.keyboard.enabled')} checked={draft.enabled} onChange={value => change('enabled', value)} />
+            </VisualRow>
+            <ShortcutBindings shortcuts={draft.shortcuts} disabled={native.busy || recognitionBusy}
+              onApply={shortcuts => change('shortcuts', shortcuts)} />
+            {state.shortcutState?.detail && <p className='voice-context-note'>{state.shortcutState.detail}</p>}
+            <p className='voice-context-note'>{t('settings.keyboard.disableHint')}</p>
+          </VisualPanel>
+          <ExternalKeyboardPanel state={state} draft={draft} onChange={patch => autosave.change(patch)} />
+          </div>
+        </div>
 
-      </>}
-    </div>
+        <div hidden={activeTab !== 'appearance'} className='voice-pane'>
+          <div className='voice-appearance-grid'>
+            <VisualPanel title={t('settings.keyboard.windowTitle')}>
+              <div className='voice-subtitle-preview' aria-label={t('settings.keyboard.subtitlePreview')}>
+                <span className='voice-eyebrow'>{t('settings.keyboard.subtitlePreview')}</span>
+                <p style={{ fontSize: draft.subtitleFontSize + 'px' }}>{t('settings.keyboard.subtitlePreviewText')}</p>
+                <small>{t('settings.keyboard.subtitlePreviewHint')}</small>
+              </div>
+              <VisualRow label={t('settings.keyboard.subtitleFontSize')} description={t('settings.keyboard.subtitleFontSizeHint')}>
+                <Select className='keyboard-font-select' aria-label={t('settings.keyboard.subtitleFontSize')} value={draft.subtitleFontSize}
+                  onChange={(value: number) => change('subtitleFontSize', value)}>
+                  {Array.from({ length: 21 }, (_, index) => index + 12).map(size => <Select.Option key={size} value={size}>{size}px</Select.Option>)}
+                </Select>
+              </VisualRow>
+              <VisualRow label={t('settings.keyboard.alwaysOnTop')}>
+                <VisualSwitch label={t('settings.keyboard.alwaysOnTop')} checked={draft.alwaysOnTop} onChange={value => change('alwaysOnTop', value)} />
+              </VisualRow>
+              <div className='keyboard-form-actions' role='group' aria-label={t('settings.keyboard.subtitleActions')}>
+                <Button disabled={native.busy} onClick={() => void native.action({ action: 'reset_position' })}>{t('settings.keyboard.resetPosition')}</Button>
+              </div>
+            </VisualPanel>
+            <VisualPanel title={t('settings.keyboard.beautifyTitle')} description={t('settings.keyboard.beautifyHint')}>
+              {catalogError && <Alert type='error' content={String(catalogError)} />}
+              {(catalogLoading || !catalog) && <p className='voice-context-note'>{t('settings.keyboard.catalogLoading')}</p>}
+              <SettingField label={t('settings.keyboard.textModel')} hint={t('settings.keyboard.textModelOptional')}>
+                <ModelSelect models={catalog?.text ?? []} value={draft.textModel} label={t('settings.keyboard.textModel')}
+                  disabled={catalogLoading || !catalog} onChange={value => change('textModel', value)} />
+              </SettingField>
+              <details className='voice-disclosure'>
+                <summary>{t('settings.keyboard.beautifyAdvanced')}</summary>
+                <SettingField label={t('settings.keyboard.instruction')} hint={t('settings.keyboard.instructionHint')}>
+                  <Input.TextArea value={draft.beautifyInstruction} {...textEvents('beautifyInstruction')}
+                    onChange={value => change('beautifyInstruction', value, 'debounced')} autoSize={{ minRows: 4, maxRows: 8 }}
+                    aria-label={t('settings.keyboard.instruction')} />
+                </SettingField>
+              </details>
+            </VisualPanel>
+          </div>
+        </div>
+
+        <div hidden={activeTab !== 'diagnostics'} className='voice-pane'>
+          <p className='voice-pane-intro'>{t('settings.keyboard.diagnosticsHint')}</p>
+          {recentError && <VisualPanel title={t('settings.keyboard.hardwareErrorTitle')}>
+            <div className='voice-error-content'><p>{recentSummary}</p>
+              {recentDetail && <details className='voice-disclosure'><summary>{t('settings.keyboard.errorDetails')}</summary><p>{recentDetail}</p></details>}
+            </div>
+          </VisualPanel>}
+          <div className='voice-diagnostics-grid'>
+            <VisualPanel title={t('settings.keyboard.localTitle')} description={t('settings.keyboard.testPrivacyLocal')} className='voice-test-card'>
+              <span className='voice-eyebrow voice-test-step'>{t('settings.keyboard.localStep')}</span>
+              <VisualRow label={t('settings.keyboard.permissionTitle')} description={permissionDescription}>
+                <div className='keyboard-inline-actions'>
+                  {permission?.can_request && <Button size='small' disabled={permissions.loading} onClick={() => void permissions.request('microphone')}>{t('settings.keyboard.requestMicrophone')}</Button>}
+                  {permission?.can_open_settings && <Button size='small' disabled={permissions.loading} onClick={() => void permissions.openSettings('microphone')}>{t('settings.keyboard.openMicrophoneSettings')}</Button>}
+                </div>
+              </VisualRow>
+              {permissions.loading && <p className='voice-context-note' role='status'>{t('settings.keyboard.permissionLoading')}</p>}
+              {permissions.error && <Alert type='warning' content={permissions.error} />}
+              <div className='keyboard-form-actions'>
+                <Button type='primary' disabled={localBlocked.length > 0} onClick={() => void local.start()}>{t('settings.keyboard.localStart')}</Button>
+                <Button disabled={!local.active || local.result.state === 'stopping'} onClick={() => void local.stop()}>{t('settings.keyboard.localStop')}</Button>
+              </div>
+              {localBlocked.length > 0 && <ul className='keyboard-blockers'>{localBlocked.map(reason => <li key={reason}>{blockerText(reason)}</li>)}</ul>}
+              <div className='voice-test-result' role='status' aria-live='polite'>
+                <VisualStatus tone={localVerified ? 'success' : local.result.state === 'failed' ? 'danger' : 'neutral'}>{localStatusText}</VisualStatus>
+                {local.result.detail && <p>{local.result.detail}</p>}
+                {local.result.callbackObserved && <p>{t('settings.keyboard.localCallback')}</p>}
+              </div>
+              {local.result.id && <div className='keyboard-meter'>
+                <meter aria-label={t('settings.keyboard.localLevel')} min={0} max={1} value={Math.min(1, Math.max(0, local.result.peak))} />
+                <span>{t('settings.keyboard.localStats', { seconds: (local.result.elapsedMs / 1000).toFixed(1), samples: local.result.samples })}</span>
+              </div>}
+            </VisualPanel>
+            <VisualPanel title={t('settings.keyboard.cloudTitle')} description={t('settings.keyboard.testPrivacyCloud')} className='voice-test-card'>
+              <span className='voice-eyebrow voice-test-step'>{t('settings.keyboard.cloudStep')}</span>
+              <p className='voice-context-note'>{t(asrMode === 'platform' ? 'settings.keyboard.testHintPlatform' : 'settings.keyboard.testHint')}</p>
+              <div className='keyboard-form-actions'>
+                <Button type='primary' disabled={cloudBlocked.length > 0} onClick={() => void startTest()}>{t('settings.keyboard.testStart')}</Button>
+                <Button disabled={!cloudStoppable} onClick={stopCloudTest}>{t('settings.keyboard.testStop')}</Button>
+              </div>
+              {cloudBlocked.length > 0 && <ul className='keyboard-blockers'>{cloudBlocked.map(reason => <li key={reason}>{blockerText(reason)}</li>)}</ul>}
+              <div className='voice-test-result' role='status' aria-live='polite'>
+                <VisualStatus tone={cloudResult.state === 'completed' ? 'success' : cloudResult.state === 'failed' ? 'danger' : 'neutral'}>
+                  {t(cloudResult.state === 'completed' ? 'settings.keyboard.cloudPassed' : cloudResult.state === 'running' ? 'settings.keyboard.cloudRunning'
+                    : cloudResult.state === 'failed' ? 'settings.keyboard.cloudFailed' : cloudResult.state === 'cancelled' ? 'settings.keyboard.cloudCancelled' : 'settings.keyboard.cloudUnverified')}
+                </VisualStatus>
+                {cloudResult.detail && <p>{cloudResult.detail}</p>}
+              </div>
+            </VisualPanel>
+          </div>
+        </div>
+      </div>
+    </>}
   </SettingsPageWrapper>;
 }

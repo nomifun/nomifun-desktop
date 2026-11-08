@@ -61,11 +61,155 @@ beforeEach(() => {
 afterEach(() => { cleanup(); permissionMocks.forEach(mock => mock.mockRestore()); Object.assign(keyboard, original); });
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { settings: { keyboard: en.keyboard } } } } });
-const show = () => render(<SWRConfig value={{ provider: () => new Map() }}><I18nextProvider i18n={i18n}><MemoryRouter><KeyboardSettings /></MemoryRouter></I18nextProvider></SWRConfig>);
+const tabLabels = { voice: en.keyboard.tabVoice, input: en.keyboard.tabInput,
+  appearance: en.keyboard.tabAppearance, diagnostics: en.keyboard.tabDiagnostics };
+type SettingsTab = keyof typeof tabLabels;
+const visitTab = async (tab: SettingsTab) => {
+  const control = await screen.findByRole('tab', { name: tabLabels[tab] });
+  fireEvent.click(control);
+  await waitFor(() => expect(control.getAttribute('aria-selected')).toBe('true'));
+  return screen.getByRole('tabpanel', { name: tabLabels[tab] });
+};
+const openDisclosure = async (label: string) => {
+  const summary = await screen.findByText(label);
+  const disclosure = summary.closest('details') as HTMLDetailsElement;
+  expect(disclosure).toBeTruthy();
+  if (!disclosure.open) fireEvent.click(summary);
+  await waitFor(() => expect(disclosure.open).toBe(true));
+  return disclosure;
+};
+const renderSettings = () => render(<SWRConfig value={{ provider: () => new Map() }}><I18nextProvider i18n={i18n}><MemoryRouter><KeyboardSettings /></MemoryRouter></I18nextProvider></SWRConfig>);
+const show = async (tab: SettingsTab = 'voice') => {
+  const view = renderSettings();
+  await visitTab(tab);
+  return view;
+};
 
 describe('system microphone keyboard settings', () => {
+  test('the default recognition pane explains a missing input before entering diagnostics', async () => {
+    keyboard.getAudioDevices = async () => [];
+    await show();
+    const microphone = within(screen.getByRole('region', { name: en.keyboard.microphoneTitle }));
+    await waitFor(() => expect(microphone.getByRole('alert').textContent).toContain(en.keyboard.block_device));
+    expect(microphone.getByRole('button', { name: en.keyboard.checkMicrophone })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.keyboard.localStart })).toBeNull();
+    expect(actions).toHaveLength(0); expect(updates).toHaveLength(0);
+  });
+
+  test('recognition is the default pane and visiting all settings never writes or starts capture', async () => {
+    renderSettings();
+    const selected = await screen.findByRole('tab', { name: en.keyboard.tabVoice });
+    expect(selected.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tabpanel', { name: en.keyboard.tabVoice })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: en.keyboard.open })).toHaveLength(1);
+    expect(screen.queryByRole('switch', { name: en.keyboard.enabled })).toBeNull();
+    expect(screen.queryByRole('button', { name: en.keyboard.localStart })).toBeNull();
+    for (const tab of ['input', 'appearance', 'diagnostics', 'voice'] as const) await visitTab(tab);
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0); expect(permissionRequests).toHaveLength(0);
+  });
+
+  test('an unapplied shortcut draft survives navigation and registers only on explicit apply', async () => {
+    await show('input');
+    fireEvent.change(screen.getByRole('textbox', { name: en.keyboard.shortcut_dictate }), { target: { value: 'Control+Alt+D' } });
+    await visitTab('appearance'); await visitTab('diagnostics'); await visitTab('input');
+    expect((screen.getByRole('textbox', { name: en.keyboard.shortcut_dictate }) as HTMLInputElement).value).toBe('Control+Alt+D');
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: en.keyboard.applyShortcuts }));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].shortcuts).toEqual({ ...defaultVoiceKeyboardShortcuts, dictate: 'Control+Alt+D' });
+  });
+
+  test('switching panes retains composing recognition text without prematurely saving it', async () => {
+    await show(); await openDisclosure(en.keyboard.preferencesTitle);
+    const language = screen.getByRole('textbox', { name: en.keyboard.language });
+    fireEvent.compositionStart(language); fireEvent.change(language, { target: { value: 'zh' } });
+    await visitTab('input'); await visitTab('appearance'); await visitTab('voice');
+    const retained = screen.getByRole('textbox', { name: en.keyboard.language });
+    expect((retained as HTMLInputElement).value).toBe('zh'); expect(updates).toHaveLength(0);
+    fireEvent.compositionEnd(retained); fireEvent.blur(retained);
+    await waitFor(() => expect(updates).toHaveLength(1)); expect(updates[0].language).toBe('zh');
+  });
+
+  test('navigation preserves a pending local microphone owner and its late start acknowledgement', async () => {
+    const pending = deferred<KeyboardState>();
+    keyboard.action = async request => { actions.push(request); return request.action === 'microphone_test_start' ? pending.promise : current; };
+    await show('diagnostics'); fireEvent.click(screen.getByRole('button', { name: en.keyboard.localStart }));
+    await waitFor(() => expect(actions).toHaveLength(1));
+    const id = actions[0].testId!;
+    await visitTab('input'); await visitTab('appearance');
+    expect(screen.getByRole('button', { name: en.keyboard.localStop })).toBeTruthy();
+    expect(screen.getByRole('button', { name: en.keyboard.diagnosticsAction })).toBeTruthy();
+    await act(async () => {
+      current = { ...current, sequence: 1, microphoneTest: { ...idleMicrophone, id, stopped: false, state: 'listening', callbackObserved: true, samples: 960, nonzero: 100, peak: 0.25 } };
+      listener?.(current); pending.resolve(current);
+    });
+    await visitTab('diagnostics');
+    const local = within(screen.getByRole('region', { name: en.keyboard.localTitle }));
+    expect(local.getByRole('button', { name: en.keyboard.localStop }).hasAttribute('disabled')).toBe(false);
+    expect(local.getByRole('meter', { name: en.keyboard.localLevel }).getAttribute('value')).toBe('0.25');
+    expect(actions).toHaveLength(1);
+    emit({ microphoneTest: { ...current.microphoneTest, state: 'completed', stopped: true } });
+    await local.findByText(en.keyboard.localPassed);
+  });
+
+  test('cloud transcription finishes for its original owner while its diagnostics pane is hidden', async () => {
+    keyboard.action = async request => {
+      actions.push(request);
+      current = { ...current, sequence: 1, phase: 'recording', operationId: 'owned-cloud', audioState: { state: 'capturing', detail: null } };
+      return current;
+    };
+    await show('diagnostics'); fireEvent.click(screen.getByRole('button', { name: en.keyboard.testStart }));
+    await waitFor(() => expect(actions).toHaveLength(1));
+    await visitTab('input');
+    expect(screen.getByRole('button', { name: en.keyboard.testStop }).hasAttribute('disabled')).toBe(false);
+    await visitTab('appearance');
+    emit({ partial: 'new cloud words' });
+    emit({ phase: 'idle', operationId: null, revision: 3, text: 'Ready textNew cloud words.', partial: '', audioState: { state: 'stopped', detail: null } });
+    await visitTab('diagnostics');
+    const cloud = within(screen.getByRole('region', { name: en.keyboard.cloudTitle }));
+    await cloud.findByText(en.keyboard.cloudPassed);
+    expect(cloud.getByText('New cloud words.')).toBeTruthy();
+    expect(actions).toEqual([{ action: 'test_start' }]);
+  });
+
+  test.each(['', ' '])('a recent voice error opens diagnostics with an explicit technical disclosure (separator %j)', async separator => {
+    const summary = '暂时无法连接语音识别服务，尚未开始录音。';
+    const detail = 'streaming ASR handshake rejected with HTTP 401: code=invalid_api_key';
+    current.error = `${summary}${separator}详情：${detail}`;
+    await show();
+    expect(screen.getByRole('alert').textContent).toContain(summary);
+    expect(screen.getByRole('alert').textContent).not.toContain(detail);
+    fireEvent.click(screen.getByRole('button', { name: en.keyboard.recentErrorAction }));
+    expect(screen.getByRole('tab', { name: en.keyboard.tabDiagnostics }).getAttribute('aria-selected')).toBe('true');
+    const error = within(screen.getByRole('region', { name: en.keyboard.hardwareErrorTitle }));
+    expect(error.getByText(summary)).toBeTruthy();
+    const disclosure = error.getByText(en.keyboard.errorDetails).closest('details') as HTMLDetailsElement;
+    expect(disclosure.open).toBe(false);
+    await openDisclosure(en.keyboard.errorDetails);
+    expect(error.getByText(detail)).toBeTruthy();
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+  });
+
+  test('advanced preferences and device metadata start collapsed without hiding basic device actions', async () => {
+    current.settings.externalKeyboardEnabled = true;
+    current.externalKeyboard = { state: 'connected', detail: null };
+    current.device = { ...current.device, connected: true, id: 'owned-keyboard', port: 'COM19', firmware: 'owned-fw' };
+    await show();
+    expect((screen.getByText(en.keyboard.preferencesTitle).closest('details') as HTMLDetailsElement).open).toBe(false);
+    await visitTab('appearance');
+    expect((screen.getByText(en.keyboard.beautifyAdvanced).closest('details') as HTMLDetailsElement).open).toBe(false);
+    await visitTab('input');
+    expect((screen.getByText(en.keyboard.shortcutGuide).closest('details') as HTMLDetailsElement).open).toBe(false);
+    expect((screen.getByText(en.keyboard.externalDetails).closest('details') as HTMLDetailsElement).open).toBe(false);
+    expect(screen.getByRole('switch', { name: en.keyboard.externalEnabled })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: en.keyboard.k4Enabled })).toBeTruthy();
+    await openDisclosure(en.keyboard.externalDetails);
+    expect(within(screen.getByRole('region', { name: en.keyboard.externalTitle })).getByText('owned-keyboard · COM19')).toBeTruthy();
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+  });
+
   test('external keyboard connection is explicitly off by default and performs no mount write', async () => {
-    show();
+    await show('input');
     const external = within(await screen.findByRole('region', { name: 'External keyboard connection (optional)' }));
     expect(external.getByRole('switch', { name: 'Connect an external keyboard' }).getAttribute('aria-checked')).toBe('false');
     expect(external.getByText('Connection mode off')).toBeTruthy();
@@ -75,7 +219,7 @@ describe('system microphone keyboard settings', () => {
 
   test('external opt-in preserves old per-key preferences while system shortcuts are disabled', async () => {
     current.settings.enabled = false; current.settings.k2Enabled = false; current.settings.k4Enabled = false;
-    show();
+    await show('input');
     fireEvent.click(await screen.findByRole('switch', { name: 'Connect an external keyboard' }));
     await waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0]).toMatchObject({ enabled: false, externalKeyboardEnabled: true, k2Enabled: false, k3Enabled: true, k4Enabled: false });
@@ -93,7 +237,7 @@ describe('system microphone keyboard settings', () => {
     current.device = { ...current.device, connected: true, id: 'fixture-keyboard', port: 'COM19', firmware: 'fixture-v1' };
     const pending = deferred<KeyboardState>();
     keyboard.updateSettings = async settings => { updates.push(settings); return pending.promise; };
-    show();
+    await show('input');
     fireEvent.click(await screen.findByRole('switch', { name: 'Connect an external keyboard' }));
     await waitFor(() => expect(updates).toHaveLength(1));
     emit({ externalKeyboard: { state: 'stopping', detail: 'Waiting for owned device cleanup' } });
@@ -114,9 +258,10 @@ describe('system microphone keyboard settings', () => {
   test('an external connection error stays in its optional panel and does not block software transcription', async () => {
     current.settings.externalKeyboardEnabled = true;
     current.externalKeyboard = { state: 'error', detail: 'The optional device could not open its port' };
-    show();
+    await show('input');
     const external = within(await screen.findByRole('region', { name: 'External keyboard connection (optional)' }));
     expect(external.getByText('The optional device could not open its port')).toBeTruthy();
+    await visitTab('diagnostics');
     const start = screen.getByRole('button', { name: 'Test cloud transcription' });
     await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
     fireEvent.click(start);
@@ -129,7 +274,7 @@ describe('system microphone keyboard settings', () => {
     current.externalKeyboard = { state: 'connecting', detail };
     current.shortcutState = { registered: 4, detail: null };
     current.service = { running: true, ready: true, detail: null };
-    show();
+    await show('input');
     const external = within(await screen.findByRole('region', { name: 'External keyboard connection (optional)' }));
     expect(external.getByText('Waiting for an external keyboard')).toBeTruthy();
     expect(external.getByText(detail)).toBeTruthy();
@@ -142,6 +287,7 @@ describe('system microphone keyboard settings', () => {
     expect(dictate.hasAttribute('disabled')).toBe(false);
     expect(dictate.getAttribute('value')).toBe(defaultVoiceKeyboardShortcuts.dictate);
     expect(updates).toHaveLength(0);
+    await visitTab('diagnostics');
     const start = screen.getByRole('button', { name: 'Test cloud transcription' });
     await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
     fireEvent.click(start);
@@ -151,7 +297,7 @@ describe('system microphone keyboard settings', () => {
   test('external K4 preference changes leave system shortcut configuration and microphone selection intact', async () => {
     current.settings.externalKeyboardEnabled = true;
     current.externalKeyboard = { state: 'connecting', detail: null };
-    show();
+    await show('input');
     fireEvent.click(await screen.findByRole('switch', { name: 'K4 · Hold to speak' }));
     await waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0]).toMatchObject({ enabled: true, externalKeyboardEnabled: true, k4Enabled: false, audioDeviceId: null });
@@ -163,7 +309,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('voice input is available without external device controls or startup dependencies', async () => {
-    show();
+    await show('input');
     await screen.findByRole('heading', { name: 'Voice keyboard' });
     expect(screen.queryByRole('region', { name: 'Keyboard device' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Background device service' })).toBeNull();
@@ -179,16 +325,16 @@ describe('system microphone keyboard settings', () => {
     { registered: 0, label: 'Shortcuts inactive' },
   ])('native shortcut registration is shown independently from hardware: $label', async ({ registered, label }) => {
     current.shortcutState = { registered, detail: 'Shortcut registration detail' };
-    show();
+    await show('input');
     const panel = within(await screen.findByRole('region', { name: 'System shortcuts' }));
-    expect(panel.getByText('Shortcut registration')).toBeTruthy();
+    expect(panel.getByRole('heading', { name: en.keyboard.keysTitle })).toBeTruthy();
     expect(panel.getByText(label)).toBeTruthy();
     expect(panel.getByText('Shortcut registration detail')).toBeTruthy();
   });
 
   test('cloud transcription works without a connected keyboard or registered shortcuts', async () => {
     current.shortcutState = { registered: 0, detail: 'Shortcut already used by another application' };
-    show();
+    await show('diagnostics');
     const start = await screen.findByRole('button', { name: 'Test cloud transcription' });
     await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
     fireEvent.click(start);
@@ -196,7 +342,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('shortcut bindings are applied together and incomplete typing is not registered', async () => {
-    show();
+    await show('input');
     const dictate = await screen.findByRole('textbox', { name: 'Dictation shortcut' });
     fireEvent.change(dictate, { target: { value: 'Control+Alt+D' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Cancellation shortcut' }), { target: { value: '' } });
@@ -209,7 +355,7 @@ describe('system microphone keyboard settings', () => {
 
   test('a shortcut conflict keeps the requested combination editable and the saved binding unchanged', async () => {
     keyboard.updateSettings = async settings => { updates.push(settings); throw new Error('Shortcut already registered by another application'); };
-    show();
+    await show('input');
     const dictate = await screen.findByRole('textbox', { name: 'Dictation shortcut' });
     fireEvent.change(dictate, { target: { value: 'Control+Alt+D' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply shortcuts' }));
@@ -221,16 +367,17 @@ describe('system microphone keyboard settings', () => {
 
   test('active system recording remains visible with its finish action', async () => {
     current.phase = 'recording'; current.audioState = { state: 'capturing', detail: 'Desk microphone' };
-    show();
+    await show('voice');
     await screen.findByText('Recording system microphone');
     expect(screen.getByText('Desk microphone')).toBeTruthy();
+    await visitTab('diagnostics');
     fireEvent.click(screen.getByRole('button', { name: 'Finish cloud test' }));
     await waitFor(() => expect(actions).toEqual([{ action: 'test_stop', documentId: 'doc-1', revision: 2 }]));
   });
 
   test('a previous hardware recognition error does not become a settings failure', async () => {
     current.error = 'Recognition failed. Check the provider connection and try again.';
-    show();
+    await show('diagnostics');
     const start = await screen.findByRole('button', { name: 'Test cloud transcription' });
     expect(within(screen.getByRole('region', { name: 'Recent voice input error' })).getByText(current.error)).toBeTruthy();
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).queryByText(current.error)).toBeNull();
@@ -245,7 +392,7 @@ describe('system microphone keyboard settings', () => {
       current = { ...current, sequence: 1, phase: 'recording', operationId: 'test-operation', audioState: { state: 'capturing', detail: null } };
       return current;
     };
-    show();
+    await show('diagnostics');
     fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     await screen.findByText('Recording system microphone');
     const failure = 'The requested test connection failed. Try again.';
@@ -270,7 +417,7 @@ describe('system microphone keyboard settings', () => {
       current = { ...current, sequence: 1, capturePreparing: true, operationId: 'test-operation' };
       return current;
     };
-    show();
+    await show('diagnostics');
     fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     await waitFor(() => expect(actions).toHaveLength(1));
     act(() => {
@@ -289,13 +436,14 @@ describe('system microphone keyboard settings', () => {
   test('a failed automatic setting keeps the edited switch and exposes one retry without dropping input', async () => {
     let attempts = 0;
     keyboard.updateSettings = async settings => { updates.push(settings); if (++attempts === 1) throw new Error('The keyboard settings could not be saved.'); current = { ...current, sequence: current.sequence + 1, settings }; return current; };
-    show();
+    await show('input');
     const toggle = await screen.findByRole('switch', { name: 'Enable voice shortcuts' });
     fireEvent.click(toggle);
     await screen.findByText('The keyboard settings could not be saved.');
     expect(toggle.getAttribute('aria-checked')).toBe('false');
     expect(current.settings.enabled).toBe(true);
     expect(updates).toHaveLength(1);
+    await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     expect(within(screen.getByRole('region', { name: 'Local microphone check' })).getByText('Settings have not been saved. Retry saving before testing.')).toBeTruthy();
@@ -306,15 +454,16 @@ describe('system microphone keyboard settings', () => {
 
   test('system microphone stopping status is shown without an onboard capture row', async () => {
     current.device.captureState = 'stopping'; current.audioState.state = 'stopping';
-    show();
+    await show('voice');
     await screen.findByText('Stopping system recording');
     expect(screen.queryByText('Awaiting onboard stop')).toBeNull();
   });
 
   test('a pending microphone start can be stopped and cannot be started again', async () => {
     current.audioState = { state: 'starting', detail: 'Preparing recognition' };
-    show();
+    await show('voice');
     await screen.findByText('Starting system recording');
+    await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     const stop = screen.getByRole('button', { name: 'Finish cloud test' });
     expect(stop.hasAttribute('disabled')).toBe(false);
@@ -324,8 +473,9 @@ describe('system microphone keyboard settings', () => {
 
   test('waiting for the editor to save can be stopped before the microphone starts', async () => {
     current.capturePreparing = true;
-    show();
+    await show('voice');
     await screen.findByText('Not recording');
+    await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     const stop = screen.getByRole('button', { name: 'Finish cloud test' });
     expect(stop.hasAttribute('disabled')).toBe(false);
@@ -334,7 +484,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('a selected system microphone is saved as a device reference in the native settings', async () => {
-    show();
+    await show('voice');
     await screen.findByText('Not recording');
     const select = screen.getByRole('combobox', { name: 'Recording device' });
     fireEvent.click(select);
@@ -346,14 +496,14 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('switching to standard ASR filters models, clears an incompatible reference and saves the explicit mode', async () => {
-    show();
-    const mode = await screen.findByRole('combobox', { name: 'Recognition mode' });
-    fireEvent.click(mode);
-    fireEvent.click(await screen.findByText('Recognize after recording (standard ASR)'));
+    await show('voice');
+    fireEvent.click(await screen.findByRole('radio', { name: en.keyboard.asrModePlatform }));
     await screen.findByText('Only configured cloud models that accept completed audio uploads are listed. This mode does not show live transcription.');
+    await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     await waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0].asrMode).toBe('platform'); expect(updates[0].asrModel).toBeNull();
+    await visitTab('voice');
     fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
     const fileModel = await screen.findByText('File recognition model');
     expect(screen.queryByText('Streaming model')).toBeNull();
@@ -361,6 +511,7 @@ describe('system microphone keyboard settings', () => {
     await waitFor(() => expect(updates).toHaveLength(2));
     expect(updates[1].asrMode).toBe('platform');
     expect(updates[1].asrModel).toEqual({ providerId: 'provider-1', model: 'file-model' });
+    await visitTab('diagnostics');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Test cloud transcription' }));
     await waitFor(() => expect(actions).toEqual([{ action: 'test_start' }]));
@@ -369,9 +520,8 @@ describe('system microphone keyboard settings', () => {
   test('switching back to streaming requires a streaming-capable model', async () => {
     current.settings.asrMode = 'platform';
     current.settings.asrModel = { providerId: 'provider-1', model: 'file-model' };
-    show();
-    fireEvent.click(await screen.findByRole('combobox', { name: 'Recognition mode' }));
-    fireEvent.click(await screen.findByText('Live streaming recognition'));
+    await show('voice');
+    fireEvent.click(await screen.findByRole('radio', { name: en.keyboard.asrModeStreaming }));
     await waitFor(() => expect(updates).toHaveLength(1));
     expect(updates[0].asrMode).toBe('streaming'); expect(updates[0].asrModel).toBeNull();
     fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
@@ -385,7 +535,7 @@ describe('system microphone keyboard settings', () => {
 
   test('subtitle font loads without writes and a changed selection saves automatically', async () => {
     current.settings.subtitleFontSize = 20;
-    show();
+    await show('appearance');
     const font = await screen.findByRole('combobox', { name: 'Subtitle font size' });
     expect(font.textContent).toContain('20px'); expect(updates).toHaveLength(0);
     expect(Boolean(screen.queryByRole('button', { name: 'Save settings' }))).toBe(false);
@@ -397,7 +547,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('subtitle font exposes only integer 12–32 choices and saves through the existing settings request', async () => {
-    show();
+    await show('appearance');
     const font = await screen.findByRole('combobox', { name: 'Subtitle font size' });
     expect(font.textContent).toContain('14px');
     fireEvent.click(font);
@@ -413,18 +563,19 @@ describe('system microphone keyboard settings', () => {
   });
   test('initial setup distinguishes shortcut registration and unverified speech checks', async () => {
     current.shortcutState = { registered: 4, detail: null };
-    show();
-    const setup = within(await screen.findByRole('region', { name: 'First-use checks' }));
-    expect(setup.getByText('System shortcuts ready')).toBeTruthy();
-    expect(setup.getByText('Local input not tested')).toBeTruthy();
-    expect(setup.getByText('Cloud transcription not tested')).toBeTruthy();
-    expect(setup.getByRole('button', { name: 'Check microphone' })).toBeTruthy();
+    await show('voice');
+    expect(screen.getByRole('button', { name: 'Check microphone' })).toBeTruthy();
+    await visitTab('input');
+    expect(within(screen.getByRole('region', { name: en.keyboard.keysTitle })).getByText(en.keyboard.ready)).toBeTruthy();
+    await visitTab('diagnostics');
+    expect(within(screen.getByRole('region', { name: en.keyboard.localTitle })).getByText(en.keyboard.localUnverified)).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: en.keyboard.cloudTitle })).getByText(en.keyboard.cloudUnverified)).toBeTruthy();
     expect(actions).toHaveLength(0); expect(permissionRequests).toHaveLength(0); expect(updates).toHaveLength(0);
   });
 
   test.each(['not_determined', 'unknown', 'granted'] as const)('local test is available with %s permission and no ASR or keyboard', async permission => {
     permissionState = permission; current.settings.asrModel = null; current.settings.k4Enabled = false;
-    show();
+    await show('diagnostics');
     const local = within(await screen.findByRole('region', { name: 'Local microphone check' }));
     const start = local.getByRole('button', { name: 'Test local microphone' });
     await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
@@ -436,7 +587,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test.each(['denied', 'restricted'] as const)('blocked %s permission has a visible reason and explicit system settings action', async permission => {
-    permissionState = permission; show();
+    permissionState = permission; await show('diagnostics');
     const local = within(await screen.findByRole('region', { name: 'Local microphone check' }));
     await waitFor(() => expect(local.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(true));
     expect(local.getByText('Microphone access is blocked. Review system privacy settings.')).toBeTruthy();
@@ -446,7 +597,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('an undetermined permission is only requested on the explicit action', async () => {
-    permissionState = 'not_determined'; show();
+    permissionState = 'not_determined'; await show('diagnostics');
     fireEvent.click(await screen.findByRole('button', { name: 'Allow microphone access' }));
     await waitFor(() => expect(permissionRequests).toEqual(['microphone']));
     expect(actions).toHaveLength(0);
@@ -456,10 +607,11 @@ describe('system microphone keyboard settings', () => {
     const pending = deferred<KeyboardState>();
     keyboard.getAudioDevices = async () => [{ id: 'microphone-2', label: 'USB microphone', isDefault: false }];
     keyboard.updateSettings = async settings => { updates.push(settings); return pending.promise; };
-    show();
+    await show('voice');
     fireEvent.click(await screen.findByRole('combobox', { name: 'Recording device' }));
     fireEvent.click(await screen.findByText('USB microphone'));
     await waitFor(() => expect(updates).toHaveLength(1));
+    await visitTab('diagnostics');
     const local = within(screen.getByRole('region', { name: 'Local microphone check' }));
     expect(local.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(true);
     expect(local.getByText('Wait for settings to finish saving.')).toBeTruthy();
@@ -473,7 +625,7 @@ describe('system microphone keyboard settings', () => {
 
   test('an invalid input and mode-mismatched saved model explain cloud and local blockers', async () => {
     current.settings.audioDeviceId = 'gone'; current.settings.asrModel = { providerId: 'provider-1', model: 'file-model' };
-    show();
+    await show('diagnostics');
     const local = within(await screen.findByRole('region', { name: 'Local microphone check' }));
     await waitFor(() => expect(local.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(true));
     expect(local.getByText('Choose an available input or refresh the device list.')).toBeTruthy();
@@ -484,7 +636,7 @@ describe('system microphone keyboard settings', () => {
 
   test('local result reports native callbacks, falling levels and zero-audio completion independently', async () => {
     keyboard.action = async request => { actions.push(request); return { ...current, sequence: 1, microphoneTest: { ...idleMicrophone, id: request.testId!, state: 'starting', stopped: false } }; };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await waitFor(() => expect(actions).toHaveLength(1));
     const id = actions[0].testId!;
     emit({ microphoneTest: { ...idleMicrophone, id, state: 'listening', stopped: false, callbackObserved: true, samples: 1600, nonzero: 100, peak: 0.8, rms: 0.4 } });
@@ -500,7 +652,7 @@ describe('system microphone keyboard settings', () => {
   test('unmount precisely stops its pending request and repeats the stop after its late acknowledgement', async () => {
     const pending = deferred<KeyboardState>();
     keyboard.action = async request => { actions.push(request); return request.action === 'microphone_test_start' ? pending.promise : current; };
-    const view = show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    const view = await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await waitFor(() => expect(actions).toHaveLength(1)); const id = actions[0].testId!;
     view.unmount();
     await waitFor(() => expect(actions.filter(action => action.action === 'microphone_test_stop' && action.testId === id)).toHaveLength(1));
@@ -511,7 +663,7 @@ describe('system microphone keyboard settings', () => {
 
   test('another local test ID cannot become this page result or receive its stop', async () => {
     keyboard.action = async request => { actions.push(request); return { ...current, sequence: 1, microphoneTest: { ...idleMicrophone, id: request.testId!, state: 'starting', stopped: false } }; };
-    const view = show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    const view = await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await waitFor(() => expect(actions).toHaveLength(1)); const id = actions[0].testId!;
     emit({ microphoneTest: { ...idleMicrophone, id: 'someone-else', state: 'failed', detail: 'Other local test failed' } });
     expect(screen.queryByText('Other local test failed')).toBeNull();
@@ -522,10 +674,10 @@ describe('system microphone keyboard settings', () => {
   test('a stop clicked before local start acknowledgement survives a no-op stop response', async () => {
     const pending = deferred<KeyboardState>();
     keyboard.action = async request => { actions.push(request); return request.action === 'microphone_test_start' ? pending.promise : current; };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await waitFor(() => expect(actions).toHaveLength(1)); const id = actions[0].testId!;
     fireEvent.click(screen.getByRole('button', { name: 'Stop local check' }));
-    await screen.findByText('Stopping and waiting for the native input to close…');
+    await within(screen.getByRole('region', { name: en.keyboard.localTitle })).findByText('Stopping and waiting for the native input to close…');
     await act(async () => { pending.resolve({ ...current, sequence: 1, microphoneTest: { ...idleMicrophone, id, state: 'starting', stopped: false } }); });
     await waitFor(() => expect(actions.filter(action => action.action === 'microphone_test_stop' && action.testId === id)).toHaveLength(2));
     expect(screen.queryByText('Opening native microphone input…')).toBeNull();
@@ -533,7 +685,7 @@ describe('system microphone keyboard settings', () => {
 
   test('a cloud start acknowledgement cannot pass by replaying the existing subtitle text', async () => {
     keyboard.action = async request => { actions.push(request); return { ...current, sequence: 1 }; };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     const cloud = within(screen.getByRole('region', { name: 'Cloud transcription test' }));
     await waitFor(() => expect(actions).toHaveLength(1));
     expect(Boolean(cloud.queryByText('Cloud transcription returned text'))).toBe(false);
@@ -542,11 +694,13 @@ describe('system microphone keyboard settings', () => {
 
   test('a successful local result is invalidated after a draft input change', async () => {
     keyboard.action = async request => { actions.push(request); return { ...current, sequence: 1, microphoneTest: { ...idleMicrophone, id: request.testId!, state: 'completed', callbackObserved: true, samples: 80000, nonzero: 600 } }; };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await within(screen.getByRole('region', { name: 'Local microphone check' })).findByText('Local microphone input verified');
+    await visitTab('voice');
     fireEvent.click(screen.getByRole('combobox', { name: 'Recording device' }));
     fireEvent.click(await screen.findByText('Desk microphone'));
-    await waitFor(() => expect(screen.queryByText('Local microphone input verified')).toBeNull());
+    await visitTab('diagnostics');
+    await waitFor(() => expect(within(screen.getByRole('region', { name: en.keyboard.localTitle })).queryByText('Local microphone input verified')).toBeNull());
     expect(updates).toHaveLength(1);
   });
 
@@ -555,7 +709,7 @@ describe('system microphone keyboard settings', () => {
     { result: { state: 'failed' as const, samples: 0, callbackObserved: false, stopped: true, detail: 'Native input could not open' }, message: 'Native input could not open' },
   ])('a local native result remains scoped to the local check: $result.state', async ({ result, message }) => {
     keyboard.action = async request => { actions.push(request); return { ...current, sequence: 1, microphoneTest: { ...idleMicrophone, ...result, id: request.testId! } }; };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await within(screen.getByRole('region', { name: 'Local microphone check' })).findByText(message);
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).queryByText(message)).toBeNull();
   });
@@ -563,10 +717,10 @@ describe('system microphone keyboard settings', () => {
   test('an empty streaming catalogue offers an ordinary ASR choice without changing the saved mode', async () => {
     current.settings.asrModel = null;
     keyboard.getCatalog = async () => ({ asr: [], platformAsr: [{ providerId: 'provider-1', model: 'file-model', label: 'File recognition model', protocol: 'upload' }], text: [] });
-    show();
+    await show('voice');
     await screen.findByText('Configured standard ASR models are available. You can choose Recognize after recording (standard ASR), then select a model.');
     expect(current.settings.asrMode).toBe('streaming'); expect(current.settings.asrModel).toBeNull(); expect(updates).toHaveLength(0);
-    expect(screen.getByRole('combobox', { name: 'Recognition mode' }).textContent).toContain('Live streaming recognition');
+    expect(screen.getByRole('radio', { name: en.keyboard.asrModeStreaming }).getAttribute('aria-checked')).toBe('true');
   });
 
   test('a rejected local start reply preserves stop ownership after a native listening event', async () => {
@@ -576,7 +730,7 @@ describe('system microphone keyboard settings', () => {
       return request.action === 'microphone_test_start' ? pending.promise
         : { ...current, sequence: 2, microphoneTest: { ...current.microphoneTest, state: 'cancelled', stopped: true } };
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await waitFor(() => expect(actions).toHaveLength(1));
     emit({ audioState: { state: 'capturing', detail: null }, microphoneTest: { ...idleMicrophone, id: actions[0].testId!, state: 'listening', stopped: false, callbackObserved: true, samples: 1600 } });
     await act(async () => { pending.reject(new Error('Start reply transport failed')); });
@@ -597,8 +751,8 @@ describe('system microphone keyboard settings', () => {
       if (stops === 1) throw new Error('Stop reply transport failed');
       return { ...current, sequence: 2, microphoneTest: { ...idleMicrophone, id: request.testId!, state: 'cancelled', stopped: true } };
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
-    await screen.findByText('Listening locally… Speak to check the input level.');
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await within(screen.getByRole('region', { name: en.keyboard.localTitle })).findByText('Listening locally… Speak to check the input level.');
     fireEvent.click(screen.getByRole('button', { name: 'Stop local check' }));
     await screen.findByText('Stop reply transport failed');
     expect(screen.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(true);
@@ -611,12 +765,12 @@ describe('system microphone keyboard settings', () => {
   test('listening events after stop cannot undo the stop intent while waiting for native closure', async () => {
     const pendingStop = deferred<KeyboardState>();
     keyboard.action = async request => { actions.push(request); return request.action === 'microphone_test_start' ? { ...current, sequence: 1, microphoneTest: { ...idleMicrophone, id: request.testId!, state: 'listening', stopped: false } } : pendingStop.promise; };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
-    await screen.findByText('Listening locally… Speak to check the input level.');
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await within(screen.getByRole('region', { name: en.keyboard.localTitle })).findByText('Listening locally… Speak to check the input level.');
     fireEvent.click(screen.getByRole('button', { name: 'Stop local check' }));
     emit({ sequence: 2, microphoneTest: { ...idleMicrophone, id: actions[0].testId!, state: 'listening', stopped: false } });
     expect(Boolean(screen.queryByText('Listening locally… Speak to check the input level.'))).toBe(false);
-    expect(screen.getByText('Stopping and waiting for the native input to close…')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: en.keyboard.localTitle })).getByText('Stopping and waiting for the native input to close…')).toBeTruthy();
     await act(async () => { pendingStop.resolve({ ...current, sequence: 3, microphoneTest: { ...current.microphoneTest, state: 'cancelled', stopped: true } }); });
     await screen.findByText('Local microphone check cancelled');
   });
@@ -627,7 +781,7 @@ describe('system microphone keyboard settings', () => {
       if (request.action === 'microphone_test_start') throw new Error('Session is locked');
       return { ...current, sequence: 2, microphoneTest: { ...idleMicrophone, id: 'another-page', state: 'completed', stopped: true } };
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test local microphone' }));
     await screen.findByText('Session is locked');
     fireEvent.click(screen.getByRole('button', { name: 'Stop local check' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(false));
@@ -641,7 +795,7 @@ describe('system microphone keyboard settings', () => {
       current = { ...current, sequence: 1, phase: 'recording', operationId: 'test-operation', audioState: { state: 'capturing', detail: null } };
       return current;
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     await screen.findByText('Recording system microphone');
     emit({ phase: 'idle', operationId: null, audioState: { state: 'stopped', detail: null } });
     const cloud = within(screen.getByRole('region', { name: 'Cloud transcription test' }));
@@ -656,7 +810,7 @@ describe('system microphone keyboard settings', () => {
       current = { ...current, sequence: 1, phase: 'recording', operationId: 'test-operation', audioState: { state: 'capturing', detail: null } };
       return current;
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     await screen.findByText('Recording system microphone');
     emit({ phase: 'idle', operationId: null, cancelGeneration: 1, audioState: { state: 'stopped', detail: null } });
     const cloud = within(screen.getByRole('region', { name: 'Cloud transcription test' }));
@@ -674,7 +828,7 @@ describe('system microphone keyboard settings', () => {
       current = { ...current, sequence: 1, phase: 'recording', operationId: 'test-operation', dictationSelection: selection, audioState: { state: 'capturing', detail: null } };
       return current;
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     await screen.findByText('Recording system microphone');
     emit({ phase: 'idle', operationId: null, revision: 3, text, dictationSelection: null, audioState: { state: 'stopped', detail: null } });
     const cloud = within(screen.getByRole('region', { name: 'Cloud transcription test' }));
@@ -689,7 +843,7 @@ describe('system microphone keyboard settings', () => {
       current = { ...current, sequence: 1, capturePreparing: true, operationId: null, audioState: { state: 'starting', detail: null } };
       return current;
     };
-    show(); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
+    await show('diagnostics'); fireEvent.click(await screen.findByRole('button', { name: 'Test cloud transcription' }));
     await screen.findByText('Starting system recording');
     act(() => {
       current = { ...current, sequence: 2, capturePreparing: false, cancelGeneration: 1, phase: 'idle', audioState: { state: 'stopped', detail: null } };
@@ -708,16 +862,14 @@ describe('system microphone keyboard settings', () => {
     current.settings.asrModel = null;
     const pending = deferred<KeyboardState>();
     keyboard.updateSettings = async settings => { updates.push(settings); return pending.promise; };
-    show();
-    const setup = within(await screen.findByRole('region', { name: 'First-use checks' }));
+    await show('voice');
     fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' })); fireEvent.click(await screen.findByText('Streaming model'));
     await waitFor(() => expect(updates).toHaveLength(1));
-    expect(Boolean(setup.queryByText('Saved ASR model matches the recognition mode'))).toBe(false);
+    await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).getByText('Wait for settings to finish saving.')).toBeTruthy();
     expect(Boolean(screen.queryByRole('button', { name: 'Save current settings' }))).toBe(false);
     await act(async () => { current = { ...current, sequence: 1, settings: updates[0] }; pending.resolve(current); });
-    await setup.findByText('Saved ASR model matches the recognition mode');
     await screen.findByText('Settings saved automatically');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(false);
   });
@@ -725,11 +877,13 @@ describe('system microphone keyboard settings', () => {
   test('text input is visible while queued, blurs into a save and keeps newer typing when its older acknowledgement arrives', async () => {
     const older = deferred<KeyboardState>();
     keyboard.updateSettings = async settings => { updates.push(settings); return updates.length === 1 ? older.promise : { ...current, sequence: 2, settings }; };
-    show();
+    await show('voice'); await openDisclosure(en.keyboard.preferencesTitle);
     const language = await screen.findByRole('textbox', { name: 'Recognition language' });
     fireEvent.change(language, { target: { value: 'en' } });
     expect(updates).toHaveLength(0); expect((language as HTMLInputElement).value).toBe('en');
+    await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
+    await visitTab('voice');
     fireEvent.blur(language); await waitFor(() => expect(updates).toHaveLength(1));
     fireEvent.change(language, { target: { value: 'zh' } });
     await act(async () => { older.resolve({ ...current, sequence: 1, settings: updates[0] }); });
@@ -740,17 +894,18 @@ describe('system microphone keyboard settings', () => {
 
   test('recognition controls pause during native capture while shortcut disable remains immediately available', async () => {
     current.phase = 'recording'; current.audioState.state = 'capturing';
-    show();
+    await show('voice'); await openDisclosure(en.keyboard.preferencesTitle);
     const language = await screen.findByRole('textbox', { name: 'Recognition language' });
     expect(language.hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('combobox', { name: 'ASR model' }).getAttribute('aria-disabled')).toBe('true');
-    expect(within(screen.getByRole('region', { name: 'Recognition and beautification' })).getByText('Recognition settings can be changed after the current recording or processing finishes.')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: en.keyboard.recognitionTitle })).getByText('Recognition settings can be changed after the current recording or processing finishes.')).toBeTruthy();
+    await visitTab('input');
     fireEvent.click(screen.getByRole('switch', { name: 'Enable voice shortcuts' }));
     await waitFor(() => expect(updates).toHaveLength(1)); expect(updates[0].enabled).toBe(false);
   });
 
   test('IME input does not save partial composition, then saves its final value after blur', async () => {
-    show(); const language = await screen.findByRole('textbox', { name: 'Recognition language' });
+    await show('voice'); await openDisclosure(en.keyboard.preferencesTitle); const language = await screen.findByRole('textbox', { name: 'Recognition language' });
     fireEvent.compositionStart(language); fireEvent.change(language, { target: { value: 'z' } });
     fireEvent.blur(language); expect(updates).toHaveLength(0);
     fireEvent.change(language, { target: { value: 'zh' } }); fireEvent.compositionEnd(language); fireEvent.blur(language);
@@ -758,7 +913,7 @@ describe('system microphone keyboard settings', () => {
   });
 
   test('leaving the page flushes its queued completed text without waiting for the debounce', async () => {
-    const view = show(); const language = await screen.findByRole('textbox', { name: 'Recognition language' });
+    const view = await show('voice'); await openDisclosure(en.keyboard.preferencesTitle); const language = await screen.findByRole('textbox', { name: 'Recognition language' });
     fireEvent.change(language, { target: { value: 'en' } }); expect(updates).toHaveLength(0);
     view.unmount(); await waitFor(() => expect(updates).toHaveLength(1)); expect(updates[0].language).toBe('en');
   });
@@ -768,7 +923,7 @@ describe('system microphone keyboard settings', () => {
       const normalized = { ...settings, dictionary: settings.dictionary.map(term => term.trim()).filter(Boolean) };
       current = { ...current, sequence: current.sequence + 1, settings: normalized }; return current;
     };
-    show(); const dictionary = await screen.findByRole('textbox', { name: 'Recognition dictionary' });
+    await show('voice'); await openDisclosure(en.keyboard.preferencesTitle); const dictionary = await screen.findByRole('textbox', { name: 'Recognition dictionary' });
     fireEvent.focus(dictionary); fireEvent.change(dictionary, { target: { value: 'Name\n' } });
     (dictionary as HTMLTextAreaElement).setSelectionRange(5, 5);
     await waitFor(() => expect(updates).toHaveLength(1));

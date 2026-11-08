@@ -196,3 +196,15 @@ UI 映射与外置状态相关 7 项测试通过（44 个断言），翻译生�
 修复保留 typed kind、HTTP 状态、已有脱敏边界内的有界供应商诊断；HTTP 402 显示中文额度/余额排查提示，失败前后仍明确未开始录音或保留已有正文。生命周期日志只记录类型、HTTP 和真实失败代次，不记录服务端正文、用户词典、声音或凭据。握手端复用统一有界错误解析与凭据脱敏，严格配置回执及原有录音准入不放宽。
 
 本次定向协议测试 `cargo test --locked --offline -p nomifun-model-invoke streaming_asr::tests --lib` 为 23/23 通过，包含 HTTP 拒绝、错误响应体上限、服务端错误与密钥回显脱敏、严格回执和网络原因。桌面 `keyboard::models::tests` 6/6 通过，覆盖 typed 分类、HTTP 402、提示边界、流式/文件协议隔离与原有模型操作；以 `cargo test --profile dev --no-default-features -p nomifun-desktop --bin nomifun-desktop keyboard::models::tests -- --test-threads=1` 执行，只运行所选测试。桌面检查日志保存在仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-asr-handshake-40d6d2c28c224521922e2dfca854790f\desktop-model-tests.log`；原始运行日志仍在前述 `dev-watch.log`。账户额度恢复后的真实语音转写、macOS/Linux 本次运行未验证，不能将模拟测试或一次额度拒绝写成真实识别成功。
+
+## 语音键盘配置页重构（2026-11-08）
+
+本次只重构 renderer 的信息结构、控件布局和呈现，不修改后端、模型/设备协议或用户已保存的语音偏好。实际重构前截图确认：首次检查和错误信息占据大半首屏，识别、词典、美化和测试混在长页，核心模型与麦克风需要多次滚动才能配置。新页面采用四个任务分区，识别模型与麦克风直接呈现；快捷键和可选设备在较宽内容区并排组织，窄内容区使用单列，字幕样式有字号预览，本地/云端检查在独立分区明确说明音频去向。低频参数与技术详情折叠，保存失败仍保留草稿和重试入口。
+
+本次定向 `KeyboardSettings.test.tsx`、`keyboardSettingsAutosave.test.ts`、`keyboardReadiness.test.ts` 共 130/130 通过、606 个断言。原组件 58 项场景保留，新增分区/草稿/检查 owner/错误详情/默认折叠和缺少输入设备的交互回归；没有以隐藏元素查询跳过实际导航。typecheck、i18n（8606 键、6 项自测）、桌面 UI 边界、theme/theme-vars、dead-css 检查通过。共享 PageHeader 的 18px/26px 标题契约保持。
+
+使用 in-app browser 运行真实页面与224px设置导航的隔离预览，在1280×900与880×600、浅色/深色、中英文检查布局、控件边界和标签键盘导航。实际走过本地模拟检查跨分区继续/停止、保存失败后草稿与重试保留、错误摘要进入技术详情、设备占用局部显示，以及无输入设备的就地提示。页面宽度未超过视口；抽查正文/说明文字的浅色对比度为14.55/6.58，深色配色亦已目视检查，不将抽查宣称为完整无障碍合规。
+
+预览入口为 `ui/test/voice-keyboard-preview.html`，所有原生、权限、设置与音频行为均为明确内存模拟，未知fetch不回落真实后端。场景选择使用同源完整导航，避免产品的跨挂载草稿恢复协调器污染另一个测试场景。截图、审查记录和测试日志保存在仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-voice-settings-redesign-RMoQW2\`；遮挡截图已在审查记录中标为拒绝，不作为通过证据。本轮不录制环境声音、不调用真实云端模型、不改变系统权限，macOS/Linux原生窗口没有重新执行。
+
+Windows 真实开发窗口已确认显示四个分区、原有 StepFun 流式模型和系统麦克风；与重构前同尺寸截图比较，核心识别模式、模型和麦克风现已同时出现在首屏。最终原生截图为 `14-after-native-top.png`，没有在真实窗口启动录音或修改语音设置。收尾时 in-app browser 控制连接超时，未能确认预览标签常驻和视口重置；此前的视口/交互证据已保存，原生窗口核查完成，隔离预览HTTP服务仍可独立访问。

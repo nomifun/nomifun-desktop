@@ -1,22 +1,106 @@
 .keyboard-loading { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 32px; }
-.keyboard-model-select { width: 280px; max-width: 100%; }
-.keyboard-short-input { width: 180px; }
-.keyboard-shortcut-input { width: 280px; max-width: 100%; }
-.keyboard-font-select { width: 92px; }
-.keyboard-field { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; font-size: 13px; border-top: 1px solid var(--color-border-2); }
-.keyboard-field small { color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+
+.voice-settings-page .page-header { align-items: center; margin-bottom: 16px; }
+.voice-settings-page .page-header__actions { align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.voice-save-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 11px; line-height: 1.5; max-width: 190px; }
+.voice-save-status__dot { flex-shrink: 0; width: 5px; height: 5px; border-radius: 50%; background: var(--text-secondary); }
+.voice-save-status[data-state='saved'] .voice-save-status__dot { background: var(--success); }
+.voice-save-status[data-state='failed'] { color: var(--danger); }
+.voice-save-status[data-state='failed'] .voice-save-status__dot { background: var(--danger); }
+.voice-settings-navigation { position: sticky; top: 0; z-index: 4; padding: 8px 0 16px; background: var(--color-bg-1); }
+.voice-settings-page .cv-tabs { margin: 0; border-radius: 9px; }
+.voice-settings-page .cv-tabs button { min-width: 0; min-height: 34px; padding: 7px 12px; font-size: 13px; }
+.voice-settings-content { min-width: 0; }
+.voice-pane { display: grid; gap: 16px; min-width: 0; }
+.voice-pane[hidden] { display: none; }
+.voice-pane-intro { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.voice-settings-page .cv-panel { border-radius: 12px; }
+.voice-settings-page .cv-panel__header { align-items: flex-start; gap: 12px; padding: 16px 18px 14px; }
+.voice-settings-page .cv-panel__header h2 { font-size: 14px; line-height: 20px; }
+.voice-settings-page .cv-panel__header p { line-height: 1.6; }
+.voice-settings-page .cv-panel__header > a { flex-shrink: 0; font-size: 12px; color: var(--text-secondary); text-decoration: none; }
+.voice-settings-page .cv-panel__header > a:hover { color: var(--text-primary); text-decoration: underline; }
+.voice-settings-page .cv-panel__body { padding: 0 18px; }
+.voice-settings-page .cv-row { gap: 16px; padding: 14px 0; }
+.voice-settings-page .cv-row__copy p { line-height: 1.6; overflow-wrap: anywhere; }
+.voice-settings-page .cv-row__control { min-width: 0; }
+.voice-settings-page .cv-note { margin: 0; padding: 10px 0 14px; line-height: 1.6; }
+.voice-recognition-grid, .voice-input-grid, .voice-appearance-grid, .voice-diagnostics-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }
+.voice-field { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 16px 0; min-width: 0; }
+.voice-field + .voice-field { border-top: 1px solid var(--color-border-2); }
+.voice-field__label { font-size: 13px; line-height: 1.5; font-weight: 500; color: var(--text-primary); }
+.voice-field__hint { color: var(--text-secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.voice-settings-page .keyboard-model-select { width: 100%; max-width: 100%; }
+.voice-settings-page .keyboard-short-input { width: 180px; max-width: 100%; }
+.voice-settings-page .keyboard-shortcut-input { width: 280px; max-width: 100%; font-size: 12px; }
+.voice-settings-page .keyboard-font-select { width: 92px; }
+.voice-settings-page .arco-input-wrapper, .voice-settings-page .arco-select-view-single, .voice-settings-page .arco-textarea-wrapper {
+  border: 1px solid var(--color-border-2); border-radius: 7px;
+}
+.voice-settings-page .arco-input-wrapper:hover, .voice-settings-page .arco-select-view-single:hover, .voice-settings-page .arco-textarea-wrapper:hover {
+  border-color: var(--color-border-3);
+}
+.voice-settings-page .arco-input-wrapper:focus-within, .voice-settings-page .arco-select-view-single:focus-within, .voice-settings-page .arco-textarea-wrapper:focus-within {
+  border-color: var(--control-focus-ring, var(--color-primary));
+}
+.voice-settings-page .cv-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; box-sizing: border-box; }
+.voice-settings-page .cv-choice button { min-width: 0; padding: 9px 10px; line-height: 1.5; white-space: normal; }
+.voice-disclosure { border-top: 1px solid var(--color-border-2); padding: 14px 0; min-width: 0; font-size: 12px; color: var(--text-secondary); }
+.voice-disclosure > summary { cursor: pointer; color: var(--text-primary); font-size: 12px; line-height: 1.6; font-weight: 500; }
+.voice-disclosure > summary:focus-visible { outline: 2px solid var(--control-focus-ring, var(--color-primary)); outline-offset: 4px; border-radius: 3px; }
+.voice-disclosure__meta { margin-left: 10px; color: var(--text-secondary); font-weight: 400; }
+.voice-disclosure > p { margin: 12px 0 0; line-height: 1.8; overflow-wrap: anywhere; }
+.voice-disclosure .voice-field { padding-bottom: 0; }
+.voice-shortcut-guide { margin-top: 0; }
+.voice-panel-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0 16px; border-top: 1px solid var(--color-border-2); font-size: 12px; color: var(--text-secondary); }
+.voice-context-note { margin: 0; padding: 12px 0; font-size: 12px; line-height: 1.7; color: var(--text-secondary); overflow-wrap: anywhere; }
+.voice-notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; margin-bottom: 8px; border: 1px solid var(--color-border-2); border-radius: 10px; background: var(--color-fill-1); }
+.voice-notice > div { min-width: 0; }
+.voice-notice > .arco-btn { flex-shrink: 0; }
+.voice-notice p { margin: 4px 0 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--text-primary); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.voice-eyebrow { font-size: 11px; line-height: 1.5; font-weight: 500; color: var(--text-secondary); }
+.voice-notice .voice-eyebrow { color: var(--warning); }
+.voice-error-content { padding: 14px 0 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.voice-error-content > p { margin: 0 0 14px; }
+.voice-error-content .voice-disclosure > p { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; color: var(--text-secondary); }
+.voice-test-activity { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; color: var(--text-primary); font-size: 12px; }
+.voice-test-activity > span { flex: 1; min-width: 180px; }
+.voice-test-step { display: block; padding-top: 16px; }
+.voice-test-card .cv-panel__body { padding-bottom: 16px; }
+.voice-test-card .keyboard-form-actions { padding: 14px 0; }
+.voice-test-result { min-width: 0; padding: 12px 14px; background: var(--color-fill-1); border-radius: 8px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.voice-test-result .cv-status { font-size: 12px; white-space: normal; }
+.voice-test-result p { margin: 7px 0 0; }
 .keyboard-form-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
-.keyboard-setup-list { margin: 0; padding: 0; list-style: none; }
-.keyboard-setup-list > li + li { border-top: 1px solid var(--color-border-2); }
-.keyboard-setup-list .cv-row { border: 0; }
-.keyboard-section-target { scroll-margin-top: 96px; }
-.keyboard-section-target:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 4px; }
 .keyboard-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.keyboard-test-section { border-top: 1px solid var(--color-border-2); padding-top: 16px; }
-.keyboard-test-section h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.keyboard-test-section [role='status'] { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
-.keyboard-blockers { margin: 0 0 12px; padding-left: 20px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
-.keyboard-meter { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--text-secondary); font-size: 12px; }
-.keyboard-meter meter { width: 220px; max-width: 100%; }
-.keyboard-save-status { position: sticky; top: 0; z-index: 2; padding: 8px 12px; border: 1px solid var(--color-border-2); border-radius: 8px; background: var(--color-bg-1); display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
-.keyboard-save-status p { margin: 0; overflow-wrap: anywhere; }
+.keyboard-blockers { margin: 0 0 12px; padding-left: 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.keyboard-meter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; color: var(--text-secondary); font-size: 11px; }
+.keyboard-meter meter { width: 100%; max-width: 220px; }
+.voice-subtitle-preview { display: flex; flex-direction: column; justify-content: center; gap: 16px; min-height: 142px; box-sizing: border-box; margin: 16px 0 4px; padding: 18px; border-radius: 9px; background: var(--color-fill-1); }
+.voice-subtitle-preview p { margin: 0; line-height: 1.7; color: var(--text-primary); overflow-wrap: anywhere; }
+.voice-subtitle-preview small { color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
+.voice-hardware-keys { padding: 0; }
+.voice-shortcut-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; padding: 16px 0 8px; border-top: 1px solid var(--color-border-2); }
+.voice-shortcut-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.voice-shortcut-field label { color: var(--text-primary); font-size: 13px; line-height: 1.5; font-weight: 500; }
+.voice-shortcut-field > span { color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
+.voice-settings-page .voice-shortcut-field .keyboard-shortcut-input { width: 100%; }
+.voice-hardware-keys .cv-row:first-child { border-top: 1px solid var(--color-border-2); }
+.voice-device-details { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 10px 16px; margin: 14px 0 0; font-size: 12px; line-height: 1.6; }
+.voice-device-details dt { color: var(--text-secondary); }
+.voice-device-details dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; user-select: text; }
+
+@container settings (min-width: 760px) {
+  .voice-recognition-grid { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
+  .voice-input-grid { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+  .voice-appearance-grid, .voice-diagnostics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container settings (max-width: 680px) {
+  .voice-settings-page .page-header { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .voice-settings-page .page-header__actions { gap: 6px; }
+  .voice-settings-page .cv-tabs button { padding: 7px 8px; white-space: normal; font-size: 12px; }
+  .voice-settings-page .cv-row__control { max-width: 54%; }
+  .voice-settings-page .keyboard-shortcut-input { width: 246px; }
+  .voice-settings-page .cv-panel__header { gap: 10px; }
+  .voice-disclosure__meta { display: block; margin: 3px 0 0 15px; }
+}
