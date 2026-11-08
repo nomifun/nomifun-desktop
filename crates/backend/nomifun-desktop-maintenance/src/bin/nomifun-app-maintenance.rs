@@ -191,7 +191,9 @@ fn run(options: &Options) -> Result<()> {
     let prepared = MaintenanceGuard::prepare_with_intent_checked_in(runtime, Duration::from_secs(30), &mut intent, |observed| {
         #[cfg(windows)]
         windows::validate_runtime_ownership(&options.installed, &checked_runtime, observed)?;
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        nomifun_desktop_maintenance::desktop_control::validate_runtime_ownership(&options.installed, &checked_runtime, observed.desktop)?;
+        #[cfg(not(any(windows, target_os = "macos")))]
         nomifun_desktop_maintenance::legacy_service::validate_runtime_ownership(&options.installed, &checked_runtime, observed.desktop)?;
         participants_checked = true;
         Ok(())

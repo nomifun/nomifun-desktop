@@ -1,54 +1,13 @@
-use std::{path::{Path,PathBuf},time::Duration};
-#[cfg(target_os="macos")]
-use std::{io::Read,process::{Command,ExitStatus,Output,Stdio},time::Instant};
-use anyhow::{Result,ensure};
-#[cfg(any(unix,test))]
+use std::time::Duration;
+use anyhow::Result;
+#[cfg(any(not(target_os="macos"),test))]
+use std::path::{Path,PathBuf};
+#[cfg(any(not(target_os="macos"),test))]
+use anyhow::ensure;
+#[cfg(any(target_os="linux",test))]
 use anyhow::Context;
 
-#[cfg(target_os="macos")]
-fn command_status(command:&mut Command)->Result<ExitStatus>{
-    Ok(command_output(command)?.status)
-}
-
-/// Drain both pipes without a reader thread so a stuck command cannot leave a
-/// worker behind. The system command and its output have independent bounds.
-#[cfg(target_os="macos")]
-fn command_output(command:&mut Command)->Result<Output>{
-    use std::os::fd::AsRawFd;
-    fn nonblocking(fd:std::os::fd::RawFd)->Result<()>{
-        let flags=unsafe{libc::fcntl(fd,libc::F_GETFL)};
-        ensure!(flags>=0,"无法读取系统登录命令管道状态");
-        ensure!(unsafe{libc::fcntl(fd,libc::F_SETFL,flags|libc::O_NONBLOCK)}>=0,"无法设置系统登录命令管道状态");
-        Ok(())
-    }
-    fn drain(pipe:&mut impl Read,bytes:&mut Vec<u8>)->Result<bool>{
-        let mut buffer=[0u8;4096];
-        loop{match pipe.read(&mut buffer){
-            Ok(0)=>return Ok(true),
-            Ok(length)=>{ensure!(bytes.len()+length<=256*1024,"系统登录登记输出过大");bytes.extend_from_slice(&buffer[..length]);},
-            Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>return Ok(false),
-            Err(error) if error.kind()==std::io::ErrorKind::Interrupted=>{},
-            Err(error)=>return Err(error.into()),
-        }}
-    }
-    let mut child=command.env("LC_ALL","C").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let result=(||{
-        let mut stdout=child.stdout.take().context("系统登录命令 stdout 不可用")?;
-        let mut stderr=child.stderr.take().context("系统登录命令 stderr 不可用")?;
-        nonblocking(stdout.as_raw_fd())?;nonblocking(stderr.as_raw_fd())?;
-        let deadline=Instant::now()+Duration::from_secs(5);
-        let(mut out,mut err)=(Vec::new(),Vec::new());
-        loop{
-            let out_done=drain(&mut stdout,&mut out)?;let err_done=drain(&mut stderr,&mut err)?;
-            if let Some(status)=child.try_wait()?{if out_done&&err_done{return Ok(Output{status,stdout:out,stderr:err});}}
-            ensure!(Instant::now()<deadline,"系统登录登记查询超时");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    })();
-    if result.is_err(){let _=child.kill();let _=child.wait();}
-    result
-}
-
+#[cfg(not(target_os="macos"))]
 fn login_executable()->Result<PathBuf>{
     // AppImage login entries name the persistent image; native process identity
     // is checked separately against current_exe, never against this wrapper.
@@ -61,6 +20,7 @@ fn login_executable()->Result<PathBuf>{
 /// Retire an installed daemon before registering this GUI's desktop endpoint.
 /// The retirement guard shares startup admission with the current GUI and
 /// holds the legacy owner lock until its matching login entries are removed.
+#[cfg(not(target_os="macos"))]
 pub fn retire_legacy_service()->Result<()>{
     let exe=std::env::current_exe()?.canonicalize()?;
     let runtime=nomifun_desktop_maintenance::ipc::runtime_dir()?;
@@ -72,6 +32,7 @@ pub fn retire_legacy_service()->Result<()>{
 
 /// Short-lived package/uninstall entrypoint. Keep startup and lifetime locks
 /// through login cleanup, including when only an old daemon remains alive.
+#[cfg(not(target_os="macos"))]
 pub fn stop_application(unregister:bool)->Result<()>{
     let exe=std::env::current_exe()?.canonicalize()?;
     let runtime=nomifun_desktop_maintenance::ipc::runtime_dir()?;
@@ -82,6 +43,20 @@ pub fn stop_application(unregister:bool)->Result<()>{
     Ok(())
 }
 
+/// Both macOS maintenance command aliases concern only the current app.
+/// Old login cleanup belongs exclusively to independent normal-startup work.
+#[cfg(target_os="macos")]
+pub fn stop_application(_unregister: bool) -> Result<()> {
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let runtime = nomifun_desktop_maintenance::ipc::runtime_dir()?;
+    let _maintenance = nomifun_desktop_maintenance::maintenance::MaintenanceGuard::prepare_application_with_intent_checked_in(
+        runtime.clone(), Duration::from_secs(30), &mut nomifun_desktop_maintenance::maintenance::ResumeIntent::default(),
+        |observed| nomifun_desktop_maintenance::desktop_control::validate_runtime_ownership(&exe, &runtime, observed.desktop),
+    )?;
+    Ok(())
+}
+
+#[cfg(any(not(target_os="macos"),test))]
 fn registration_executable_matches(installed:&Path,candidate:&str)->Result<bool>{
     let path=Path::new(candidate);
     if !path.is_absolute()||candidate.contains(['\n','\r','\0']){return Ok(false);}
@@ -89,13 +64,7 @@ fn registration_executable_matches(installed:&Path,candidate:&str)->Result<bool>
     Ok(resolved==installed.canonicalize()?)
 }
 
-#[cfg(target_os="macos")]
-fn registration_arguments_match(installed:&Path,arguments:&[String])->Result<bool>{
-    if arguments.len()!=2||arguments[1]!="--keyboard-service"{return Ok(false);}
-    registration_executable_matches(installed,&arguments[0])
-}
-
-#[cfg(any(target_os="macos",target_os="linux"))]
+#[cfg(target_os="linux")]
 fn read_legacy_registration(path:&Path)->Result<Option<Vec<u8>>>{
     use std::io::Read;
     match std::fs::symlink_metadata(path){
@@ -112,13 +81,14 @@ fn read_legacy_registration(path:&Path)->Result<Option<Vec<u8>>>{
     Ok(Some(contents))
 }
 
-#[cfg(any(target_os="macos",target_os="linux"))]
+#[cfg(target_os="linux")]
 fn remove_unchanged_registration(path:&Path,contents:&[u8])->Result<()>{
     ensure!(read_legacy_registration(path)?.as_deref()==Some(contents),"旧键盘登录登记已变化，未移除");
     std::fs::remove_file(path)?;
     Ok(())
 }
 
+#[cfg(not(target_os="macos"))]
 fn remove_legacy_login_registration(exe:&Path)->Result<()>{
     #[cfg(windows)]{
         use windows::{core::w,Win32::{Foundation::{ERROR_FILE_NOT_FOUND,ERROR_PATH_NOT_FOUND},System::Registry::{HKEY_CURRENT_USER,RRF_RT_REG_SZ,RegGetValueW,RegDeleteKeyValueW}}};
@@ -137,33 +107,6 @@ fn remove_legacy_login_registration(exe:&Path)->Result<()>{
             ensure!(read_run()?.as_deref()==Some(command.as_str()),"旧键盘 Run 登记已变化，未移除");
             unsafe{RegDeleteKeyValueW(HKEY_CURRENT_USER,w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),w!("NomiFunKeyboard"))}.ok()?;
         }}}
-    }
-    #[cfg(target_os="macos")] {
-        let path=PathBuf::from(std::env::var_os("HOME").context("HOME unavailable")?).join("Library/LaunchAgents/com.nomifun.desktop.keyboard.plist");
-        let contents=read_legacy_registration(&path)?;
-        let disk_owned=if let Some(bytes)=&contents{
-            match legacy_plist_registration(bytes){
-                Ok((program,arguments))=>registration_arguments_match(exe,&arguments)?&&match program{Some(program)=>registration_executable_matches(exe,&program)?,None=>true},
-                Err(_)=>false,
-            }
-        }else{false};
-        let service=format!("gui/{}/com.nomifun.desktop.keyboard",unsafe{libc::getuid()});
-        let output=command_output(Command::new("/bin/launchctl").args(["print",&service]))?;
-        if output.status.success(){
-            let text=std::str::from_utf8(&output.stdout).context("旧键盘 LaunchAgent 查询输出不是 UTF-8")?;
-            let (program,arguments)=legacy_launchctl_registration(text).context("无法证明已加载键盘 LaunchAgent 的程序归属，未卸载")?;
-            if registration_executable_matches(exe,&program)?&&registration_arguments_match(exe,&arguments)?{
-                let current=command_output(Command::new("/bin/launchctl").args(["print",&service]))?;
-                ensure!(current.status.success(),"旧键盘 LaunchAgent 在清理前变化，未卸载");
-                let identity=legacy_launchctl_registration(std::str::from_utf8(&current.stdout)?).context("旧键盘 LaunchAgent 在清理前归属不明，未卸载")?;
-                ensure!(identity==(program.clone(),arguments.clone())&&registration_executable_matches(exe,&identity.0)?&&registration_arguments_match(exe,&identity.1)?,"旧键盘 LaunchAgent 在清理前归属变化，未卸载");
-                ensure!(command_status(Command::new("/bin/launchctl").args(["bootout",&service]))?.success(),"无法移除已验证的旧键盘 LaunchAgent");
-            }
-        }else{
-            let error=std::str::from_utf8(&output.stderr).context("旧键盘 LaunchAgent 查询错误不是 UTF-8")?;
-            ensure!(error.contains("Could not find service")&&error.contains("com.nomifun.desktop.keyboard"),"无法确认旧键盘 LaunchAgent 是否加载，未清理");
-        }
-        if disk_owned{remove_unchanged_registration(&path,contents.as_deref().context("旧键盘 plist 不可用")?)?;}
     }
     #[cfg(target_os="linux")] {
         let base=std::env::var_os("XDG_CONFIG_HOME").filter(|p|Path::new(p).is_absolute()).map(PathBuf::from).unwrap_or(std::env::var_os("HOME").map(PathBuf::from).context("HOME unavailable")?.join(".config"));
@@ -215,56 +158,6 @@ fn legacy_desktop_executable(contents:&str)->Option<String>{
     Some(candidate)
 }
 
-#[cfg(any(target_os="macos",test))]
-fn legacy_launchctl_registration(contents:&str)->Option<(String,Vec<String>)>{
-    if contents.contains(['\0','\r']){return None;}
-    let mut lines=contents.lines();if !lines.next()?.trim().ends_with(" = {"){return None;}
-    let(mut depth,mut closed)=(1usize,false);let(mut program,mut arguments)=(None,None);
-    while let Some(line)=lines.next(){
-        let line=line.trim_start();
-        if depth==1{if let Some(value)=line.strip_prefix("program = "){if program.is_some()||value.is_empty(){return None;}program=Some(value.to_owned());continue;}
-            if line.trim_end()=="arguments = {"{
-                if arguments.is_some(){return None;}let mut values=Vec::new();let mut args_closed=false;
-                for argument in lines.by_ref(){let argument=argument.trim_start();if argument.trim_end()=="}"{args_closed=true;break;}if argument.trim_end().is_empty(){return None;}values.push(argument.to_owned());}
-                if !args_closed{return None;}arguments=Some(values);continue;
-            }
-        }
-        if line.trim_end()=="}"{depth=depth.checked_sub(1)?;if depth==0{closed=true;break;}}
-        // launchctl uses `=>` for event-trigger maps as well as `=` for
-        // ordinary sections. Both open a block whose closing brace counts.
-        else if line.trim_end().ends_with(" = {")||line.trim_end().ends_with(" => {"){depth+=1;}
-    }
-    if !closed||lines.any(|line|!line.trim().is_empty()){return None;}
-    Some((program?,arguments?))
-}
-
-#[cfg(target_os="macos")]
-fn legacy_plist_registration(bytes:&[u8])->Result<(Option<String>,Vec<String>)>{
-    use serde::de::{Deserialize,Deserializer,MapAccess,Visitor};
-    struct Registration{program:Option<String>,arguments:Vec<String>}
-    impl<'de> Deserialize<'de> for Registration{
-        fn deserialize<D:Deserializer<'de>>(deserializer:D)->std::result::Result<Self,D::Error>{
-            struct RegistrationVisitor;
-            impl<'de> Visitor<'de> for RegistrationVisitor{
-                type Value=Registration;
-                fn expecting(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("unique-key keyboard LaunchAgent dictionary")}
-                fn visit_map<M:MapAccess<'de>>(self,mut map:M)->std::result::Result<Registration,M::Error>{
-                    let mut keys=std::collections::BTreeSet::new();let(mut label,mut program,mut arguments)=(None,None,None);
-                    while let Some(key)=map.next_key::<String>()?{
-                        if !keys.insert(key.clone()){return Err(serde::de::Error::custom("duplicate LaunchAgent key"));}
-                        match key.as_str(){"Label"=>label=Some(map.next_value::<String>()?),"Program"=>program=Some(map.next_value::<String>()?),"ProgramArguments"=>arguments=Some(map.next_value::<Vec<String>>()?),_=>{map.next_value::<serde::de::IgnoredAny>()?;}}
-                    }
-                    if label.as_deref()!=Some("com.nomifun.desktop.keyboard"){return Err(serde::de::Error::custom("unrelated LaunchAgent label"));}
-                    Ok(Registration{program,arguments:arguments.ok_or_else(||serde::de::Error::custom("missing LaunchAgent arguments"))?})
-                }
-            }
-            deserializer.deserialize_map(RegistrationVisitor)
-        }
-    }
-    let registration:Registration=plist::from_bytes(bytes)?;
-    Ok((registration.program,registration.arguments))
-}
-
 #[cfg(test)]mod tests{use super::*;
     #[test]fn desktop_exec_preserves_a_single_argument_and_neutralizes_field_codes(){
         assert_eq!(desktop_exec(Path::new("/opt/Nomi Fun/100%/app")).unwrap(),"/opt/Nomi Fun/100%%/app");
@@ -282,54 +175,6 @@ fn legacy_plist_registration(bytes:&[u8])->Result<(Option<String>,Vec<String>)>{
         for override_entry in [format!("{contents}DBusActivatable=true\n"),contents.replace("Type=Application","Type=Link"),format!("{contents}Type=Application\n")]{assert_eq!(legacy_desktop_executable(&override_entry),None);}
         for invalid in [format!("{contents}Exec=\"/other/app\" --keyboard-service\n"),format!("{contents}[Desktop Entry]\nExec=\"/other/app\" --keyboard-service\n"),"[Desktop Entry]\nExec=\"/app\" --keyboard-service --extra\n".to_owned(),"[Desktop Entry]\nExec=\"/app%f\" --keyboard-service\n".to_owned(),"[Desktop Action Other]\nExec=\"/app\" --keyboard-service\n".to_owned()]{assert_eq!(legacy_desktop_executable(&invalid),None,"{invalid:?}");}
     }
-    #[test]fn legacy_launchctl_requires_unique_closed_top_level_identity(){
-        let output="gui/501/com.nomifun.desktop.keyboard = {\n\tprogram = /Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n\targuments = {\n\t\t/Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n\t\t--keyboard-service\n\t}\n\tenvironment = {\n\t\tprogram = /other/app\n\t}\n}\n";
-        let expected=("/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),vec!["/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),"--keyboard-service".to_owned()]);
-        assert_eq!(legacy_launchctl_registration(output),Some(expected));
-        let trailing=output.replace("/Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n","/Applications/Nomi Fun.app/Contents/MacOS/NomiFun \n");
-        let parsed=legacy_launchctl_registration(&trailing).unwrap();
-        assert!(parsed.0.ends_with(' '));assert!(parsed.1[0].ends_with(' '));
-        assert_eq!(legacy_launchctl_registration(&output.replace("NomiFun\n","NomiFun\r\n")),None);
-        assert_eq!(legacy_launchctl_registration(&output.replacen("\targuments = {","\tprogram = /other/app\n\targuments = {",1)),None);
-        assert_eq!(legacy_launchctl_registration(output.trim_end().trim_end_matches('}')),None);
-        assert_eq!(legacy_launchctl_registration("job = {\n environment = {\n program = /other/app\n arguments = {\n /other/app\n --keyboard-service\n }\n }\n}\n"),None);
-    }
-
-    // Sanitized native `launchctl print` output from an old keyboard login job.
-    const LEGACY_LAUNCHCTL_PRINT:&str=include_str!("fixtures/legacy-launchctl-print.txt");
-    #[test]fn legacy_launchctl_accepts_native_event_triggers_and_following_sections(){
-        assert_eq!(legacy_launchctl_registration(LEGACY_LAUNCHCTL_PRINT),Some((
-            "/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),
-            vec!["/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),"--keyboard-service".to_owned()],
-        )));
-    }
-    #[test]fn legacy_launchctl_does_not_read_identity_from_arrow_nested_blocks(){
-        let nested=LEGACY_LAUNCHCTL_PRINT.replace("\t\t\tdescriptor = {",concat!(
-            "\t\t\tprogram = /other/app\n",
-            "\t\t\targuments = {\n\t\t\t\t/other/app\n\t\t\t\t--keyboard-service\n\t\t\t}\n",
-            "\t\t\tdescriptor = {",
-        ));
-        let expected=Some(("/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),
-            vec!["/Applications/Nomi Fun.app/Contents/MacOS/NomiFun".to_owned(),"--keyboard-service".to_owned()]));
-        assert_eq!(legacy_launchctl_registration(&nested),expected);
-        let without_top_level=nested.replace(concat!(
-            "\tprogram = /Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n",
-            "\targuments = {\n\t\t/Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n\t\t--keyboard-service\n\t}\n",
-        ),"");
-        assert_eq!(legacy_launchctl_registration(&without_top_level),None);
-    }
-    #[test]fn legacy_launchctl_rejects_malformed_or_ambiguous_native_output(){
-        for (case,invalid) in [
-            ("unclosed trigger",LEGACY_LAUNCHCTL_PRINT.replace("\t\t}\n\t}\n\n\tevent channels", "\t}\n\n\tevent channels")),
-            ("extra closing brace",format!("{LEGACY_LAUNCHCTL_PRINT}}}\n")),
-            ("trailing output",format!("{LEGACY_LAUNCHCTL_PRINT}unexpected trailing output\n")),
-            ("invalid root",LEGACY_LAUNCHCTL_PRINT.replacen(" = {", " => {",1)),
-            ("duplicate arguments",LEGACY_LAUNCHCTL_PRINT.replacen("\tevent triggers = {", "\targuments = {\n\t\t/other/app\n\t\t--keyboard-service\n\t}\n\tevent triggers = {",1)),
-            ("missing program",LEGACY_LAUNCHCTL_PRINT.replace("\tprogram = /Applications/Nomi Fun.app/Contents/MacOS/NomiFun\n", "")),
-            ("NUL",LEGACY_LAUNCHCTL_PRINT.replace("state = not running", "state = not\0running")),
-        ]{assert_eq!(legacy_launchctl_registration(&invalid),None,"{case}");}
-    }
-
     #[test]fn legacy_registration_requires_the_actual_current_installation(){
         let dir=tempfile::tempdir().unwrap();let installed=dir.path().join("NomiFun");let other=dir.path().join("other-NomiFun");
         std::fs::write(&installed,b"current").unwrap();std::fs::write(&other,b"other").unwrap();
@@ -342,7 +187,7 @@ fn legacy_plist_registration(bytes:&[u8])->Result<(Option<String>,Vec<String>)>{
             assert!(registration_executable_matches(&installed,alias.to_str().unwrap()).unwrap());
         }
     }
-    #[cfg(any(target_os="macos",target_os="linux"))]
+    #[cfg(target_os="linux")]
     #[test]fn legacy_registration_cleanup_refuses_symlinks_and_changed_files(){
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("registration");
         std::fs::write(&path,b"old").unwrap();assert_eq!(read_legacy_registration(&path).unwrap(),Some(b"old".to_vec()));
@@ -351,28 +196,6 @@ fn legacy_plist_registration(bytes:&[u8])->Result<(Option<String>,Vec<String>)>{
         let link=dir.path().join("symlink");std::os::unix::fs::symlink(&path,&link).unwrap();
         assert!(read_legacy_registration(&link).is_err());assert_eq!(std::fs::read(&path).unwrap(),b"new");
         remove_unchanged_registration(&path,b"new").unwrap();assert!(!path.exists());
-    }
-    #[cfg(target_os="macos")]
-    #[test]fn legacy_plist_rejects_duplicate_identity_and_extra_arguments(){
-        let prefix=r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>com.nomifun.desktop.keyboard</string>"#;
-        let identity="<key>Program</key><string>/current/NomiFun</string><key>ProgramArguments</key><array><string>/current/NomiFun</string><string>--keyboard-service</string></array>";
-        let bytes=format!("{prefix}{identity}</dict></plist>");
-        assert_eq!(legacy_plist_registration(bytes.as_bytes()).unwrap(),(Some("/current/NomiFun".to_owned()),vec!["/current/NomiFun".to_owned(),"--keyboard-service".to_owned()]));
-        for duplicate in ["<key>Program</key><string>/other/NomiFun</string>","<key>ProgramArguments</key><array><string>/other/NomiFun</string></array>","<key>Label</key><string>other</string>"]{
-            let invalid=format!("{prefix}{identity}{duplicate}</dict></plist>");assert!(legacy_plist_registration(invalid.as_bytes()).is_err());
-        }
-        let dir=tempfile::tempdir().unwrap();let installed=dir.path().join("NomiFun");std::fs::write(&installed,b"current").unwrap();
-        let arguments=vec![installed.to_string_lossy().into_owned(),"--keyboard-service".to_owned()];
-        assert!(registration_arguments_match(&installed,&arguments).unwrap());
-        let mut extra=arguments;extra.push("--extra".into());assert!(!registration_arguments_match(&installed,&extra).unwrap());
-    }
-    #[cfg(target_os="macos")]
-    #[test]fn legacy_command_capture_bounds_output_and_waits_for_exit(){
-        let output=command_output(Command::new("/usr/bin/printf").arg("keyboard-test")).unwrap();
-        assert!(output.status.success());assert_eq!(output.stdout,b"keyboard-test");
-        assert!(command_output(Command::new("/usr/bin/head").args(["-c","300000","/dev/zero"])).is_err());
-        let start=Instant::now();assert!(command_output(Command::new("/bin/sleep").arg("8")).is_err());
-        assert!(start.elapsed()<Duration::from_secs(7));
     }
 
 }

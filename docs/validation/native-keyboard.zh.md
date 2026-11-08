@@ -92,3 +92,35 @@ Windows 本机已执行：
 两报告记录相同二进制 SHA-256 `e10af04c3ff409f4fa26215f0d2000091318eb02595eace41474a833263f0283` 和最终前端 UUID。音频为合成 PCM、设备帧为隔离注入、传输工作线程/文件锁为真实运行，供应商为 loopback fixture；不把它们写成实体串口、真实麦克风或云端成功。最终控制器 OS 例子亦已按最终 Settings 源码 SHA-256 `8f2ec8e4b5d059c7698a1d86912d8655425195a7786f48732795d8c28a1de72a` 重建并复跑，默认四组注册成功；其二进制 SHA-256 为 `933436ee882ec1fafb04cf920784c37d337a0fb02c7763f24ffb0c64ff9698d9`，运行前后源码未变。
 
 本轮未替换用户当前正式安装、未修改真实登录项/模型凭据/用户数据，未执行签名或发布。已有 `.tmp/` 中的其他工作保持不变并排除在提交之外。
+
+## macOS 源码级隔离加固（2026-11-08）
+
+按后续要求完成源码级链路加固，本轮不启动 NomiFun、GUI、真实麦克风、串口或真实 launchctl 测试。
+
+- macOS 正常启动与维护只使用 `NomiFun/app-maintenance`；可选设备使用 `NomiFun/external-keyboard`。原 `keyboard-service` 的锁、JSON、目录权限与登录项不再参与应用或语音准入。
+- 当前应用 stop/unregister 不查询、解析或清理旧登记。旧清理只在正常启动后的独立后台任务执行；加载任务与磁盘文件各自尽力处理，任一失败不抑制另一分支、不向核心调用方返回失败。
+- 语音启动移除 legacy startup_error 参数与封锁。退出与更新共用宿主停止标志，迟到初始化不能打开采音。
+- 采音所有权由同一原生生产者的代次证明管理。Actor 通道关闭、应答超时、设备 join 或快捷键注销错误，在没有原生采音 owner 时不再阻断应用退出/更新；旧回执、Drop、超时不能伪造新 owner 已释放。Mac 替换应用文件前关闭新准入并再次核验真实停止证明。
+- 外部维护在回复停止成功前设置同一宿主标志，再确认可能迟到的运行期并核验生产者；可选设备清理有界、快捷键清理不占用 Actor。
+- Windows/Linux 已发布安装器、包钩子协调协议与 Agent/backend 的关闭及检查点安全约束保持。
+
+本轮宿主实测与编译检查：
+
+| 检查 | 结果/范围 |
+| --- | --- |
+| 共享维护库与 helper 单元测试 | 33 + 1 通过；含持有旧目录全部锁、损坏旧描述符而现代启动/停机仍正常的实际文件锁夹具 |
+| 桌面维护入口与旧项隔离夹具 | `app_maintenance::` 15/15 通过（包含下方旧登记清理夹具），没有运行应用主入口 |
+| 捕获/更新停止证明测试 | 17/17 通过；无 owner 的丢失 Actor/超时继续、真实 owner 未确认仍拒绝、旧/重复回执隔离、宿主迟到初始化、最终 fence 不被取消移除 |
+| 可选适配器测试 | 6/6 通过；含阻塞清理的有界返回，无真实串口或 GUI |
+| 旧登记清理纯夹具 | 9/9 通过；使用临时文件和 fake query/bootout，没有调用系统 launchctl |
+| 包装与卸载定向检查 | `bun test scripts/keyboard-packaging.test.mjs scripts/desktop-build-mac.test.mjs scripts/desktop-build-win.test.mjs`：20 通过、11 按平台跳过、0 失败；POSIX 路由使用 Git sh 与临时假程序 |
+| Windows 编译 | 桌面 bin 与更新后的原生 Actor example compiler check 通过；没有执行 example |
+| Apple Silicon 共享维护模块 | `cargo check --locked --offline -p nomifun-desktop-maintenance --lib --bins --target aarch64-apple-darwin` 通过 |
+| Apple Silicon 平台/旧项清理源码 | 仓库外 SDK-free 最小工程直接引用实际 `app_maintenance/platform.rs` 与 `legacy_cleanup.rs`，`cargo check --lib --tests --target aarch64-apple-darwin` 通过 |
+| 完整 Mac 桌面编译 | 已尝试，`ring` 的 C 构建因本机缺少 `cc` 退出；本机也没有 Xcode/macOS SDK。不得将上述模块检查等同完整 App 构建通过 |
+
+完整仓库 `bun run check`、文档与 Windows 安装合同检查通过。新 macOS 卸载脚本还验证含空格 App 路径、只调用现代 stop/unregister 一次、历史警告不改变成功、当前应用真实停止失败仍非零、缺少可执行文件拒绝，以及 POSIX 语法。Info.plist 的语音用途文案已改为快捷键/字幕/可选硬件，audio-input entitlement 保持。
+
+本轮最终日志位于仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-macos-source-final-20261108\`；捕获与适配器定向结果在 `nomifun-voice-proof-unit-20261108`，包装报告在 `nomifun-macos-source-hardening-6499c35e79fe4f53b6653613a4b37c0e`。SDK-free 源码工程为 `nomifun-macos-maintenance-source-check-cw2h8x3w`，从仓库目录使用其 `--manifest-path` 以保持相同 Cargo source 配置。
+
+仍未验证：完整 Apple Silicon/Intel macOS App 链接、系统快捷键注册/冲突/按住与释放、TCC 与真实音频、真实 USB、真实 LaunchAgent 清理、签名/公证/DMG/updater 的实际安装升级卸载。原先 Windows GUI/合成 Actor 报告保留原构建标识，不冒充本次重新执行。未修改正式安装、真实登录项、凭据或用户数据；原 `.tmp/` 无关工作保留。

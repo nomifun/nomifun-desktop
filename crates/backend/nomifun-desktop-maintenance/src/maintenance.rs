@@ -89,11 +89,11 @@ impl ResumeIntent {
     }
 }
 
-/// Holding both lifetime locks blocks even already-released versions that do
-/// not yet implement the maintenance admission gate. Drop releases OS locks;
-/// it does not start a program or edit persisted user configuration.
+/// Application admission and desktop lifetime. Published Windows/Linux
+/// coordination additionally owns the retired service lock; modern macOS
+/// maintenance never observes or acquires that unrelated resource.
 pub struct MaintenanceGuard {
-    _owner: File,
+    _owner: Option<File>,
     _desktop: desktop_control::DesktopQuiescence,
     _admission: File,
     runtime: PathBuf,
@@ -122,7 +122,28 @@ impl MaintenanceGuard {
         runtime: PathBuf,
         wait: Duration,
         intent: &mut ResumeIntent,
+        check: impl FnMut(ResumeIntent) -> Result<()>,
+    ) -> Result<Self> {
+        Self::prepare_with_policy(runtime, wait, intent, check, !cfg!(target_os = "macos"))
+    }
+
+    /// Portable modern application-only policy, used by macOS and directly
+    /// exercised with hostile legacy fixtures on other development hosts.
+    pub fn prepare_application_with_intent_checked_in(
+        runtime: PathBuf,
+        wait: Duration,
+        intent: &mut ResumeIntent,
+        check: impl FnMut(ResumeIntent) -> Result<()>,
+    ) -> Result<Self> {
+        Self::prepare_with_policy(runtime, wait, intent, check, false)
+    }
+
+    fn prepare_with_policy(
+        runtime: PathBuf,
+        wait: Duration,
+        intent: &mut ResumeIntent,
         mut check: impl FnMut(ResumeIntent) -> Result<()>,
+        legacy_owner: bool,
     ) -> Result<Self> {
         ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid application maintenance runtime directory");
         let admission = open_lock(&runtime, "maintenance.lock")?;
@@ -141,7 +162,7 @@ impl MaintenanceGuard {
         intent.desktop |= observed.desktop;
         check(observed)?;
         let desktop = desktop_control::request_at(runtime.clone(), wait)?;
-        let owner = stop_legacy_owner(&runtime, wait, &desktop, &mut check)?;
+        let owner = if legacy_owner { Some(stop_legacy_owner(&runtime, wait, &desktop, &mut check)?) } else { None };
         Ok(Self {
             _owner: owner,
             _desktop: desktop,
@@ -220,6 +241,11 @@ fn stop_legacy_owner(runtime: &Path, wait: Duration, desktop: &desktop_control::
 mod tests {
     use super::*;
 
+    fn prepare_legacy(runtime: PathBuf, wait: Duration) -> Result<MaintenanceGuard> {
+        MaintenanceGuard::prepare_with_policy(runtime, wait, &mut ResumeIntent::default(), |_| Ok(()), true)
+    }
+
+
     #[test]
     fn legacy_owner_never_becomes_application_recovery_intent() {
         let dir = tempfile::tempdir().unwrap();
@@ -232,13 +258,13 @@ mod tests {
     fn missing_services_are_normal_and_lease_fences_both_lifetimes() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(ResumeIntent::capture(dir.path()).unwrap(), ResumeIntent::default());
-        let guard = MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(100)).unwrap();
+        let guard = prepare_legacy(dir.path().into(), Duration::from_millis(100)).unwrap();
         assert!(admit_startup(dir.path()).is_err());
         for name in ["desktop.lock", "owner.lock", "maintenance.lock"] {
             let file = open_lock(dir.path(), name).unwrap();
             assert!(FileExt::try_lock_exclusive(&file).is_err(), "{name}");
         }
-        assert!(MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(100)).is_err());
+        assert!(prepare_legacy(dir.path().into(), Duration::from_millis(100)).is_err());
         drop(guard);
         let _startup = admit_startup(dir.path()).unwrap();
         for name in ["desktop.lock", "owner.lock"] {
@@ -252,11 +278,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("owner.json"), "not a live endpoint").unwrap();
         fs::write(dir.path().join("desktop.json"), "not a live endpoint").unwrap();
-        let guard = MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(100)).unwrap();
+        let guard = prepare_legacy(dir.path().into(), Duration::from_millis(100)).unwrap();
         assert!(!dir.path().join("owner.json").exists());
         assert!(!dir.path().join("desktop.json").exists());
         drop(guard);
-        assert!(MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(100)).is_ok());
+        assert!(prepare_legacy(dir.path().into(), Duration::from_millis(100)).is_ok());
     }
 
     #[test]
@@ -265,7 +291,7 @@ mod tests {
         let owner = open_lock(dir.path(), "owner.lock").unwrap();
         FileExt::try_lock_exclusive(&owner).unwrap();
         assert!(lifetime_busy(dir.path(), "owner.lock").unwrap());
-        assert!(MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(50)).is_err());
+        assert!(prepare_legacy(dir.path().into(), Duration::from_millis(50)).is_err());
         assert!(admit_startup(dir.path()).is_ok());
         let desktop = open_lock(dir.path(), "desktop.lock").unwrap();
         FileExt::try_lock_exclusive(&desktop).unwrap();
@@ -275,9 +301,9 @@ mod tests {
     fn startup_publication_and_maintenance_cannot_overtake_each_other() {
         let dir = tempfile::tempdir().unwrap();
         let admission = admit_startup(dir.path()).unwrap();
-        assert!(MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(50)).is_err());
+        assert!(prepare_legacy(dir.path().into(), Duration::from_millis(50)).is_err());
         drop(admission);
-        let guard = MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_millis(50)).unwrap();
+        let guard = prepare_legacy(dir.path().into(), Duration::from_millis(50)).unwrap();
         assert!(admit_startup(dir.path()).is_err());
         drop(guard);
         assert!(admit_startup(dir.path()).is_ok());
@@ -310,7 +336,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(125));
             drop(owner);
         });
-        let guard = MaintenanceGuard::prepare_in(dir.path().into(), Duration::from_secs(2)).unwrap();
+        let guard = prepare_legacy(dir.path().into(), Duration::from_secs(2)).unwrap();
         server.join().unwrap();
         assert!(!dir.path().join("owner.json").exists());
         drop(guard);
@@ -345,5 +371,60 @@ mod tests {
         fs::create_dir(dir.path().join("maintenance.lock")).unwrap();
         let error = match admit_startup(dir.path()) { Ok(_) => panic!("unexpected admission"), Err(error) => error };
         assert!(!error.is::<MaintenanceBusy>());
+    }
+
+    #[test]
+    fn modern_application_policy_never_opens_or_reclaims_legacy_owner_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = open_lock(dir.path(), "owner.lock").unwrap();
+        FileExt::try_lock_exclusive(&owner).unwrap();
+        fs::write(dir.path().join("owner.json"), b"malformed unrelated legacy descriptor").unwrap();
+        let mut intent = ResumeIntent::default();
+        let guard = MaintenanceGuard::prepare_application_with_intent_checked_in(
+            dir.path().into(), Duration::from_millis(100), &mut intent,
+            |observed| desktop_control::validate_runtime_ownership(Path::new("missing-app-is-normal"), dir.path(), observed.desktop),
+        ).unwrap();
+        assert_eq!(intent, ResumeIntent::default());
+        assert!(admit_startup(dir.path()).is_err());
+        assert!(lifetime_busy(dir.path(), "desktop.lock").unwrap());
+        assert_eq!(fs::read(dir.path().join("owner.json")).unwrap(), b"malformed unrelated legacy descriptor");
+        drop(guard);
+        assert!(admit_startup(dir.path()).is_ok());
+        assert!(lifetime_busy(dir.path(), "owner.lock").unwrap(), "modern maintenance cannot release or replace a legacy owner lock");
+    }
+
+    #[test]
+    fn modern_application_policy_creates_only_application_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory collision makes any accidental owner lock open fail.
+        fs::create_dir(dir.path().join("owner.lock")).unwrap();
+        fs::create_dir(dir.path().join("owner.json")).unwrap();
+        let guard = MaintenanceGuard::prepare_application_with_intent_checked_in(
+            dir.path().into(), Duration::from_millis(50), &mut ResumeIntent::default(), |_| Ok(()),
+        ).unwrap();
+        assert!(dir.path().join("owner.lock").is_dir());
+        assert!(dir.path().join("owner.json").is_dir());
+        drop(guard);
+        let fresh = tempfile::tempdir().unwrap();
+        let guard = MaintenanceGuard::prepare_application_with_intent_checked_in(
+            fresh.path().into(), Duration::from_millis(50), &mut ResumeIntent::default(), |_| Ok(()),
+        ).unwrap();
+        assert!(!fresh.path().join("owner.lock").exists());
+        assert!(!fresh.path().join("owner.json").exists());
+        drop(guard);
+    }
+
+    #[test]
+    fn modern_application_policy_still_refuses_an_unproven_live_application() {
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = open_lock(dir.path(), "desktop.lock").unwrap();
+        FileExt::try_lock_exclusive(&desktop).unwrap();
+        fs::write(dir.path().join("desktop.json"), b"unavailable application stop proof").unwrap();
+        let result = MaintenanceGuard::prepare_application_with_intent_checked_in(
+            dir.path().into(), Duration::from_millis(50), &mut ResumeIntent::default(), |_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(!dir.path().join("owner.lock").exists());
+        assert!(admit_startup(dir.path()).is_ok());
     }
 }

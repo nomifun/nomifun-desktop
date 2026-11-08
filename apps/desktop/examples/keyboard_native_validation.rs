@@ -910,16 +910,6 @@ async fn software_shortcut_checks(app: &tauri::AppHandle, settings: &Settings, f
     ensure!(owner["worker"].is_null() && owner["lockHeld"] == false && owner["directoryExists"] == false,
         "default-off voice runtime created an external keyboard owner or directory");
 
-    keyboard::validation_resource_block(app, Some("isolated old owner still alive")).await.map_err(anyhow::Error::msg)?;
-    ensure!(action(app, "test_start").await.is_err(), "UI capture bypassed blocked old resource retirement");
-    ensure!(keyboard::validation_microphone_test(app, "microphone_test_start", "blocked-old-resource", None).await.is_err(),
-        "local microphone test bypassed blocked old resources");
-    shortcut(app, "dictate", true).await?;
-    ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "stopped", "shortcut bypassed blocked resources");
-    shortcut(app, "dictate", false).await?;
-    ensure!(count(&fixture.connections) == 0 && count(&fixture.pcm) == 0, "blocked resources opened provider/microphone");
-    keyboard::validation_resource_block(app, None).await.map_err(anyhow::Error::msg)?;
-
     *fixture.asr_text.lock().unwrap() = "快捷语音".into();
     shortcut(app, "dictate", true).await?;
     let recording = wait_state(app, |state| state["audioState"]["state"] == "capturing").await?;
@@ -1017,7 +1007,7 @@ async fn software_shortcut_checks(app: &tauri::AppHandle, settings: &Settings, f
     close(app).await?;
     keyboard::validation_request(app, None, Some(settings.clone())).await.map_err(anyhow::Error::msg)?;
     Ok(json!({"no_hardware_prerequisite":true,"hardware_key_toggles_do_not_gate_software":true,
-        "idle_without_provider_audio_or_webview":true,"blocked_old_resources_gate_all_capture":true,
+        "idle_without_provider_audio_or_webview":true,
         "hold_press_repeat_and_release":true,"toggle_preserves_document":true,"beautify_without_device":true,
         "release_does_not_stop_ui_recording":true,"released_editor_and_asr_preparation_do_not_resume":true,
         "cancel_suspend_update_remap_disable_require_fresh_release":true}))

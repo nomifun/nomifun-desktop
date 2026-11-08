@@ -1,6 +1,8 @@
 //! Application installation lifetime. Independent of voice input, USB devices,
 //! model selection and optional speech feature initialization.
 pub(crate) mod platform;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod legacy_cleanup;
 use nomifun_desktop_maintenance::{desktop_control, maintenance::StartupAdmission};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -10,26 +12,33 @@ impl StartupAdmissionState {
     pub(crate) fn new(admission: Option<StartupAdmission>) -> Self { Self(Mutex::new(admission)) }
 }
 
-/// Legacy device retirement may disable voice input, but must not make the
-/// workbench unavailable. The application lifetime endpoint remains independent
-/// so installers can still stop the GUI and verify old owners themselves.
+/// Publish the application lifetime endpoint independently of optional voice
+/// input. macOS never inspects legacy keyboard resources in this path.
 pub(crate) fn start(
     app: &tauri::AppHandle,
-    ready: impl FnOnce(tauri::AppHandle, Option<String>) + Send + 'static,
+    ready: impl FnOnce(tauri::AppHandle) + Send + 'static,
 ) -> anyhow::Result<()> {
     let app = app.clone();
-    // Legacy OS queries and teardown may take seconds. Retain startup admission
-    // until the endpoint exists, while keeping the workbench main loop usable.
+    // Retain startup admission until the endpoint exists, while keeping the
+    // workbench main loop usable. Published Windows/Linux coordination stays.
     std::thread::Builder::new().name("nomifun-app-maintenance-init".into()).spawn(move || {
-        let mut voice_error = platform::retire_legacy_service().err().map(|error| {
-            tracing::warn!(%error, "legacy input retirement incomplete; voice input disabled");
-            format!("旧版语音输入资源清理未完成，语音功能已暂停：{error:#}")
-        });
+        #[cfg(not(target_os = "macos"))]
+        if let Err(error) = platform::retire_legacy_service() {
+            tracing::warn!(%error, "legacy input retirement incomplete; application startup continues");
+        }
         let stop_app = app.clone();
         let exit_app = app.clone();
         let guard = desktop_control::register(
-            move || tauri::async_runtime::block_on(crate::keyboard::prepare_external_maintenance(&stop_app))
-                .map_err(anyhow::Error::msg),
+            move || tauri::async_runtime::block_on(async {
+                crate::keyboard::prepare_external_maintenance(&stop_app).await?;
+                // Preparation can observe no optional runtime while its main-
+                // thread initialization is queued. Claim the host's admission
+                // before replying, and stop/check any owner that appeared in
+                // that interval. No late initializer may reopen capture.
+                stop_app.state::<crate::QuitFlag>().0.store(true, std::sync::atomic::Ordering::Release);
+                crate::keyboard::shutdown_main(&stop_app).await?;
+                crate::keyboard::require_capture_stopped(&stop_app)
+            }).map_err(anyhow::Error::msg),
             move || exit_app.exit(0),
         );
         match guard {
@@ -43,15 +52,19 @@ pub(crate) fn start(
                 // Keep the shared admission held: no installer may infer that a
                 // running application with a broken endpoint is absent.
                 tracing::error!(%error, "application maintenance endpoint unavailable");
-                voice_error = Some(format!("应用维护端点不可用，语音功能已暂停：{error:#}"));
             }
         }
         let callback_app = app.clone();
-        if let Err(error) = app.run_on_main_thread(move || ready(callback_app, voice_error)) {
+        if let Err(error) = app.run_on_main_thread(move || ready(callback_app)) {
             tracing::error!(%error, "voice input initialization dispatch failed");
         }
     })?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn schedule_legacy_cleanup() {
+    legacy_cleanup::schedule();
 }
 
 fn command(args: &[std::ffi::OsString]) -> Option<anyhow::Result<bool>> {

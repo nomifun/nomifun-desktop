@@ -66,7 +66,7 @@ function verifyRecovery(report, mode) {
   if (report.passed !== true || report.real_os_microphone !== false || report.asr_mode !== mode || !report.audio_source?.includes('synthetic') || report.provider_requests_loopback_only !== true) throw new Error('Actor fixture failed or violated its synthetic isolation');
   const software = report.software_shortcuts;
   if (software?.no_hardware_prerequisite !== true || software.hardware_key_toggles_do_not_gate_software !== true
-    || software.idle_without_provider_audio_or_webview !== true || software.blocked_old_resources_gate_all_capture !== true
+    || software.idle_without_provider_audio_or_webview !== true
     || software.hold_press_repeat_and_release !== true || software.toggle_preserves_document !== true
     || software.beautify_without_device !== true || software.release_does_not_stop_ui_recording !== true
     || software.released_editor_and_asr_preparation_do_not_resume !== true

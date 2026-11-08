@@ -34,7 +34,7 @@ use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 pub(crate) use update_pause::UpdatePause;
-use update_pause::{Suspension, UpdateAdmission};
+use update_pause::{CaptureSafety, Suspension, UpdateAdmission};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +91,7 @@ pub(crate) struct KeyboardRuntime {
     models: DesktopModels,
     stop_flag: Arc<AtomicBool>,
     update_admission: Arc<UpdateAdmission>,
+    capture_safety: Arc<CaptureSafety>,
     root: PathBuf,
     transport: Arc<Mutex<Option<OwnedTransport>>>,
     external: external_input::Controller,
@@ -119,8 +120,6 @@ enum Message {
     #[cfg(feature = "native-keyboard-validation")]
     ValidationShortcut(shortcuts::Action, bool, oneshot::Sender<Result<KeyboardState, String>>),
     #[cfg(feature = "native-keyboard-validation")]
-    ValidationResourceBlock(Option<String>, oneshot::Sender<Result<(), String>>),
-    #[cfg(feature = "native-keyboard-validation")]
     ValidationButtonClick(String, oneshot::Sender<Result<KeyboardState, String>>),
     #[cfg(feature = "native-keyboard-validation")]
     ValidationHardware {
@@ -137,6 +136,7 @@ enum Message {
     Device(u64, Event),
     ExternalSettled(u64, Result<bool, String>),
     LifecycleFailure(String),
+    ShortcutCleanup(Result<usize, String>),
     #[cfg(feature = "native-keyboard-validation")]
     ValidationExternalEvent(u64, Event, oneshot::Sender<Result<KeyboardState, String>>),
     #[cfg(feature = "native-keyboard-validation")]
@@ -229,7 +229,7 @@ struct Actor {
     shortcut_hold: KeyHold,
     shortcut_generation: u64,
     shortcuts: Option<shortcuts::Controller>,
-    startup_error: Option<String>,
+    capture_safety: Arc<CaptureSafety>,
     external: external_input::Controller,
     asr: Option<StreamingAsrInput>,
     asr_generation: u64,
@@ -280,14 +280,14 @@ pub(crate) fn start(
     app: tauri::AppHandle,
     server: Arc<nomifun_app::DesktopServer>,
     root: PathBuf,
-    startup_error: Option<String>,
+    host_stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let models = DesktopModels::new(
         server
             .keyboard_model_service()
             .ok_or_else(|| anyhow::anyhow!("模型服务未就绪"))?,
     );
-    start_core(app, models, root, true, startup_error)?;
+    start_core(app, models, root, true, host_stop)?;
     Ok(())
 }
 fn start_core(
@@ -295,8 +295,9 @@ fn start_core(
     models: DesktopModels,
     root: PathBuf,
     production: bool,
-    startup_error: Option<String>,
+    host_stop: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(app.try_state::<KeyboardRuntime>().is_none(), "语音键盘已经初始化");
     let path = root.join("keyboard-settings.json");
     let (saved, error) = if path.exists() {
         match std::fs::read(path)
@@ -316,7 +317,7 @@ fn start_core(
         (Saved::default(), None)
     };
     let mut saved = saved;
-    if error.is_some() || startup_error.is_some() {
+    if error.is_some() {
         saved.settings.enabled = false;
         saved.settings.external_keyboard_enabled = false;
     }
@@ -341,7 +342,7 @@ fn start_core(
         shortcut_state: ShortcutState::default(),
         external_keyboard: ExternalKeyboardState::default(),
     };
-    state.document.error = error.or_else(|| startup_error.clone());
+    state.document.error = error;
     let snapshot = Arc::new(Mutex::new(state.clone()));
     let (tx, rx) = mpsc::channel(64);
     // Native stop/lifecycle messages must neither compete with streaming deltas
@@ -365,8 +366,9 @@ fn start_core(
         }
     } else { None };
     *snapshot.lock().unwrap() = state.clone();
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag = host_stop;
     let update_admission = Arc::new(UpdateAdmission::default());
+    let capture_safety = Arc::new(CaptureSafety::default());
     let transport = Arc::new(Mutex::new(None));
     let external = external_input::Controller::new(transport.clone(), stop_flag.clone(), root.clone(), production, tx.clone(), urgent.clone());
     app.manage(KeyboardRuntime {
@@ -376,6 +378,7 @@ fn start_core(
         models: models.clone(),
         stop_flag: stop_flag.clone(),
         update_admission: update_admission.clone(),
+        capture_safety: capture_safety.clone(),
         root: root.clone(),
         transport: transport.clone(),
         external: external.clone(),
@@ -402,7 +405,7 @@ fn start_core(
         shortcut_hold: KeyHold::default(),
         shortcut_generation: 1,
         shortcuts,
-        startup_error,
+        capture_safety,
         external: external.clone(),
         asr: None,
         asr_generation: 0,
@@ -486,7 +489,7 @@ pub(crate) fn validation_start(
             == Some("isolated-native-keyboard-v1"),
         "isolated validation marker required"
     );
-    start_core(app, DesktopModels::new(invoke), root, false, None)
+    start_core(app, DesktopModels::new(invoke), root, false, Arc::new(AtomicBool::new(false)))
 }
 #[cfg(feature = "native-keyboard-validation")]
 pub(crate) fn validation_snapshot(app: &tauri::AppHandle) -> serde_json::Value {
@@ -570,12 +573,6 @@ pub(crate) async fn validation_shortcut(app: &tauri::AppHandle, action: &str, pr
     let (reply, result) = oneshot::channel();
     app.state::<KeyboardRuntime>().urgent.send(Message::ValidationShortcut(action, pressed, reply)).map_err(|_| "actor stopped")?;
     serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|error| error.to_string())
-}
-#[cfg(feature = "native-keyboard-validation")]
-pub(crate) async fn validation_resource_block(app: &tauri::AppHandle, error: Option<&str>) -> Result<(), String> {
-    let (reply, result) = oneshot::channel();
-    app.state::<KeyboardRuntime>().urgent.send(Message::ValidationResourceBlock(error.map(str::to_owned), reply)).map_err(|_| "actor stopped")?;
-    result.await.map_err(|_| "actor stopped")?
 }
 /// Inject only downstream key edges in a marked, synthetic, disposable test.
 /// This never opens a serial port or substitutes for firmware/IPC validation.
@@ -809,7 +806,7 @@ mod priority_tests {
         for _ in 0..64 { data_tx.try_send(Message::Tick).unwrap(); }
         let (control_tx, mut control) = mpsc::unbounded_channel();
         let admission = Arc::new(UpdateAdmission::default());
-        let (pause, _) = UpdatePause::begin(control_tx, admission.clone()).unwrap();
+        let (pause, _) = UpdatePause::begin(control_tx, admission.clone(), Arc::new(CaptureSafety::default())).unwrap();
         drop(pause);
         assert!(matches!(next_message(&mut data, &mut control).await, Some(Message::PrepareUpdate(_))));
         assert!(matches!(next_message(&mut data, &mut control).await, Some(Message::ResumeAfterUpdate(None))));
@@ -855,7 +852,7 @@ impl Actor {
         self.external.request(false);
     }
     fn capture_admitted(&self) -> Result<(), String> {
-        if let Some(error) = &self.startup_error { return Err(format!("语音资源尚未就绪：{error}")); }
+        if self.stop_flag.load(Ordering::Acquire) || self.capture_safety.fenced() { return Err("语音输入已暂停，应用正在更新或退出".into()); }
         Ok(())
     }
     fn consume_holds(&mut self) {
@@ -930,7 +927,7 @@ impl Actor {
         mut rx: mpsc::Receiver<Message>,
         mut urgent: mpsc::UnboundedReceiver<Message>,
     ) {
-        if self.saved.settings.external_keyboard_enabled && self.startup_error.is_none() { self.request_external(true); }
+        if self.saved.settings.external_keyboard_enabled && !self.stop_flag.load(Ordering::Acquire) { self.request_external(true); }
         while let Some(message) = next_message(&mut rx, &mut urgent).await {
             match message {
                 Message::Shortcut(action, pressed) => self.shortcut(action, pressed),
@@ -938,12 +935,6 @@ impl Actor {
                 Message::ValidationShortcut(action, pressed, reply) => {
                     let result = if self.production || !self.synthetic_input { Err("synthetic isolated actor required".into()) }
                     else { self.shortcut(action, pressed); self.publish(); Ok(self.state.clone()) };
-                    let _ = reply.send(result);
-                }
-                #[cfg(feature = "native-keyboard-validation")]
-                Message::ValidationResourceBlock(error, reply) => {
-                    let result = if self.production || !self.synthetic_input { Err("synthetic isolated actor required".into()) }
-                    else { self.startup_error = error; self.abort(false); Ok(()) };
                     let _ = reply.send(result);
                 }
                 #[cfg(feature = "native-keyboard-validation")]
@@ -1041,10 +1032,6 @@ impl Actor {
                 Message::Shutdown(reply) => {
                     self.suspended = true;
                     self.revoke_shortcut_hold();
-                    if let Some(controller) = &mut self.shortcuts {
-                        if let Err(error) = controller.shutdown() { self.state.shortcut_state.detail = Some(error); }
-                        self.state.shortcut_state.registered = controller.registered();
-                    }
                     self.rearm_hardware();
                     self.apply_policy();
                     self.state.service.ready = false;
@@ -1052,6 +1039,13 @@ impl Actor {
                         Some("正在结束系统录音并释放语音资源".into());
                     self.abort(false);
                     self.shutdown_replies.push(reply);
+                    if let Some(mut controller) = self.shortcuts.take() {
+                        let urgent = self.urgent.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let result = controller.shutdown().map(|_| controller.registered());
+                            let _ = urgent.send(Message::ShortcutCleanup(result));
+                        });
+                    }
                 }
                 Message::PrepareUpdate(reply) => {
                     self.revoke_shortcut_hold();
@@ -1109,6 +1103,12 @@ impl Actor {
                 Message::LifecycleFailure(error) => {
                     self.suspended = true; self.abort(false);
                     self.state.service.detail = Some(error);
+                }
+                Message::ShortcutCleanup(result) => {
+                    match result {
+                        Ok(count) => self.state.shortcut_state.registered = count,
+                        Err(error) => self.state.shortcut_state.detail = Some(error),
+                    }
                 }
                 Message::Suspend(paused) => {
                     self.revoke_shortcut_hold();
@@ -1402,19 +1402,9 @@ impl Actor {
                     }
                 }
             }
-            if self.capture_id.is_none() {
-                let result = if self.state.audio_state.state == "error" {
-                    Err(self
-                        .state
-                        .audio_state
-                        .detail
-                        .clone()
-                        .unwrap_or("系统麦克风停止未确认".into()))
-                } else {
-                    Ok(())
-                };
+            if self.capture_safety.stopped() {
                 for reply in self.shutdown_replies.drain(..) {
-                    let _ = reply.send(result.clone());
+                    let _ = reply.send(Ok(()));
                 }
             }
             self.resume_waiting_hold();
@@ -1474,7 +1464,7 @@ impl Actor {
         self.state.sequence = self.state.sequence.saturating_add(1);
         self.state.edit_session_id = self.editor.as_ref().map(|editor| editor.id.clone());
         self.state.service.running = !self.stop_flag.load(Ordering::Acquire);
-        self.state.service.ready = !self.suspended && self.state.service.running && self.startup_error.is_none();
+        self.state.service.ready = !self.suspended && self.state.service.running;
         // Waiting for the current editor/IME is preparation, not microphone
         // capture. Keep audioState stopped so the edit can still be committed.
         self.state.capture_preparing = !self.suspended
@@ -2186,6 +2176,13 @@ impl Actor {
         self.start_capture_owner(id, input, device);
     }
     fn start_capture_owner(&mut self, id: Identity, input: audio::CaptureInput, device: Option<String>) {
+        let lease = match self.capture_safety.claim_for_host(&self.stop_flag) {
+            Ok(lease) => lease,
+            Err(message) => {
+                self.capture_failed(id, audio::CaptureStartFailure { message, capture_stopped: true, pending: None });
+                return;
+            }
+        };
         #[cfg(feature = "native-keyboard-validation")]
         if self.synthetic_input {
             let control = Arc::new(std::sync::atomic::AtomicU8::new(0));
@@ -2197,6 +2194,7 @@ impl Actor {
             }
             let tx = self.tx.clone();
             let stop_hold = self.synthetic_stop_hold.clone();
+            let stopped_lease = lease.clone();
             tauri::async_runtime::spawn(async move {
                 let mut error = None;
                 let mut first = true;
@@ -2225,6 +2223,7 @@ impl Actor {
                     cancelled: control.load(Ordering::Acquire) == 2,
                     error,
                 };
+                stopped_lease.confirm_stopped();
                 let _ = tx.send(Message::CaptureStopped(id, receipt)).await;
             });
             return;
@@ -2237,6 +2236,8 @@ impl Actor {
         let stopped_tx = self.urgent.clone();
         let stopped_id = id.clone();
         let ready_id = id.clone();
+        let stopped_lease = lease.clone();
+        let ready_lease = lease.clone();
         if let Err(message) = audio::NativeCapture::spawn_start(
             device,
             gate,
@@ -2245,12 +2246,15 @@ impl Actor {
                 let _ = error_tx.send(Message::CaptureError(error_id.clone(), error));
             },
             move |receipt| {
+                if receipt.capture_stopped { stopped_lease.confirm_stopped(); }
                 let _ = stopped_tx.send(Message::CaptureStopped(stopped_id.clone(), receipt));
             },
             move |result| {
+                if result.as_ref().is_err_and(|failure| failure.capture_stopped) { ready_lease.confirm_stopped(); }
                 let _ = ready_tx.send(Message::CaptureReady(ready_id, result));
             },
         ) {
+            lease.confirm_stopped(); // Relay thread creation failed before native start.
             self.capture_failed(
                 id,
                 audio::CaptureStartFailure {
@@ -2902,11 +2906,6 @@ impl Actor {
         let retry_external = old == settings && settings.external_keyboard_enabled && self.state.external_keyboard.state == "error";
         let register_shortcuts = shortcut_changed || old == settings;
         let shortcut_checkpoint = self.shortcuts.as_ref().map(shortcuts::Controller::checkpoint);
-        if (settings.enabled || settings.external_keyboard_enabled) && let Some(error) = &self.startup_error {
-            // Pre-GUI retirement cannot run inside this live Actor: it would
-            // ask this same Actor to stop via the application's endpoint.
-            return Err(format!("旧语音资源清理尚未完成：{error}。请关闭旧版程序后重新启动 NomiFun。"));
-        }
         if register_shortcuts {
             if let Some(controller) = &mut self.shortcuts {
                 match controller.reconfigure(&settings) {
@@ -3231,31 +3230,31 @@ pub(crate) fn window_event(window: &tauri::Window, event: &tauri::WindowEvent) -
 }
 pub(crate) fn begin_shutdown(app: &tauri::AppHandle) {
     if let Some(runtime) = app.try_state::<KeyboardRuntime>() {
+        runtime.capture_safety.fence_shutdown();
         runtime.stop_flag.store(true, Ordering::Release);
         runtime.external.fence();
     }
+}
+/// Final file-replacement gate. The host must already own its shared stop flag
+/// before calling this, including when voice initialization is still queued.
+/// Optional device/plugin/UI state never substitutes for producer stop proof.
+pub(crate) fn require_capture_stopped(app: &tauri::AppHandle) -> Result<(), String> {
+    let runtime = app.try_state::<KeyboardRuntime>();
+    update_pause::require_stopped(runtime.as_ref().map(|runtime| runtime.capture_safety.as_ref()))
 }
 pub(crate) async fn shutdown_main(app: &tauri::AppHandle) -> Result<(), String> {
     begin_shutdown(app);
     if let Some(runtime) = app.try_state::<KeyboardRuntime>() {
         let (tx, rx) = oneshot::channel();
-        runtime
-            .urgent
-            .send(Message::Shutdown(tx))
-            .map_err(|_| "字幕服务已停止")?;
-        tokio::time::timeout(Duration::from_secs(10), rx)
-            .await
-            .map_err(|_| "等待系统麦克风停止超时")?
-            .map_err(|_| "字幕停止确认通道关闭")??;
-        // Native capture proof precedes serial teardown. Joining happens off
-        // the async executor and remains serialized across concurrent exits.
-        let owner = runtime.transport.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut owner = owner.lock().map_err(|_| "键盘所有权锁异常".to_owned())?;
-            let result = owner.as_mut().map_or(Ok(()), OwnedTransport::shutdown);
-            owner.take();
-            result
-        }).await.map_err(|error| error.to_string())??;
+        let _ = runtime.urgent.send(Message::Shutdown(tx));
+        update_pause::await_stopped(&runtime.capture_safety, rx, Duration::from_secs(10)).await?;
+        // Once the same native producer proves stopped, optional USB cleanup
+        // cannot hold the application or installer hostage. Its owned task is
+        // still fenced and joins off-Actor; process exit releases OS resources.
+        if let Err(error) = runtime.external.shutdown_optional(Duration::from_millis(500)).await {
+            tracing::warn!(%error, "optional external keyboard cleanup did not finish; native capture is stopped");
+            let _ = runtime.urgent.send(Message::ExternalSettled(runtime.external.epoch(), Err(error)));
+        }
     }
     Ok(())
 }
@@ -3263,23 +3262,21 @@ async fn pause_for_maintenance(app: &tauri::AppHandle) -> Result<Option<UpdatePa
     let Some(runtime) = app.try_state::<KeyboardRuntime>() else {
         return Ok(None);
     };
-    let (pause, stopped) =
-        UpdatePause::begin(runtime.urgent.clone(), runtime.update_admission.clone())?;
+    let (pause, stopped) = match UpdatePause::begin(runtime.urgent.clone(), runtime.update_admission.clone(), runtime.capture_safety.clone()) {
+        Ok(prepared) => prepared,
+        Err(_) if runtime.capture_safety.stopped() => return Ok(None),
+        Err(error) => return Err(format!("麦克风停止仍未确认：{error}")),
+    };
     // This guard exists before the first await, so a cancelled command future
     // cannot leave the actor permanently suspended.
-    let result = async {
-        tokio::time::timeout(Duration::from_secs(10), stopped)
-            .await
-            .map_err(|_| "等待系统麦克风停止超时")?
-            .map_err(|_| "字幕停止确认通道关闭")??;
-        Ok::<(), String>(())
-    }
-    .await;
+    let result = update_pause::await_stopped(&runtime.capture_safety, stopped, Duration::from_secs(10)).await;
     match result {
         Ok(()) => Ok(Some(pause)),
         Err(error) => {
-            if let Err(recovery) = pause.cancel().await {
-                return Err(format!("{error}；键盘恢复未确认：{recovery}"));
+            let recovery = pause.cancel().await;
+            if runtime.capture_safety.stopped() { return Ok(None); }
+            if let Err(recovery) = recovery {
+                return Err(format!("{error}；语音输入恢复未确认：{recovery}"));
             }
             Err(error)
         }

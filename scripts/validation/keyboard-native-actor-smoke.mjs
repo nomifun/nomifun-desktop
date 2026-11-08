@@ -152,7 +152,7 @@ async function session(profile) {
     }
     const software = report.software_shortcuts;
     if (software?.no_hardware_prerequisite !== true || software.hardware_key_toggles_do_not_gate_software !== true
-      || software.idle_without_provider_audio_or_webview !== true || software.blocked_old_resources_gate_all_capture !== true
+      || software.idle_without_provider_audio_or_webview !== true
       || software.hold_press_repeat_and_release !== true || software.toggle_preserves_document !== true
       || software.beautify_without_device !== true || software.release_does_not_stop_ui_recording !== true
       || software.released_editor_and_asr_preparation_do_not_resume !== true

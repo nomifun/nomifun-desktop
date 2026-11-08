@@ -19,6 +19,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Validate only the modern application's authenticated endpoint. Historical
+/// keyboard owner descriptors and locks are deliberately outside this contract.
+pub fn validate_runtime_ownership(installed: &Path, runtime: &Path, desktop_active: bool) -> Result<()> {
+    if !desktop_active { return Ok(()); }
+    let expected = installed.canonicalize().context("resolve application maintenance identity")?;
+    crate::identity::validate_descriptor(&expected, &runtime.join("desktop.json"))
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Descriptor {
@@ -327,6 +335,19 @@ pub(crate) fn request_at(dir: PathBuf, wait: Duration) -> Result<DesktopQuiescen
 mod tests {
     use super::*;
     use std::sync::{Mutex, atomic::AtomicUsize, mpsc};
+
+    #[test]
+    fn modern_identity_uses_only_the_application_descriptor_and_os_image() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("owner.lock")).unwrap();
+        fs::write(dir.path().join("owner.json"), b"malformed old keyboard state").unwrap();
+        fs::write(dir.path().join("desktop.json"), serde_json::to_vec(&json!({"pid":std::process::id()})).unwrap()).unwrap();
+        validate_runtime_ownership(&std::env::current_exe().unwrap(), dir.path(), true).unwrap();
+        let other = dir.path().join("unrelated-app"); fs::write(&other, b"never launched").unwrap();
+        assert!(validate_runtime_ownership(&other, dir.path(), true).is_err());
+        assert!(dir.path().join("owner.lock").is_dir());
+        assert_eq!(fs::read(dir.path().join("owner.json")).unwrap(), b"malformed old keyboard state");
+    }
 
     #[test]
     fn process_exit_descriptor_is_removed_only_after_gui_lifetime_is_proven_absent() {

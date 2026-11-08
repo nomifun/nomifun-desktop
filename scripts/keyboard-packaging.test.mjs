@@ -44,6 +44,102 @@ function fixture({ owner = false, desktop = false, fallback = false, fallbackDes
   };
 }
 
+// Git's POSIX shell can exercise the script's command routing on Windows too.
+// These are temporary command fixtures, not a macOS/launchctl native witness.
+const packageShell = process.platform === 'win32'
+  ? join(process.env.ProgramFiles ?? 'C:/Program Files', 'Git/usr/bin/sh.exe') : '/bin/sh';
+const packageShellAvailable = existsSync(packageShell);
+const shellPath = path => path.replaceAll('\\', '/');
+
+function macosUninstallFixture(mode = 'success', missingBinary = false) {
+  const directory = mkdtempSync(join(tmpdir(), 'nomifun-keyboard-package-macos-')); directories.push(directory);
+  const contents = join(directory, 'NomiFun Voice Fixture.app/Contents');
+  const packaging = join(contents, 'Resources/keyboard-packaging');
+  const executable = join(contents, 'MacOS/nomifun-desktop');
+  mkdirSync(packaging, { recursive: true }); mkdirSync(join(contents, 'MacOS'), { recursive: true });
+  const script = join(packaging, 'macos-uninstall.command');
+  writeFileSync(script, readFileSync(join(sourceDirectory, 'macos-uninstall.command'), 'utf8'));
+  if (!missingBinary) {
+    writeFileSync(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$*" >> "$NOMI_MAC_UNINSTALL_CALLS"',
+      '[ "$#" -eq 1 ] && [ "$1" = "--app-maintenance-unregister" ] || exit 92',
+      'case "$NOMI_MAC_UNINSTALL_MODE" in',
+      '  advisory) printf "%s\\n" "Retired keyboard cleanup warning: fixture legacy item could not be inspected" >&2 ;;',
+      '  capture-failure) printf "%s\\n" "Current native capture did not stop" >&2; exit 73 ;;',
+      'esac',
+      'exit 0',
+    ].join('\n'));
+    chmodSync(executable, 0o755);
+  }
+  const calls = join(directory, 'calls');
+  const settings = join(directory, 'user-settings.json');
+  writeFileSync(settings, '{"sentinel":"preserve user data"}\n');
+  return {
+    run: () => spawnSync(packageShell, [shellPath(script)], { encoding: 'utf8', windowsHide: true, timeout: 5_000,
+      env: { ...process.env, PATH: process.platform === 'win32' ? '/usr/bin:/bin' : process.env.PATH,
+        NOMI_MAC_UNINSTALL_CALLS: shellPath(calls), NOMI_MAC_UNINSTALL_MODE: mode } }),
+    calls: () => existsSync(calls) ? readFileSync(calls, 'utf8').trim().split(/\r?\n/) : [],
+    settings: () => readFileSync(settings, 'utf8'),
+  };
+}
+
+describe('macOS uninstall command routing with isolated command fixtures', () => {
+  test.skipIf(!packageShellAvailable)('the packaged command parses in a POSIX shell on this host', () => {
+    const result = spawnSync(packageShell, ['-n', shellPath(join(sourceDirectory, 'macos-uninstall.command'))], { encoding: 'utf8', windowsHide: true });
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
+  });
+
+  test.skipIf(!packageShellAvailable)('a bundle path containing spaces invokes modern stop/unregister exactly once', () => {
+    const item = macosUninstallFixture();
+    const result = item.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(item.calls()).toEqual(['--app-maintenance-unregister']);
+    expect(result.stdout).toContain('The current NomiFun application was stopped.');
+    expect(result.stdout).not.toContain('login item was removed');
+    expect(item.settings()).toBe('{"sentinel":"preserve user data"}\n');
+  });
+
+  test.skipIf(!packageShellAvailable)('a warning from a previous command implementation does not block a confirmed stop', () => {
+    const item = macosUninstallFixture('advisory');
+    const result = item.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain('Retired keyboard cleanup warning:');
+    expect(result.stdout).toContain('You may now move NomiFun.app to Trash.');
+    expect(item.calls()).toEqual(['--app-maintenance-unregister']);
+    expect(item.settings()).toBe('{"sentinel":"preserve user data"}\n');
+  });
+
+  test('the macOS CLI stop implementation has no historical keyboard cleanup dependency', () => {
+    const source = readFileSync(join(root, 'apps/desktop/src/app_maintenance/platform.rs'), 'utf8');
+    const start = source.lastIndexOf('pub fn stop_application(');
+    expect(start).toBeGreaterThan(0);
+    const modern = source.slice(start, source.indexOf('\n}', start) + 2);
+    expect(modern).toContain('prepare_application_with_intent_checked_in');
+    expect(modern).toContain('desktop_control::validate_runtime_ownership');
+    expect(modern).not.toMatch(/legacy_cleanup|launchctl|owner\.json|owner\.lock|read_legacy_registration/);
+  });
+
+  test.skipIf(!packageShellAvailable)('a real current-capture stop failure still prevents a successful uninstall message', () => {
+    const item = macosUninstallFixture('capture-failure');
+    const result = item.run();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Current native capture did not stop');
+    expect(result.stderr).toContain('could not confirm that the application stopped');
+    expect(result.stdout).not.toContain('You may now move');
+    expect(item.calls()).toEqual(['--app-maintenance-unregister']);
+  });
+
+  test.skipIf(!packageShellAvailable)('a missing application executable is never replaced with an unrelated command', () => {
+    const item = macosUninstallFixture('success', true);
+    const result = item.run();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Installed NomiFun executable is missing.');
+    expect(item.calls()).toEqual([]);
+    expect(result.stdout).not.toContain('You may now move');
+  });
+});
+
 describe('native keyboard packaging lifecycle', () => {
   const makensis = process.platform === 'win32' ? join(process.env.LOCALAPPDATA, 'tauri/NSIS/makensis.exe') : '';
   test.skipIf(!makensis || !existsSync(makensis))('native NSIS compiler accepts both install and uninstall hooks', () => {
@@ -115,9 +211,9 @@ describe('native keyboard packaging lifecycle', () => {
     expect(entry).toContain("command(&args)?.and_then(platform::stop_application)");
   });
 
-  test.skipIf(process.platform === 'win32')('package scripts parse in a real POSIX shell', () => {
+  test.skipIf(!packageShellAvailable)('package scripts parse in a real POSIX shell', () => {
     for (const name of readdirSync(sourceDirectory).filter((name) => /\.(sh|command)$/.test(name))) {
-      const result = spawnSync('/bin/sh', ['-n', join(sourceDirectory, name)], { encoding: 'utf8' });
+      const result = spawnSync(packageShell, ['-n', shellPath(join(sourceDirectory, name))], { encoding: 'utf8', windowsHide: true });
       expect({ name, status: result.status, error: result.stderr }).toEqual({ name, status: 0, error: '' });
     }
   });

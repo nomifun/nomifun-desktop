@@ -40,7 +40,7 @@ impl Controller {
     }
     fn start(&self) -> Result<(Transport, std::sync::mpsc::Receiver<nomifun_keyboard::service::Event>), String> {
         if self.production {
-            let directory = nomifun_desktop_maintenance::ipc::runtime_dir().map_err(|error| error.to_string())?;
+            let directory = nomifun_desktop_maintenance::ipc::device_runtime_dir().map_err(|error| error.to_string())?;
             Transport::start(directory).map_err(|error| error.to_string())
         } else {
             #[cfg(feature = "native-keyboard-validation")]
@@ -51,6 +51,23 @@ impl Controller {
             }
             #[cfg(not(feature = "native-keyboard-validation"))]
             Err("isolated external input validation is unavailable".into())
+        }
+    }
+    pub async fn shutdown_optional(&self, wait: std::time::Duration) -> Result<(), String> {
+        let epoch = self.fence();
+        let latest = self.epoch.clone();
+        let owner = self.owner.clone();
+        let cleanup = tauri::async_runtime::spawn_blocking(move || {
+            let mut owner = owner.lock().map_err(|_| "外置键盘所有权锁异常".to_owned())?;
+            if latest.load(Ordering::Acquire) != epoch { return Ok(()); }
+            let result = owner.as_mut().map_or(Ok(()), OwnedTransport::shutdown);
+            owner.take();
+            result
+        });
+        match tokio::time::timeout(wait, cleanup).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(format!("外置键盘清理任务失败：{error}")),
+            Err(_) => Err("外置键盘清理仍在后台完成".into()),
         }
     }
     fn apply(&self, epoch: u64, enabled: bool, start: impl FnOnce() -> Result<(Transport, std::sync::mpsc::Receiver<nomifun_keyboard::service::Event>), String>) -> Result<(), String> {
@@ -81,6 +98,19 @@ impl Controller {
 mod tests {
     use super::*;
     use std::{sync::mpsc as sync_channel, time::Duration};
+    #[tokio::test]
+    async fn optional_shutdown_is_bounded_when_device_ownership_cleanup_is_blocked() {
+        let root = tempfile::tempdir().unwrap();
+        let (controller, _data, _control) = controller(root.path());
+        let owner = controller.owner.clone();
+        let locked = owner.lock().unwrap();
+        let pending = controller.shutdown_optional(Duration::from_millis(10)).await;
+        assert!(pending.unwrap_err().contains("后台"));
+        assert!(!root.path().join("keyboard-transport").exists());
+        drop(locked);
+        controller.shutdown_optional(Duration::from_secs(1)).await.unwrap();
+        assert!(controller.owner.lock().unwrap().is_none());
+    }
     fn controller(root: &std::path::Path) -> (Controller, mpsc::Receiver<Message>, mpsc::UnboundedReceiver<Message>) {
         let (tx, data) = mpsc::channel(16); let (urgent, control) = mpsc::unbounded_channel();
         (Controller::new(Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)), root.into(), false, tx, urgent), data, control)

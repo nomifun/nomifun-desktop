@@ -134,4 +134,14 @@ describe('macOS Desktop build contract', () => {
       expect(hostPlist).toContain(`<key>${key}</key>`);
     }
   });
+
+  test('the voice-input privacy declaration covers shortcuts and optional hardware with the audio entitlement', () => {
+    const hostPlist = readFileSync(new URL('../apps/desktop/Info.plist', import.meta.url), 'utf8');
+    const microphone = /<key>NSMicrophoneUsageDescription<\/key>\s*<string>([^<]+)<\/string>/.exec(hostPlist)?.[1] ?? '';
+    expect(microphone).toContain('voice input');
+    expect(microphone).toContain('configurable system shortcuts');
+    expect(microphone).toContain('optional external keyboard');
+    const entitlements = readFileSync(new URL('../apps/desktop/entitlements.plist', import.meta.url), 'utf8');
+    expect(entitlements).toMatch(/<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\s*\/>/);
+  });
 });

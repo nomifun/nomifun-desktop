@@ -1037,7 +1037,7 @@ async fn install_update(
     };
     let preflight_package = UpdatePreflightPackage::new(&downloaded, &requested_version, package);
 
-    let keyboard_pause = if !lifecycle_quit_fixture_active() {
+    let voice_pause = if !lifecycle_quit_fixture_active() {
         match keyboard::prepare_update(&app).await {
             Ok(pause) => pause,
             Err(error) => {
@@ -1052,8 +1052,7 @@ async fn install_update(
         // The retained macOS worker may already have replaced bundle files on
         // error. It owns final application exit, so an old runtime must not be
         // resumed after handing that worker replacement authority.
-        if let Some(pause) = keyboard_pause { pause.commit(); }
-        return install_macos_update_retained(app, package, requested_version).await;
+        return install_macos_update_retained(app, package, requested_version, voice_pause).await;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1069,10 +1068,10 @@ async fn install_update(
         {
             // Upstream Windows install returns errors only while extracting
             // the installer, before on_before_exit and process handoff. Keep
-            // both the downloaded package and existing keyboard usable.
+            // both the downloaded package and existing voice input usable.
             let error = error.to_string();
             downloaded.restore_before_handoff(&requested_version, package);
-            if let Some(pause) = keyboard_pause {
+            if let Some(pause) = voice_pause {
                 pause.cancel().await.map_err(|recovery| format!(
                     "{UPDATE_NOT_RETAINED_ERROR}: {error}；语音输入恢复未确认：{recovery}"
                 ))?;
@@ -1081,14 +1080,14 @@ async fn install_update(
         }
         #[cfg(not(windows))]
         {
-        if let Some(pause) = keyboard_pause { pause.commit(); }
+        if let Some(pause) = voice_pause { pause.commit(); }
         // Keep the slot claimed: a failed replacement is not an installable
         // package. The renderer reports the failure before its terminal exit.
         tracing::error!(version = %requested_version, %error, "desktop update installation failed");
         return Err(error.to_string());
         }
     }
-    if let Some(pause) = keyboard_pause { pause.commit(); }
+    if let Some(pause) = voice_pause { pause.commit(); }
     downloaded.finish_install(&requested_version);
     Ok(())
     }
@@ -1102,6 +1101,7 @@ async fn install_macos_update_retained(
     app: tauri::AppHandle,
     package: DownloadedUpdatePackage,
     version: String,
+    voice_pause: Option<keyboard::UpdatePause>,
 ) -> Result<(), String> {
     let coordinator = app.try_state::<Arc<ExitCoordinator>>().map(|state| state.inner().clone())
         .ok_or("DESKTOP_INSTALL_SHUTDOWN_OWNER_UNAVAILABLE")?;
@@ -1112,6 +1112,9 @@ async fn install_macos_update_retained(
         if handoff.committed.is_some() || handoff.installation_active { return Err("DESKTOP_INSTALL_HANDOFF_CONFLICT".into()); }
         handoff.installation_active = true;
     }
+    // This is also the voice runtime's shared stop admission. A delayed voice
+    // initializer cannot open a microphone after installation owns handoff.
+    app.state::<QuitFlag>().0.store(true, Ordering::Release);
     let (reply, response) = tokio::sync::oneshot::channel();
     let worker_app = app.clone();
     let worker_coordinator = coordinator.clone();
@@ -1133,6 +1136,11 @@ async fn install_macos_update_retained(
             } else {
                 tracing::error!("bounded macOS installer handoff is permitted without claiming cleanup verification");
             }
+            // Backend cleanup may finish without an optional Actor reply, but
+            // actual native capture ownership must be absent before replacing
+            // this still-running macOS app bundle.
+            keyboard::require_capture_stopped(&worker_app)?;
+            if let Some(pause) = voice_pause { pause.commit(); }
             package.update.install(&package.bytes).map_err(|_| "DESKTOP_UPDATE_REPLACEMENT_FAILED".to_owned())?;
             worker_app.state::<DownloadedUpdateState>().finish_install(&version);
             Ok(())
@@ -1463,12 +1471,10 @@ mod keep_awake_tests {
     }
 }
 
-/// 关闭=收到托盘的护栏标志。仅在「真正退出」(托盘「退出」/`app.exit`)前置真,届时主窗口的
-/// `CloseRequested` 处理停止拦截、放行关闭;默认关闭手势(标题栏 ×、系统关闭、Alt+F4)保持假,
-/// 因此一律隐藏到托盘而非退出进程。
-/// Set true just before a real quit so the main window's CloseRequested handler stops
-/// intercepting; default close gestures leave it false and therefore hide to tray.
-struct QuitFlag(AtomicBool);
+/// Application terminal intent, shared with native voice-start admission.
+/// Ordinary window closing hides to tray while false. Exit/update ownership
+/// sets it before final handoff so delayed initialization cannot open capture.
+struct QuitFlag(Arc<AtomicBool>);
 
 const EXIT_PHASE_RUNNING: u8 = 0;
 const EXIT_PHASE_SHUTTING_DOWN: u8 = 1;
@@ -2761,13 +2767,13 @@ fn complete_main_thread_setup(
         let owner = relay_shutdown_owner.clone();
         let native_app = native_shutdown_app.clone();
         async move {
-            let keyboard = if lifecycle_quit_fixture_active() {
+            let voice = if lifecycle_quit_fixture_active() {
                 Ok(())
             } else {
                 keyboard::shutdown_main(&native_app).await
             };
             let relay = owner.shutdown().await;
-            keyboard.map_err(anyhow::Error::msg)?;
+            voice.map_err(anyhow::Error::msg)?;
             relay
         }
     })?;
@@ -2880,13 +2886,18 @@ fn complete_main_thread_setup(
     // login item, hardware service or microphone lifecycle.
     if !lifecycle_quit_fixture_active() {
         let voice_server = server.clone();
-        app_maintenance::start(&app, move |app, voice_error| {
+        app_maintenance::start(&app, move |app| {
             if app.state::<QuitFlag>().0.load(Ordering::Acquire)
                 || app.state::<Arc<ExitCoordinator>>().has_pending_shutdown() {
                 return;
             }
-            if let Err(error) = keyboard::start(app, voice_server, pairing_data_dir, voice_error) {
+            let host_stop = app.state::<QuitFlag>().0.clone();
+            if let Err(error) = keyboard::start(app, voice_server, pairing_data_dir, host_stop.clone()) {
                 tracing::error!(%error, "voice input unavailable; workbench remains available");
+            }
+            #[cfg(target_os = "macos")]
+            if !host_stop.load(Ordering::Acquire) {
+                app_maintenance::schedule_legacy_cleanup();
             }
         })?;
     }
@@ -3916,7 +3927,7 @@ fn main() -> std::process::ExitCode {
         // feedback, auto-update status) register here as #[tauri::command]s (P3).
         .manage(AwakeState(Mutex::new(None)))
         .manage(browser_surface::commands::BrowserSurfaceState::default())
-        .manage(QuitFlag(AtomicBool::new(false)))
+        .manage(QuitFlag(Arc::new(AtomicBool::new(false))))
         .manage(app_maintenance::StartupAdmissionState::new(startup_admission))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())

@@ -1,14 +1,46 @@
-# NomiFun keyboard desktop integration
+# NomiFun voice input and desktop packaging
 
-The four keys control NomiFun. Recording uses the computer's selected microphone;
-the keyboard's onboard microphone stays disabled.
+Voice input is part of NomiFun. System shortcuts and subtitle controls share the
+same recording, recognition, editing and text-polishing implementation. The
+optional four-key device is disabled by default; enable its connection mode in
+Settings → Voice keyboard. K1 shows/hides the subtitle while preserving text,
+K2 polishes, K3 cancels, and holding/releasing K4 controls speech input. Recording
+uses the selected computer microphone; onboard device audio stays disabled.
+Quitting NomiFun stops its voice capability and device thread.
 
-On GNOME/KDE Wayland, the default desktop window path requires XWayland. Debian
-and RPM packages declare the required `xwayland` / `xorg-x11-server-Xwayland`
-runtime package. AppImage cannot install host packages: install XWayland through
-the distribution's package manager and enable it in the desktop session before
-launching. A pure Wayland session without XWayland, or an explicit
-`GDK_BACKEND=wayland` override, has not passed the keyboard window contracts.
+## macOS application lifecycle
+
+Modern application admission and stop endpoints live in
+`~/Library/Application Support/NomiFun/app-maintenance`. Optional device
+ownership lives separately in `NomiFun/external-keyboard`. Normal application
+startup, update and uninstall do not open old `keyboard-service` locks, read its
+owner descriptors, or depend on parsing an old LaunchAgent.
+
+Old keyboard login registration cleanup runs separately after normal startup
+as a bounded advisory operation. It is never called by required update or
+uninstall commands. It only targets a verified registration for this installation;
+unknown, changed or inaccessible entries are skipped with diagnostics. Failure
+never becomes an application startup, voice initialization, update or uninstall
+prerequisite. No legacy process is started or restored.
+
+Before moving a running macOS app to Trash, use the bundled stop command:
+
+```sh
+/bin/sh /Applications/NomiFun.app/Contents/Resources/keyboard-packaging/macos-uninstall.command
+```
+
+This asks NomiFun itself to stop. A genuinely live/unconfirmed native microphone
+owner still requires stopping; optional device, shortcut and historical cleanup
+errors cannot override confirmed capture release. The command preserves user
+settings and data and returns without querying historical login entries. Its
+success does not claim that every historical login entry was removed. Deleting a stopped app directly does not run this script.
+
+## Linux packaging
+
+On GNOME/KDE Wayland, the desktop window path requires XWayland. Debian/RPM
+packages declare `xwayland` / `xorg-x11-server-Xwayland`; AppImage users install
+XWayland with their distribution package manager. Pure Wayland without XWayland
+has not passed the native window contracts.
 
 Before deleting an AppImage, run:
 
@@ -16,16 +48,9 @@ Before deleting an AppImage, run:
 sh appimage-uninstall.sh /absolute/path/NomiFun.AppImage
 ```
 
-Before moving the macOS app to Trash, run:
-
-```sh
-/bin/sh /Applications/NomiFun.app/Contents/Resources/keyboard-packaging/macos-uninstall.command
-```
-
-These commands stop microphone capture and the application, then remove any
-retired keyboard service and its matching login item. They preserve NomiFun's
-other settings and user data. The running NomiFun GUI owns the keyboard; K1
-shows or hides its main window. Quitting NomiFun disables all keyboard actions.
-## AppImage running-instance boundary
-
-Quit the running AppImage before updating or uninstalling it. A new invocation can use a different temporary mount; automatic shutdown across mounts is rejected when the OS executable identity cannot prove ownership. After the old instance exits, maintenance can continue. Ordinary fixed-path Linux installations do not have this restriction. This change has no native Linux execution evidence.
+Quit a running AppImage before update/uninstall. A new invocation can use a
+different temporary mount; automatic shutdown across mounts is rejected when
+OS executable identity cannot prove ownership. Fixed-path Linux installations
+do not have this restriction. Published Linux package rendezvous and hooks are
+unchanged by the macOS runtime split; this change has no native Linux execution
+evidence.
