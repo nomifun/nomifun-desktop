@@ -3427,6 +3427,20 @@ fn main() -> std::process::ExitCode {
         eprintln!("LIFECYCLE_FIXTURE_REFUSED: {error}");
         return std::process::ExitCode::FAILURE;
     }
+    // `dev` is emitted by tauri-build for the development URL mode, including
+    // `tauri dev --release`. Published custom-protocol apps and the standalone
+    // maintenance helper never adopt this process-local development scope.
+    #[cfg(dev)]
+    match nomifun_desktop_maintenance::ipc::configure_development_runtime() {
+        Ok(nomifun_desktop_maintenance::ipc::RuntimeInitialization::Development { application, device, .. }) => {
+            eprintln!("[dev] application IPC: {}; external input IPC: {}", application.display(), device.display());
+        }
+        Ok(nomifun_desktop_maintenance::ipc::RuntimeInitialization::PublishedDefaults) => {}
+        Err(error) => {
+            eprintln!("Cannot configure development application runtime: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
     if !lifecycle_quit_fixture_active() {
         if let Some(code) = app_maintenance::early_entry() { return code; }
     }

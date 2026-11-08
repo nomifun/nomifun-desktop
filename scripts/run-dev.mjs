@@ -423,6 +423,13 @@ export function generatedDevelopmentDataDirectory(
 
 export function developmentEnvironment(environment, platform = process.platform) {
   const result = { ...environment, NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: environment.NOMIFUN_EMBED_OFFICECLI ?? '1' };
+  // Full Windows desktop codegen has overflowed the repository's 128 MiB
+  // compiler stack during native validation. Reserve the verified 512 MiB for
+  // this launcher's children without changing the parent or caller overrides.
+  // This protects Rust codegen; it does not repair native C dependency errors.
+  if (platform === 'win32' && !Object.keys(environment).some(key => key.toUpperCase() === 'RUST_MIN_STACK')) {
+    result.RUST_MIN_STACK = '536870912';
+  }
   const explicitKey = explicitDataRootKey(environment, platform);
   if (explicitKey) {
     if (typeof environment[explicitKey] !== 'string' || !environment[explicitKey].trim()) {

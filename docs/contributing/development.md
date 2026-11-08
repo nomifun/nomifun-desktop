@@ -50,6 +50,18 @@ derives a schema-specific sibling data directory
 To isolate an instance, set an explicit absolute `NOMIFUN_DATA_DIR`;
 its value is used literally. Two backends cannot hold the same data directory.
 
+The desktop development application also selects profile-specific application
+and optional-device IPC under the user OS runtime base:
+`NomiFun-dev-runtime/<profile-sha256>/application` and `/device`. These live
+outside the dataset so relocation/reset cannot move active locks. Published
+applications and installer helpers keep their existing rendezvous. Development
+does not retire production keyboard registrations.
+
+On Windows the runner bootstraps MSVC/Windows SDK and supplies a process-local
+512 MiB Rust compiler stack when `RUST_MIN_STACK` was not explicitly set. Caller
+overrides are preserved; the terminal's environment and other platforms are not
+changed. A cold unified-backend build can take several minutes.
+
 See [configuration](../reference/configuration.md) for data/work directory
 precedence, channel defaults and logging. For example, in a POSIX shell:
 
@@ -96,6 +108,24 @@ component/notice catalogue; `--verify` explicitly extracts and probes tools.
 For Remote operations, stdio bridges and backup/restore commands, read
 [CLI configuration](../reference/configuration.md#nomicore-backend-flags)
 and the executable `--help`.
+
+## Windows native dependency cache recovery
+
+If `bun run dev` reaches Vite but fails compiling `opusic-sys` with undeclared
+SILK SSE4.1/AVX2 functions, inspect the generated Opus CMake cache. A stale
+negative `HAVE_SMMINTRIN_H` probe together with enabled AVX2 produces this
+configuration inconsistency. Stop the failed build, then rebuild only that
+native dependency's generated outputs:
+
+```sh
+cargo clean -p opusic-sys
+bun run dev
+```
+
+This does not require disabling codec SIMD or changing registry sources. Keep
+the original configure log when diagnosing why the first probe failed. See the
+[development startup validation](../validation/native-keyboard.zh.md#开发启动实测回归2026-11-08)
+for the reproduced cache defect and actual desktop startup evidence.
 
 ## Further reading
 

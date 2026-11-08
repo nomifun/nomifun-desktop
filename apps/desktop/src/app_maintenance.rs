@@ -23,8 +23,10 @@ pub(crate) fn start(
     // workbench main loop usable. Published Windows/Linux coordination stays.
     std::thread::Builder::new().name("nomifun-app-maintenance-init".into()).spawn(move || {
         #[cfg(not(target_os = "macos"))]
-        if let Err(error) = platform::retire_legacy_service() {
-            tracing::warn!(%error, "legacy input retirement incomplete; application startup continues");
+        if !nomifun_desktop_maintenance::ipc::is_development_runtime() {
+            if let Err(error) = platform::retire_legacy_service() {
+                tracing::warn!(%error, "legacy input retirement incomplete; application startup continues");
+            }
         }
         let stop_app = app.clone();
         let exit_app = app.clone();
@@ -64,6 +66,7 @@ pub(crate) fn start(
 
 #[cfg(target_os = "macos")]
 pub(crate) fn schedule_legacy_cleanup() {
+    if nomifun_desktop_maintenance::ipc::is_development_runtime() { return; }
     legacy_cleanup::schedule();
 }
 

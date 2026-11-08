@@ -96,3 +96,21 @@ Remote、stdio bridge、backup/restore 命令详见
 - [前端](../architecture/frontend.zh.md)
 - [构建与打包](building-and-packaging.zh.md)
 - [疑难排查](../reference/troubleshooting.zh.md)
+## 开发运行目录与 Windows 构建恢复
+
+桌面开发版按数据 profile 的 SHA-256 在用户 OS 运行目录下选择
+`NomiFun-dev-runtime/<hash>/application` 与 `/device`，不与安装版共用应用维护或设备锁。
+运行目录位于数据集之外，搬迁/重置不会复制或封存活动 IPC。正式应用和独立安装维护工具仍用已发布目录，开发版不会清理正式版的旧登录登记。
+
+Windows 开发启动器补齐 MSVC/Windows SDK 环境；未显式设置 `RUST_MIN_STACK` 时仅对子进程使用 512 MiB 编译栈，保留调用者覆盖，不修改终端全局环境或其他平台。首次统一后端构建可能持续数分钟。
+
+若 Vite 已启动，但 `opusic-sys` 报 SILK SSE4.1/AVX2 函数未声明，应检查该库生成的 CMake 缓存。
+`HAVE_SMMINTRIN_H` 的旧负探测与 AVX2 开启会形成不一致。停止失败构建后可仅清理该依赖的生成输出：
+
+```sh
+cargo clean -p opusic-sys
+bun run dev
+```
+
+无需关闭编解码 SIMD 或修改 Cargo 注册表源码。排查时保留原 CMake 探测日志。
+实测范围见[开发启动验证记录](../validation/native-keyboard.zh.md#开发启动实测回归2026-11-08)。

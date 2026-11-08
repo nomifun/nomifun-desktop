@@ -124,3 +124,21 @@ Windows 本机已执行：
 本轮最终日志位于仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-macos-source-final-20261108\`；捕获与适配器定向结果在 `nomifun-voice-proof-unit-20261108`，包装报告在 `nomifun-macos-source-hardening-6499c35e79fe4f53b6653613a4b37c0e`。SDK-free 源码工程为 `nomifun-macos-maintenance-source-check-cw2h8x3w`，从仓库目录使用其 `--manifest-path` 以保持相同 Cargo source 配置。
 
 仍未验证：完整 Apple Silicon/Intel macOS App 链接、系统快捷键注册/冲突/按住与释放、TCC 与真实音频、真实 USB、真实 LaunchAgent 清理、签名/公证/DMG/updater 的实际安装升级卸载。原先 Windows GUI/合成 Actor 报告保留原构建标识，不冒充本次重新执行。未修改正式安装、真实登录项、凭据或用户数据；原 `.tmp/` 无关工作保留。
+
+## 开发启动实测回归（2026-11-08）
+
+收到 `bun run dev` 无法启动后，本机实际执行完整入口。Vite 正常就绪，但主程序尚未运行即在 `opusic-sys 0.7.5` 的 C 构建失败：缓存将 `HAVE_SMMINTRIN_H` 记为 false，同时启用 AVX2，导致 `x86_silk_map.c` 引用未声明函数。独立 MSVC 14.44、Ninja 与相同 Cargo C 参数的新探测全部通过；仅强制该缓存负值即可复现同一错误，仅移除该负探测即可恢复。首次探测无诊断退出的原因仍未知。
+
+保留失败现场并只隔离本库的生成 CMake build 子目录后，实际 `cargo build -p opusic-sys` 默认 SIMD 构建通过（7.55s）；原有 Opus 编解码采样数量/能量往返测试 1/1 通过。没有修改注册表中的依赖源码、升级库版本或关闭 SIMD。
+
+另修复两个开发入口问题：Windows 子进程在无显式覆盖时使用已验证的 512 MiB Rust 编译栈；开发应用按 profile 选择独立、不可变、位于数据树之外的 IPC，跳过正式版历史清理。正式版/独立安装维护工具保持已发布目录，继承开发环境变量不会让 helper 加入开发 IPC。Tauri 的 `cfg(dev)` 取自依赖的 custom-protocol 模式，而不是 debug/release 优化级别。
+
+定向检查：开发启动器 21 通过、2 个 macOS lifetime 用例按平台跳过；IPC 路径/作用域 11/11 通过；Opus 原生编解码往返 1/1 通过。没有改变 Session 数据、存储搬迁或重置实现。
+
+实际再运行 `bun run dev`：只指定新建临时 `NOMIFUN_DATA_DIR`，保留正常 `LOCALAPPDATA`，编译完成后产生开发进程 PID 51464，主窗口存在且响应，Vite HTTP 200，已观察到超过 100 次界面发起的 API 200 响应。安装版 PID 6564 同时存活，其全局桌面端点仍属于 6564；开发端点位于独立 profile hash 目录。最后通过相同开发 scope 的 `--app-maintenance-stop` 正常关闭，命令和完整 dev runner 均退出 0，5173 已无监听，安装版仍运行。验证不依赖关闭安装版或删除旧开发数据。
+
+证据保存在仓库外 `C:\Users\rika0\AppData\Local\Temp\nomifun-dev-repro-e207b65176674605ae2b17cfd9ee57c1\`：初次/恢复日志、`startup-report.json`、正常退出日志、Opus 构建/往返结果。受控缓存缺陷及恢复报告在 `nomifun-opus-fresh-probe-osVEqL`。失败生成目录已改名保留，没有递归删除整个 target 或 build.noindex。
+
+运行中同时观察到开发更新源 localhost:59999 不可达（开发配置明确无更新 feed），以及外部非受管知识 MCP broker 的用户级管道创建警告。后者的名称按 SID 共享，与安装版共存可能争用，未实际打开管道确认持有者；它不属于此次启动失败，知识 HTTP 与受管能力入口仍初始化。本轮没有放宽管道 ACL/首实例保护或修改该外部 MCP 路由，其多 profile 注册不是本次启动验收范围。
+
+本轮证明 Windows 开发窗口、前后端初始化、开发/安装版维护隔离及正常退出；不将其扩大为完整模型、音频、USB、外部 MCP 或其他操作系统的功能验收。测试使用临时开发 profile，正式安装与原 `.tmp/` 无关工作保留。

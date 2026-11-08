@@ -37,7 +37,7 @@ describe('development data generation', () => {
   test('honors explicit data roots including Windows case-insensitive env names', () => {
     for (const key of ['NOMIFUN_DATA_DIR', 'nomifun_data_dir']) {
       const input = { [key]: 'D:\\existing-dev-data' };
-      expect(developmentEnvironment(input, 'win32')).toEqual({ ...input, NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: '1' });
+      expect(developmentEnvironment(input, 'win32')).toEqual({ ...input, NOMI_CHANNEL: 'dev', NOMIFUN_EMBED_OFFICECLI: '1', RUST_MIN_STACK: '536870912' });
     }
   });
 
@@ -131,6 +131,35 @@ describe('development data generation', () => {
       createDirectory,
     )).toBeNull();
     expect(calls).toEqual([]);
+  });
+});
+
+describe('Windows development compiler stack', () => {
+  test('supplies the verified desktop codegen stack only in the child environment', () => {
+    const input = { LOCALAPPDATA: 'C:\\Users\\developer\\AppData\\Local' };
+    const before = { ...input };
+    const result = developmentEnvironment(input, 'win32');
+    expect(result.RUST_MIN_STACK).toBe('536870912');
+    expect(input).toEqual(before);
+    expect(Object.hasOwn(input, 'RUST_MIN_STACK')).toBe(false);
+  });
+
+  test.each([
+    ['RUST_MIN_STACK', '268435456'],
+    ['rust_min_stack', '67108864'],
+    ['Rust_Min_Stack', ''],
+    ['rust_MIN_stack', undefined],
+  ])('preserves the explicitly supplied %s key and value', (key, value) => {
+    const input = { NOMIFUN_DATA_DIR: 'C:\\explicit-dev', [key]: value };
+    const result = developmentEnvironment(input, 'win32');
+    expect(result[key]).toBe(value);
+    expect(Object.keys(result).filter(name => name.toUpperCase() === 'RUST_MIN_STACK')).toEqual([key]);
+    expect(input).toEqual({ NOMIFUN_DATA_DIR: 'C:\\explicit-dev', [key]: value });
+  });
+
+  test.each(['darwin', 'linux'])('keeps %s compiler-stack policy unchanged', platform => {
+    expect(developmentEnvironment({ HOME: '/developer' }, platform).RUST_MIN_STACK).toBeUndefined();
+    expect(developmentEnvironment({ HOME: '/developer', RUST_MIN_STACK: '134217728' }, platform).RUST_MIN_STACK).toBe('134217728');
   });
 });
 
