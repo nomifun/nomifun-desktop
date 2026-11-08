@@ -7,7 +7,7 @@ import SiderNavItem from '@/renderer/components/layout/Sider/SiderNav/SiderNavIt
 import SiderSectionHeader from '@/renderer/components/layout/Sider/SiderNav/SiderSectionHeader';
 import { generalSettingsHref, resolveGeneralSettingsSection, type GeneralSettingsSection } from './generalSettingsNavigation';
 
-export const BUILTIN_TAB_IDS = ['system', 'permissions', 'keyboard', 'execution-engines', 'ssh-hosts', 'about'] as const;
+export const BUILTIN_TAB_IDS = ['system', 'permissions', 'voice-keyboard', 'execution-engines', 'ssh-hosts', 'about'] as const;
 
 /** Settings destinations use the same rows and group labels as the app rail. */
 const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }> = ({ collapsed = false, tooltipEnabled = false }) => {
@@ -20,7 +20,7 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
     { id: 'preferences', section: 'preferences', label: t('settings.workspace.preferences'), icon: <System theme='outline' size={16} /> },
     { id: 'data', section: 'data', label: t('settings.workspace.data'), icon: <DatabaseConfig theme='outline' size={16} /> },
     { id: 'permissions', label: t('settings.capabilityPermissions.nav'), icon: <Shield theme='outline' size={16} /> },
-    { id: 'keyboard', label: t('settings.keyboard.title'), icon: <Keyboard theme='outline' size={16} /> },
+    { id: 'voice-keyboard', label: t('settings.keyboard.title'), icon: <Keyboard theme='outline' size={16} /> },
     { id: 'execution-engines', label: t('settings.executionEngines.title'), icon: <Cpu theme='outline' size={16} /> },
     { id: 'ssh-hosts', label: t('ssh.title'), icon: <Server theme='outline' size={16} /> },
     { id: 'about', label: t('settings.about'), icon: <Info theme='outline' size={16} /> },

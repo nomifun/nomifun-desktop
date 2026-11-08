@@ -1,9 +1,5 @@
-//! Native four-key subtitle board. No agent session, webview or model credentials
-//! live in the transport thread. The reducer is shared by every desktop platform.
+//! Shared voice-input document reducer and optional serial input adapter.
+//! The transport owns no Agent session, WebView, recording or model credentials.
 pub mod document;
-pub mod desktop_control;
-pub mod maintenance;
-pub mod ipc;
-pub mod legacy_service;
 pub mod protocol;
 pub mod service;

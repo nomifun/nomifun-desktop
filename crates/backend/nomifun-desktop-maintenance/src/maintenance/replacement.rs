@@ -165,7 +165,7 @@ impl FileReplacement {
             drop(output);
             fs::set_permissions(&temporary, fs::metadata(source)?.permissions())?;
             ensure!(equal(source, &temporary)?, "staged application copy differs from payload");
-            fs::rename(&temporary, target)?;
+            Self::publish(&temporary, target)?;
             ensure!(equal(source, target)?, "installed application copy differs from payload");
             Ok(())
         })();
@@ -173,6 +173,33 @@ impl FileReplacement {
             let _ = fs::remove_file(temporary);
         }
         result
+    }
+
+    fn publish(staged: &Path, target: &Path) -> Result<()> {
+        #[cfg(windows)]
+        {
+            use std::time::{Duration, Instant};
+            let started = Instant::now();
+            let wait = Duration::from_secs(5);
+            loop {
+                match fs::rename(staged, target) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 33)) && started.elapsed() < wait => {
+                        // Windows reports both access denied and sharing/lock
+                        // violations for transient image/scanner handles. Keep
+                        // the verified staged file; never delete the old target
+                        // or recopy the payload between attempts.
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(error) => return Err(error).with_context(|| format!(
+                        "publish staged application file after {} ms; the target may still be in use, read-only, or lack delete permission",
+                        started.elapsed().as_millis()
+                    )),
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        fs::rename(staged, target).context("publish staged application file")
     }
 
     /// Returns success only after independently comparing every restored file.
@@ -278,6 +305,43 @@ mod tests {
         transaction.rollback().unwrap();
         assert_eq!(fs::read(installed.join("app.exe")).unwrap(), b"old app");
         assert!(!installed.join("resources/new.dat").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_windows_sharing_denial_recovers_during_apply_and_rollback() {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt, time::Duration};
+        let (_dir, payload, installed, backup) = fixture();
+        let mut transaction = FileReplacement::prepare(&payload, &installed, &backup).unwrap();
+        for rollback in [false, true] {
+            // A real handle denies delete sharing, as a scanner or a retiring
+            // process can do after the application lifetime lock is released.
+            let handle = OpenOptions::new().read(true).share_mode(1).open(installed.join("app.exe")).unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                drop(handle);
+            });
+            let result = if rollback { transaction.rollback() } else { transaction.apply() };
+            release.join().unwrap();
+            result.unwrap();
+            assert_eq!(fs::read(installed.join("app.exe")).unwrap(), if rollback { &b"old app"[..] } else { &b"new app"[..] });
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persistent_windows_sharing_denial_restores_original_files() {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+        let (_dir, payload, installed, backup) = fixture();
+        let mut transaction = FileReplacement::prepare(&payload, &installed, &backup).unwrap();
+        let handle = OpenOptions::new().read(true).share_mode(1).open(installed.join("app.exe")).unwrap();
+        let error = transaction.apply().unwrap_err();
+        assert!(error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.raw_os_error(), Some(5 | 32 | 33)))));
+        transaction.rollback().unwrap();
+        assert_eq!(fs::read(installed.join("app.exe")).unwrap(), b"old app");
+        assert_eq!(fs::read(installed.join("settings.json")).unwrap(), b"user preference");
+        assert!(fs::read_dir(&installed).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".nomifun-")));
+        drop(handle);
     }
 
     #[test]

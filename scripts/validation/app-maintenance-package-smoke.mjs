@@ -9,7 +9,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildLegacy } from './keyboard-upgrade-native-smoke.mjs';
+import { buildLegacy } from './app-maintenance-native-smoke.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -67,7 +67,7 @@ function registeredVersion(identity) {
 }
 
 function cleanupFailedFixture(identity, installed) {
-  assert(/^nomifun-keyboard-upgrade-[0-9a-f]{32}$/.test(identity.main));
+  assert(/^nomifun-app-maintenance-[0-9a-f]{32}$/.test(identity.main));
   const keys = [`HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${identity.product}`,
     `HKCU:\\Software\\${identity.publisher}`, `HKCU:\\Software\\Classes\\${identity.scheme}`];
   // Only this UUID installation's image and registration are eligible. Preserve
@@ -88,7 +88,7 @@ async function bundle(directory, options, identity) {
   const target = join(directory, 'target'); const rawDirectory = join(target, 'debug'); mkdirSync(rawDirectory, { recursive: true });
   const raw = join(rawDirectory, `${identity.main}.exe`);
   copyFileSync(options.fixture, raw); appendFileSync(raw, '\nnomifun-full-package-new-release\n');
-  copyFileSync(options.helper, join(rawDirectory, 'nomifun-keyboard-maintenance.exe'));
+  copyFileSync(options.helper, join(rawDirectory, 'nomifun-app-maintenance.exe'));
   const config = join(directory, 'fixture.json');
   writeFileSync(config, JSON.stringify({ productName: identity.product, identifier: identity.identifier, mainBinaryName: identity.main,
     build: { beforeBundleCommand: null }, bundle: { publisher: identity.publisher, externalBin: [], resources: [], createUpdaterArtifacts: false,
@@ -105,13 +105,13 @@ async function bundle(directory, options, identity) {
   return { raw, installer: join(nsis, installers[0]), rendered: join(rawDirectory, 'nsis/x64/installer.nsi') };
 }
 
-export async function runKeyboardUpgradePackageSmoke(options) {
+export async function runAppMaintenancePackageSmoke(options) {
   assert.equal(process.platform, 'win32');
   for (const name of ['helper', 'fixture']) assert(options[name] && isAbsolute(options[name]) && existsSync(options[name]), `Pass absolute --${name}`);
-  const root = mkdtempSync(join(tmpdir(), 'nomifun-keyboard-package-upgrade-'));
+  const root = mkdtempSync(join(tmpdir(), 'nomifun-app-package-upgrade-'));
   const reportPath = options.report ?? join(root, 'report.json');
   const report = { schema: 1, root, helperSha256: digest(options.helper), fixtureSha256: digest(options.fixture), productionTemplate: true,
-    hookSha256: digest(join(repository, 'apps/desktop/nsis/keyboard-hooks.nsh')),
+    hookSha256: digest(join(repository, 'apps/desktop/nsis/app-maintenance-hooks.nsh')),
     templateSha256: digest(join(repository, 'apps/desktop/nsis/installer.nsi')),
     isolation: { uniqueProductAndRegistry: true, privateInstallAndRuntime: true, userRegistrationUntouched: true, serialEnumeration: false, microphoneCapture: false },
     cases: [], unexecuted: ['released old Tauri binary', 'physical K1/K4 and microphone'], ok: false };
@@ -124,8 +124,8 @@ export async function runKeyboardUpgradePackageSmoke(options) {
       const name = failure ? 'full-template-file-failure-preserves-old-metadata' : running ? 'running-legacy-app-update' : 'closed-legacy-manual-upgrade';
       const directory = join(root, name); mkdirSync(directory);
       const nonce = randomUUID().replaceAll('-', '');
-      const identity = { product: `NomiFun Keyboard Upgrade ${nonce}`, publisher: `NomiFun Keyboard Fixture ${nonce}`,
-        identifier: `com.nomifun.keyboardupgrade.${nonce}`, main: `nomifun-keyboard-upgrade-${nonce}`, scheme: `nomifun-keyboard-upgrade-${nonce}` };
+      const identity = { product: `NomiFun App Maintenance ${nonce}`, publisher: `NomiFun App Fixture ${nonce}`,
+        identifier: `com.nomifun.appmaintenance.${nonce}`, main: `nomifun-app-maintenance-${nonce}`, scheme: `nomifun-app-maintenance-${nonce}` };
       const result = { name, identity, ok: false };
       report.cases.push(result);
       const env = environment(directory); const install = join(directory, 'install'); mkdirSync(install);
@@ -211,7 +211,7 @@ export async function runKeyboardUpgradePackageSmoke(options) {
         catch (error) { report.cleanupError = String(error); }
       }
     }
-    if (report.hookSha256 !== digest(join(repository, 'apps/desktop/nsis/keyboard-hooks.nsh'))
+    if (report.hookSha256 !== digest(join(repository, 'apps/desktop/nsis/app-maintenance-hooks.nsh'))
       || report.templateSha256 !== digest(join(repository, 'apps/desktop/nsis/installer.nsi'))) {
       report.ok = false; report.sourceChangedDuringRun = true;
     }
@@ -229,5 +229,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     assert(['--helper', '--fixture', '--report'].includes(process.argv[index]));
     options[process.argv[index].slice(2)] = resolve(process.argv[index + 1]);
   }
-  const result = await runKeyboardUpgradePackageSmoke(options); console.log(JSON.stringify(result)); process.exitCode = result.ok ? 0 : 1;
+  const result = await runAppMaintenancePackageSmoke(options); console.log(JSON.stringify(result)); process.exitCode = result.ok ? 0 : 1;
 }

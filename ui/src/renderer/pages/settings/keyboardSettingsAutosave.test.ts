@@ -1,3 +1,4 @@
+import { defaultVoiceKeyboardShortcuts } from '@/common/keyboard';
 import { describe, expect, test } from 'bun:test';
 import type { KeyboardSettings, KeyboardState } from '@/common/keyboard';
 import {
@@ -10,7 +11,7 @@ function state(sequence = 1, patch: Partial<KeyboardSettings> = {}): KeyboardSta
   return {
     sequence, cancelGeneration: 0,
     settings: {
-      enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true,
+      enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true,
       audioDeviceId: null, asrMode: 'streaming', asrModel: null, textModel: null,
       language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false,
       subtitleFontSize: 14, ...patch,

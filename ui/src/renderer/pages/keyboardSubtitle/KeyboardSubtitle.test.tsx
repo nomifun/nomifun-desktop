@@ -1,3 +1,4 @@
+import { defaultVoiceKeyboardShortcuts } from '@/common/keyboard';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { act } from 'react';
 import { cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
@@ -12,7 +13,7 @@ import { subtitleTextMap } from './subtitleText';
 
 const snapshot = (patch: Partial<KeyboardState> = {}): KeyboardState => ({
   sequence: 0, cancelGeneration: 0,
-  settings: { enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
+  settings: { enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
     asrModel: null, textModel: null, language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: true, subtitleFontSize: 14 },
   documentId: 'document-1', revision: 3, operationId: null, editSessionId: null, dictationSelection: null, phase: 'idle', text: '原文 👋\nSecond line',
   originalText: '原文 👋\nSecond line', partial: '', candidate: '', visible: true, pendingAction: null,
@@ -99,6 +100,28 @@ async function beginDictation(anchor: number, focus = anchor) {
 }
 
 describe('native subtitle coordination', () => {
+  test('a good native snapshot clears the initial asynchronous voice startup error', async () => {
+    keyboard.getState = async () => { throw new Error('Voice input is still starting'); };
+    const hook = renderHook(() => useKeyboard());
+    await waitFor(() => expect(hook.result.current.error).toBe('Voice input is still starting'));
+    act(() => publish({ sequence: 1 }));
+    await waitFor(() => expect(hook.result.current.state).toEqual(current));
+    expect(hook.result.current.error).toBeNull();
+  });
+
+  test('an older native snapshot cannot hide an unresolved voice action failure', async () => {
+    current = snapshot({ sequence: 5 });
+    const hook = renderHook(() => useKeyboard());
+    await waitFor(() => expect(hook.result.current.state?.sequence).toBe(5));
+    keyboard.action = async () => { throw new Error('Voice action failed'); };
+    await act(async () => { await hook.result.current.action({ action: 'open' }); });
+    expect(hook.result.current.error).toBe('Voice action failed');
+    act(() => listener?.(snapshot({ sequence: 4 })));
+    expect(hook.result.current.error).toBe('Voice action failed');
+    act(() => listener?.(snapshot({ sequence: 6 })));
+    expect(hook.result.current.error).toBeNull();
+  });
+
   for (const modifier of ['ctrlKey', 'metaKey'] as const) {
     test(`${modifier} selection copy retains the WebView default and never requests a native action`, async () => {
       editBackend(); renderBoard();
@@ -321,14 +344,14 @@ describe('native subtitle coordination', () => {
     expect(screen.getByRole('button', { name: 'Beautify' }).hasAttribute('disabled')).toBe(false);
   });
 
-  test('a blocked first K4 explains its cause and opens setup without recording or changing text', async () => {
-    const reason = 'Select an ASR model in keyboard settings before using K4.';
+  test('a blocked dictation explains its cause and opens setup without recording or changing text', async () => {
+    const reason = 'Select an ASR model in Voice keyboard settings before dictating.';
     current = snapshot({ documentId: null, revision: 0, text: '', originalText: '', error: reason });
     renderBoard();
     const issue = await screen.findByRole('alert');
     expect(issue.textContent).toBe(reason);
     expect(issue.closest('details')!.hasAttribute('open')).toBe(false);
-    const setup = await screen.findByRole('button', { name: 'Check keyboard setup' });
+    const setup = await screen.findByRole('button', { name: 'Check voice input setup' });
     fireEvent.click(setup);
     await waitFor(() => expect(actions).toEqual([
       { action: 'open_settings', documentId: null, revision: 0, cancelGeneration: 0 },
@@ -513,7 +536,7 @@ describe('native subtitle coordination', () => {
     current = snapshot({ text: '', partial: '' });
     renderBoard();
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Final text' }).textContent).toBe(''));
-    expect(screen.getByRole('status').textContent).toBe('Hold K4 to speak');
+    expect(screen.getByRole('status').textContent).toBe('Hold your dictation shortcut to speak');
   });
 
   test('an operation notice stays outside completed lyrics', async () => {

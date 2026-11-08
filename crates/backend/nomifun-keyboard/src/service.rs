@@ -103,11 +103,11 @@ pub struct Transport {
     worker: Option<JoinHandle<Result<()>>>,
 }
 impl Transport {
-    pub fn start() -> Result<(Self, Receiver<Event>)> {
-        Self::start_at(crate::ipc::runtime_dir()?, true)
+    pub fn start(runtime: PathBuf) -> Result<(Self, Receiver<Event>)> {
+        Self::start_at(runtime, true)
     }
     /// Explicit disposable fixture: no USB enumeration, audio, or endpoint.
-    #[cfg(feature = "maintenance-validation")]
+    #[cfg(feature = "transport-validation")]
     pub fn start_validation(dir: PathBuf) -> Result<(Self, Receiver<Event>)> {
         ensure!(dir.is_dir(), "isolated transport directory must exist");
         Self::start_at(dir, false)
@@ -125,7 +125,7 @@ impl Transport {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker = std::thread::Builder::new().name("nomifun-keyboard-serial".into()).spawn(move || {
-            #[cfg(feature = "maintenance-validation")]
+            #[cfg(feature = "transport-validation")]
             let _validation = validation::Worker::new();
             let result = owner_loop(rx, events, worker_stop.clone(), scan_enabled, device);
             worker_stop.store(true, Ordering::Release);
@@ -136,21 +136,21 @@ impl Transport {
         })?;
         Ok((Self { commands: Commands { tx, stop }, worker: Some(worker) }, receiver))
     }
-    #[cfg(feature = "maintenance-validation")]
+    #[cfg(feature = "transport-validation")]
     pub fn validation_owner(&self) -> Option<String> {
         self.worker.as_ref().filter(|worker| !worker.is_finished())
             .map(|worker| format!("{}:{:?}", std::process::id(), worker.thread().id()))
     }
-    #[cfg(feature = "maintenance-validation")]
+    #[cfg(feature = "transport-validation")]
     pub fn validation_last_control(&self) -> Option<Control> {
         self.worker.as_ref().and_then(|worker| validation::last(worker.thread().id()))
     }
-    #[cfg(feature = "maintenance-validation")]
+    #[cfg(feature = "transport-validation")]
     pub fn validation_lock_held(dir: &std::path::Path) -> Result<bool> {
         let lock = OpenOptions::new().read(true).write(true).open(dir.join("owner.lock"))?;
         match lock.try_lock_exclusive() {
             Ok(()) => Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(true),
             Err(error) => Err(error.into()),
         }
     }
@@ -534,7 +534,7 @@ fn owner_active_loop(
         }
         if shutdown.is_none() {
             for control in rx.try_iter().take(64) {
-                #[cfg(feature = "maintenance-validation")]
+                #[cfg(feature = "transport-validation")]
                 validation::record(control.clone());
                 match control {
                     Control::Display { state } => {
@@ -775,7 +775,7 @@ fn poll_device(
     }
     Ok(())
 }
-#[cfg(feature = "maintenance-validation")]
+#[cfg(feature = "transport-validation")]
 mod validation {
     use super::Control;
     use std::{collections::HashMap, sync::{Mutex, OnceLock}, thread::ThreadId};
@@ -806,10 +806,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (mut transport, events) = Transport::start_at(root.path().into(), false).unwrap();
         assert!(matches!(events.recv_timeout(Duration::from_secs(1)).unwrap(), Event::Status(_)));
+        #[cfg(feature = "transport-validation")]
+        assert!(Transport::validation_lock_held(root.path()).unwrap());
         assert!(!root.path().join("owner.json").exists());
         assert!(Transport::start_at(root.path().into(), false).is_err());
         let commands = transport.commands();
         transport.shutdown().unwrap();
+        #[cfg(feature = "transport-validation")]
+        assert!(!Transport::validation_lock_held(root.path()).unwrap());
         assert!(commands.control(Control::Rearm { generation: 1 }).is_err());
         let (next, _) = Transport::start_at(root.path().into(), false).unwrap();
         drop(next);

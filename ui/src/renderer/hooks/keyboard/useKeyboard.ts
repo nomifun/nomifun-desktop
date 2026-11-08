@@ -50,6 +50,7 @@ export function useKeyboard() {
       events.current++;
       current.current = next;
       setState(next);
+      setError(null);
     }).then((stop) => {
       if (!active) { stop(); return; }
       dispose = stop;

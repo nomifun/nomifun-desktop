@@ -11,28 +11,28 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 export function maintenanceBuildArgs({ target, profile = 'release' } = {}) {
   if (target && !/^[a-z0-9_]+-(?:[a-z0-9_]+-)+[a-z0-9_]+$/.test(target)) throw new Error('A concrete Rust target triple is required');
   if (!['debug', 'release'].includes(profile)) throw new Error(`Unsupported maintenance build profile: ${profile}`);
-  return ['build', '--locked', '-p', 'nomifun-keyboard', '--bin', 'nomifun-keyboard-maintenance',
+  return ['build', '--locked', '-p', 'nomifun-desktop-maintenance', '--bin', 'nomifun-app-maintenance',
     ...(target ? ['--target', target] : []), '--profile', profile === 'debug' ? 'dev' : profile, '--message-format=json-render-diagnostics'];
 }
 
-export async function buildKeyboardMaintenance(options = {}, spawnCargo = spawn) {
+export async function buildAppMaintenance(options = {}, spawnCargo = spawn) {
   const child = spawnCargo('cargo', maintenanceBuildArgs(options), {
     cwd: root, env: process.env, stdio: ['inherit', 'pipe', 'inherit'], windowsHide: true,
   });
   const finished = new Promise((accept, reject) => {
     child.once('error', reject);
-    child.once('close', (code, signal) => code === 0 ? accept() : reject(new Error(`Keyboard maintenance build failed: ${code ?? signal}`)));
+    child.once('close', (code, signal) => code === 0 ? accept() : reject(new Error(`Application maintenance build failed: ${code ?? signal}`)));
   });
   finished.catch(() => {});
   let binary;
   for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
     let event;
     try { event = JSON.parse(line); } catch { process.stderr.write(line + '\n'); continue; }
-    if (event.reason === 'compiler-artifact' && event.target?.name === 'nomifun-keyboard-maintenance' && event.executable) binary = resolve(root, event.executable);
+    if (event.reason === 'compiler-artifact' && event.target?.name === 'nomifun-app-maintenance' && event.executable) binary = resolve(root, event.executable);
     if (event.message?.rendered) process.stderr.write(event.message.rendered);
   }
   await finished;
-  if (!binary) throw new Error('Cargo did not report the keyboard maintenance executable');
+  if (!binary) throw new Error('Cargo did not report the application maintenance executable');
   return binary;
 }
 
@@ -44,5 +44,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     else if (args[index] === '--profile') options.profile = args[++index];
     else throw new Error(`Unknown maintenance build argument: ${args[index]}`);
   }
-  process.stdout.write((await buildKeyboardMaintenance(options)) + '\n');
+  process.stdout.write((await buildAppMaintenance(options)) + '\n');
 }

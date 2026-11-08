@@ -73,7 +73,7 @@
       "nsis": {
         "installMode": "currentUser",
         "template": "nsis/installer.nsi",
-        "installerHooks": "nsis/keyboard-hooks.nsh"
+        "installerHooks": "nsis/app-maintenance-hooks.nsh"
       }
     }
   },

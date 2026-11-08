@@ -20,6 +20,7 @@ use nomifun_db::{
 use nomifun_keyboard::document::{AsrMode, ModelSelection, Settings, TextSelection};
 use nomifun_model_invoke::{AdapterRegistry, ModelInvokeService, default_adapters};
 use serde_json::{Value, json};
+use tauri::Manager;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}},
@@ -403,6 +404,9 @@ async fn hardware(app: &tauri::AppHandle, pressed: Option<bool>) -> Result<Value
 }
 async fn click(app: &tauri::AppHandle, key: &str) -> Result<Value> {
     keyboard::validation_hardware_click(app, key).await.map_err(anyhow::Error::msg)
+}
+async fn shortcut(app: &tauri::AppHandle, action: &str, pressed: bool) -> Result<Value> {
+    keyboard::validation_shortcut(app, action, pressed).await.map_err(anyhow::Error::msg)
 }
 fn document(state: &Value) -> Option<String> { state["documentId"].as_str().map(str::to_owned) }
 async fn captured_action(app: &tauri::AppHandle, name: &str, state: &Value) -> Result<Value> {
@@ -869,35 +873,151 @@ async fn local_microphone_checks(app: &tauri::AppHandle, settings: &Settings, fi
     configured.enabled = true;
     configured.k4_enabled = true;
     keyboard::validation_request(app, None, Some(configured)).await.map_err(anyhow::Error::msg)?;
-    keyboard::validation_arm_prewarm(app).await.map_err(anyhow::Error::msg)?;
-    if !fixture.platform_asr {
-        wait_counter(&fixture.connections, 1).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while !keyboard::validation_asr_prepared(app).await.map_err(anyhow::Error::msg)? {
-            ensure!(tokio::time::Instant::now() < deadline, "Actor did not accept idle ASR prewarm");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-    let prewarm_before = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
-    let prewarm_document = keyboard::validation_snapshot(app);
-    keyboard::validation_microphone_test(app, "microphone_test_start", "local-with-prewarm", None).await.map_err(anyhow::Error::msg)?;
+    let idle_before = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
+    let idle_document = keyboard::validation_snapshot(app);
+    keyboard::validation_microphone_test(app, "microphone_test_start", "local-configured-idle", None).await.map_err(anyhow::Error::msg)?;
     wait_state(app, |state| state["microphoneTest"]["state"] == "completed").await?;
     tokio::time::sleep(Duration::from_millis(1200)).await; // include at least one normal Actor Tick
-    let after_prewarm = keyboard::validation_snapshot(app);
-    let prewarm_after = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
-    ensure!(prewarm_before == prewarm_after, "local test cancelled prewarm and caused a new provider request");
+    let after_idle = keyboard::validation_snapshot(app);
+    let idle_after = [count(&fixture.connections), count(&fixture.uploads), count(&fixture.final_requests), count(&fixture.pcm)];
+    ensure!(idle_before == idle_after, "configured idle/local microphone test opened a provider connection");
     for field in ["documentId", "revision", "text", "phase", "editSessionId", "settings"] {
-        ensure!(after_prewarm[field] == prewarm_document[field], "prewarmed local test changed {field}");
+        ensure!(after_idle[field] == idle_document[field], "configured local test changed {field}");
     }
     Ok(json!({"without_asr_usb_or_k4":true,"five_second_auto_stop":true,"callback_and_pcm_evidence":local["microphoneTest"],
         "no_provider_calls":true,"provider_counts_before":provider_before,
-        "provider_counts_after":provider_after,"prewarm_preserved_without_provider_reconnect":true,
-        "prewarm_counts_before":prewarm_before,"prewarm_counts_after":prewarm_after,
+        "provider_counts_after":provider_after,"configured_idle_without_provider_connection":true,
+        "configured_idle_counts_before":idle_before,"configured_idle_counts_after":idle_after,
         "document_settings_and_edit_lease_unchanged":true,"draft_device_not_saved":true,"stale_test_id_ignored":true,
         "mutual_exclusion":true,"stop_proof_required_before_new_owner":true,"late_cancelled_callback_does_not_fail":true,"suspension_cancels_and_blocks":true,
         "update_waits_for_local_stop":true,"k4_missing_model_visible_without_recording":true}))
 }
+async fn software_shortcut_checks(app: &tauri::AppHandle, settings: &Settings, fixture: &Fixture) -> Result<Value> {
+    let mut software = settings.clone();
+    software.enabled = true;
+    software.k2_enabled = false; software.k3_enabled = false; software.k4_enabled = false;
+    keyboard::validation_request(app, None, Some(software.clone())).await.map_err(anyhow::Error::msg)?;
+    wait_state(app, |state| state["service"]["ready"] == true).await?;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    ensure!(count(&fixture.connections) == 0 && count(&fixture.uploads) == 0 && count(&fixture.pcm) == 0,
+        "idle configured voice runtime opened provider/audio resources");
+    ensure!(app.get_webview_window("keyboard-subtitle").is_none(), "idle runtime constructed subtitle WebView");
+    ensure!(keyboard::validation_snapshot(app)["device"]["connected"] == false, "software fixture unexpectedly needs hardware");
+
+    keyboard::validation_resource_block(app, Some("isolated old owner still alive")).await.map_err(anyhow::Error::msg)?;
+    ensure!(action(app, "test_start").await.is_err(), "UI capture bypassed blocked old resource retirement");
+    ensure!(keyboard::validation_microphone_test(app, "microphone_test_start", "blocked-old-resource", None).await.is_err(),
+        "local microphone test bypassed blocked old resources");
+    shortcut(app, "dictate", true).await?;
+    ensure!(keyboard::validation_snapshot(app)["audioState"]["state"] == "stopped", "shortcut bypassed blocked resources");
+    shortcut(app, "dictate", false).await?;
+    ensure!(count(&fixture.connections) == 0 && count(&fixture.pcm) == 0, "blocked resources opened provider/microphone");
+    keyboard::validation_resource_block(app, None).await.map_err(anyhow::Error::msg)?;
+
+    *fixture.asr_text.lock().unwrap() = "快捷语音".into();
+    shortcut(app, "dictate", true).await?;
+    let recording = wait_state(app, |state| state["audioState"]["state"] == "capturing").await?;
+    shortcut(app, "dictate", true).await?;
+    ensure!(keyboard::validation_snapshot(app)["operationId"] == recording["operationId"], "repeat press created another capture");
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    shortcut(app, "dictate", false).await?;
+    let draft = settled(app, "快捷语音").await?;
+    shortcut(app, "toggle", true).await?;
+    ensure!(keyboard::validation_snapshot(app)["visible"] == false, "shortcut did not hide idle subtitle");
+    shortcut(app, "toggle", false).await?;
+    shortcut(app, "toggle", true).await?;
+    let toggled = keyboard::validation_snapshot(app);
+    for field in ["documentId", "text", "originalText", "revision"] {
+        ensure!(toggled[field] == draft[field], "show/hide shortcut erased or changed {field}");
+    }
+    shortcut(app, "toggle", false).await?;
+    shortcut(app, "beautify", true).await?;
+    settled(app, "美化：快捷语音").await?;
+    shortcut(app, "beautify", false).await?;
+
+    // A release belongs to its originating hold. It cannot stop a recording
+    // started using an on-screen button, even with all hardware keys disabled.
+    close(app).await?;
+    *fixture.asr_text.lock().unwrap() = "界面录音".into();
+    action(app, "test_start").await?;
+    let ui_recording = wait_state(app, |state| state["audioState"]["state"] == "capturing").await?;
+    shortcut(app, "dictate", false).await?;
+    let still_ui = keyboard::validation_snapshot(app);
+    ensure!(still_ui["operationId"] == ui_recording["operationId"] && still_ui["audioState"]["state"] == "capturing",
+        "shortcut release stopped an unrelated UI recording");
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    action(app, "stop").await?; settled(app, "界面录音").await?;
+
+    editor(app, "edit_begin", "shortcut-editor", None).await?;
+    let providers = count(&fixture.connections);
+    shortcut(app, "dictate", true).await?;
+    ensure!(keyboard::validation_snapshot(app)["capturePreparing"] == true, "software hold did not wait for editor flush");
+    shortcut(app, "dictate", false).await?;
+    edit(app, "编辑草稿保留🙂", Some("shortcut-editor")).await?;
+    editor(app, "edit_end", "shortcut-editor", None).await?;
+    assert_stable(app, "编辑草稿保留🙂").await?;
+    ensure!(count(&fixture.connections) == providers, "released editor hold later started ASR");
+
+    if !fixture.platform_asr {
+        for change_audio in [false, true] {
+            fixture.hold_handshakes.store(true, Ordering::Release);
+            let providers = count(&fixture.connections); let pcm = count(&fixture.pcm);
+            shortcut(app, "dictate", true).await?;
+            wait_counter(&fixture.connections, providers + 1).await?;
+            if change_audio {
+                software.language = "en".into();
+                keyboard::validation_request(app, None, Some(software.clone())).await.map_err(anyhow::Error::msg)?;
+            } else { shortcut(app, "dictate", false).await?; }
+            fixture.hold_handshakes.store(false, Ordering::Release);
+            assert_stable(app, "编辑草稿保留🙂").await?;
+            ensure!(count(&fixture.pcm) == pcm, "revoked ASR preparation opened a microphone after its late handshake");
+            if change_audio {
+                shortcut(app, "dictate", true).await?;
+                ensure!(idle(&keyboard::validation_snapshot(app)), "audio settings change replayed old shortcut hold");
+                shortcut(app, "dictate", false).await?;
+            }
+        }
+    }
+    for boundary in ["cancel", "suspend", "update", "remap", "disable"] {
+        shortcut(app, "dictate", true).await?;
+        wait_state(app, |state| state["audioState"]["state"] == "capturing").await?;
+        match boundary {
+            "cancel" => { shortcut(app, "cancel", true).await?; shortcut(app, "cancel", false).await?; }
+            "suspend" => {
+                keyboard::validation_suspend(app, true).await.map_err(anyhow::Error::msg)?;
+                keyboard::validation_suspend(app, false).await.map_err(anyhow::Error::msg)?;
+            }
+            "update" => {
+                let pause = keyboard::prepare_update(app).await.map_err(anyhow::Error::msg)?.context("voice update guard missing")?;
+                pause.cancel().await.map_err(anyhow::Error::msg)?;
+            }
+            "remap" => {
+                software.shortcuts.dictate = "Ctrl+Alt+F22".into();
+                keyboard::validation_request(app, None, Some(software.clone())).await.map_err(anyhow::Error::msg)?;
+            }
+            "disable" => {
+                software.enabled = false;
+                keyboard::validation_request(app, None, Some(software.clone())).await.map_err(anyhow::Error::msg)?;
+                software.enabled = true;
+                keyboard::validation_request(app, None, Some(software.clone())).await.map_err(anyhow::Error::msg)?;
+            }
+            _ => unreachable!(),
+        }
+        wait_state(app, idle).await?;
+        shortcut(app, "dictate", true).await?;
+        ensure!(idle(&keyboard::validation_snapshot(app)), "{boundary} resumed a previously held shortcut");
+        shortcut(app, "dictate", false).await?;
+    }
+    close(app).await?;
+    keyboard::validation_request(app, None, Some(settings.clone())).await.map_err(anyhow::Error::msg)?;
+    Ok(json!({"no_hardware_prerequisite":true,"hardware_key_toggles_do_not_gate_software":true,
+        "idle_without_provider_audio_or_webview":true,"blocked_old_resources_gate_all_capture":true,
+        "hold_press_repeat_and_release":true,"toggle_preserves_document":true,"beautify_without_device":true,
+        "release_does_not_stop_ui_recording":true,"released_editor_and_asr_preparation_do_not_resume":true,
+        "cancel_suspend_update_remap_disable_require_fresh_release":true}))
+}
 async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture) -> Result<Value> {
+    let software_shortcuts = software_shortcut_checks(app, &settings, fixture).await.context("software shortcut Actor controls")?;
     let local_microphone = local_microphone_checks(app, &settings, fixture).await.context("local microphone checks")?;
     keyboard::validation_request(app, None, Some(settings)).await.map_err(anyhow::Error::msg)?;
     hardware(app, None).await?;
@@ -908,7 +1028,7 @@ async fn validate(app: &tauri::AppHandle, settings: Settings, fixture: &Fixture)
     let update_recovery = update_recovery(app, fixture).await.context("update pause/cancel/failure recovery")?;
     Ok(json!({"passed":true,"asr_mode":if fixture.platform_asr{"platform"}else{"streaming"},
         "audio_source":"explicit synthetic PCM fixture; no OS microphone","real_os_microphone":false,
-        "provider_requests_loopback_only":true,"local_microphone":local_microphone,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
+        "provider_requests_loopback_only":true,"software_shortcuts":software_shortcuts,"local_microphone":local_microphone,"editor":editor,"cancellation":boundaries,"heavy_use":heavy,
         "caret_and_close":caret_close,"update_recovery":update_recovery,
         "pcm_samples":count(&fixture.pcm),"uploads":count(&fixture.uploads),
         "asr_final_requests":count(&fixture.final_requests),"polish_requests":count(&fixture.polish)}))

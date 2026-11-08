@@ -1,4 +1,4 @@
-//! One native operation path for hardware keys and the independent subtitle UI.
+//! One voice operation path for system shortcuts, subtitle controls and optional hardware.
 mod asr_preparation;
 mod audio;
 mod key_hold;
@@ -6,6 +6,7 @@ mod lifecycle;
 mod models;
 mod microphone_check;
 mod platform;
+pub(crate) mod shortcuts;
 mod update_pause;
 use key_hold::KeyHold;
 use microphone_check::{MicrophoneCheck, MicrophoneTestState};
@@ -61,7 +62,11 @@ pub(crate) struct KeyboardState {
     microphone_test: MicrophoneTestState,
     cancel_generation: u64,
     edit_session_id: Option<String>,
+    shortcut_state: ShortcutState,
 }
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutState { registered: usize, detail: Option<String> }
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
     settings: Settings,
@@ -100,15 +105,12 @@ impl OwnedTransport {
 impl Drop for OwnedTransport {
     fn drop(&mut self) { let _ = self.shutdown(); }
 }
-/// Keeps a launcher admitted until its authenticated GUI lifetime endpoint is
-/// published. Maintenance can then quiesce that GUI without racing its startup.
-pub(crate) struct StartupAdmissionState(Mutex<Option<nomifun_keyboard::maintenance::StartupAdmission>>);
-impl StartupAdmissionState {
-    pub(crate) fn new(admission: Option<nomifun_keyboard::maintenance::StartupAdmission>) -> Self {
-        Self(Mutex::new(admission))
-    }
-}
 enum Message {
+    Shortcut(shortcuts::Action, bool),
+    #[cfg(feature = "native-keyboard-validation")]
+    ValidationShortcut(shortcuts::Action, bool, oneshot::Sender<Result<KeyboardState, String>>),
+    #[cfg(feature = "native-keyboard-validation")]
+    ValidationResourceBlock(Option<String>, oneshot::Sender<Result<(), String>>),
     #[cfg(feature = "native-keyboard-validation")]
     ValidationButtonClick(String, oneshot::Sender<Result<KeyboardState, String>>),
     #[cfg(feature = "native-keyboard-validation")]
@@ -121,8 +123,6 @@ enum Message {
     ValidationHoldStop(bool, oneshot::Sender<Result<(), String>>),
     #[cfg(feature = "native-keyboard-validation")]
     ValidationLateCaptureCallback(oneshot::Sender<Result<(), String>>),
-    #[cfg(feature = "native-keyboard-validation")]
-    ValidationAsrPrepared(oneshot::Sender<bool>),
     Connected(Commands),
     Disconnected(String),
     Device(Event),
@@ -159,24 +159,27 @@ enum Message {
     Candidate(Identity, String),
     Polished(Identity, Result<String, String>),
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InputSource { #[default] Ui, Hardware, Shortcut }
+impl InputSource { fn hardware(self) -> bool { self == Self::Hardware } }
 struct PendingStart {
-    hardware: bool,
+    source: InputSource,
     activation_generation: u64,
     document_id: Option<String>,
     revision: u64,
     started_at: Instant,
 }
 enum EditorOperation {
-    Intent(Intent, bool),
+    Intent(Intent, InputSource),
     Capture {
-        hardware: bool,
+        source: InputSource,
         generation: u64,
     },
 }
 impl EditorOperation {
     fn hardware(&self) -> bool {
         match self {
-            Self::Intent(_, hardware) | Self::Capture { hardware, .. } => *hardware,
+            Self::Intent(_, source) | Self::Capture { source, .. } => source.hardware(),
         }
     }
 }
@@ -208,6 +211,10 @@ struct Actor {
     hardware_armed: bool,
     policy_sent: bool,
     key_hold: KeyHold,
+    shortcut_hold: KeyHold,
+    shortcut_generation: u64,
+    shortcuts: Option<shortcuts::Controller>,
+    startup_error: Option<String>,
     asr: Option<StreamingAsrInput>,
     asr_generation: u64,
     asr_document: Option<Identity>,
@@ -235,11 +242,10 @@ struct Actor {
     drain_at: Option<Instant>,
     polish: Option<CancellationToken>,
     close_pending: bool,
-    hardware_operation: bool,
-    pending_origin: Option<bool>,
+    operation_source: InputSource,
+    pending_origin: Option<InputSource>,
     shutdown_replies: Vec<oneshot::Sender<Result<(), String>>>,
     display_sent: Option<String>,
-    #[cfg(feature = "native-keyboard-validation")]
     production: bool,
     #[cfg(feature = "native-keyboard-validation")]
     synthetic_input: bool,
@@ -258,27 +264,14 @@ pub(crate) fn start(
     app: tauri::AppHandle,
     server: Arc<nomifun_app::DesktopServer>,
     root: PathBuf,
+    startup_error: Option<String>,
 ) -> anyhow::Result<()> {
-    platform::retire_legacy_service()?;
-    let stop_app = app.clone();
-    let exit_app = app.clone();
-    let desktop_owner = nomifun_keyboard::desktop_control::register(
-        move || {
-            tauri::async_runtime::block_on(prepare_external_maintenance(&stop_app))
-                .map_err(anyhow::Error::msg)
-        },
-        move || exit_app.exit(0),
-    )?;
-    app.manage(desktop_owner);
     let models = DesktopModels::new(
         server
             .keyboard_model_service()
             .ok_or_else(|| anyhow::anyhow!("模型服务未就绪"))?,
     );
-    start_core(app.clone(), models, root, true)?;
-    if let Some(admission) = app.try_state::<StartupAdmissionState>() {
-        drop(admission.0.lock().unwrap_or_else(|error| error.into_inner()).take());
-    }
+    start_core(app, models, root, true, startup_error)?;
     Ok(())
 }
 fn start_core(
@@ -286,11 +279,8 @@ fn start_core(
     models: DesktopModels,
     root: PathBuf,
     production: bool,
+    startup_error: Option<String>,
 ) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    if production {
-        audio::prepare_runtime();
-    }
     let path = root.join("keyboard-settings.json");
     let (saved, error) = if path.exists() {
         match std::fs::read(path)
@@ -310,7 +300,7 @@ fn start_core(
         (Saved::default(), None)
     };
     let mut saved = saved;
-    if error.is_some() {
+    if error.is_some() || startup_error.is_some() {
         saved.settings.enabled = false;
     }
     let mut state = KeyboardState {
@@ -331,14 +321,32 @@ fn start_core(
         microphone_test: MicrophoneTestState::default(),
         cancel_generation: 0,
         edit_session_id: None,
+        shortcut_state: ShortcutState::default(),
     };
-    state.document.error = error;
+    state.document.error = error.or_else(|| startup_error.clone());
     let snapshot = Arc::new(Mutex::new(state.clone()));
     let (tx, rx) = mpsc::channel(64);
     // Native stop/lifecycle messages must neither compete with streaming deltas
     // nor disappear when the bounded data queue is full. Their producers are
     // trusted native callbacks; only the actor consumes this priority channel.
     let (urgent, urgent_rx) = mpsc::unbounded_channel();
+    let shortcuts = if production {
+        match app.plugin(shortcuts::plugin()) {
+            Ok(()) => {
+                let edges = urgent.clone();
+                let mut controller = shortcuts::Controller::new(app.clone(), move |action, pressed| {
+                    let _ = edges.send(Message::Shortcut(action, pressed));
+                });
+                match controller.reconfigure(&saved.settings) {
+                    Ok(count) => state.shortcut_state.registered = count,
+                    Err(error) => state.shortcut_state.detail = Some(error),
+                }
+                Some(controller)
+            }
+            Err(error) => { state.shortcut_state.detail = Some(format!("系统快捷键初始化失败：{error}")); None }
+        }
+    } else { None };
+    *snapshot.lock().unwrap() = state.clone();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let update_admission = Arc::new(UpdateAdmission::default());
     let transport = Arc::new(Mutex::new(None));
@@ -373,6 +381,10 @@ fn start_core(
         hardware_armed: false,
         policy_sent: false,
         key_hold: KeyHold::default(),
+        shortcut_hold: KeyHold::default(),
+        shortcut_generation: 1,
+        shortcuts,
+        startup_error,
         asr: None,
         asr_generation: 0,
         asr_document: None,
@@ -400,11 +412,10 @@ fn start_core(
         drain_at: None,
         polish: None,
         close_pending: false,
-        hardware_operation: false,
+        operation_source: InputSource::Ui,
         pending_origin: None,
         shutdown_replies: Vec::new(),
         display_sent: None,
-        #[cfg(feature = "native-keyboard-validation")]
         production,
         #[cfg(feature = "native-keyboard-validation")]
         synthetic_input,
@@ -439,7 +450,7 @@ fn start_core(
         }
     });
     let serial = if production {
-        Some(Transport::start()?)
+        None
     } else {
         #[cfg(feature = "native-keyboard-validation")]
         {
@@ -479,7 +490,7 @@ pub(crate) fn validation_start(
             == Some("isolated-native-keyboard-v1"),
         "isolated validation marker required"
     );
-    start_core(app, DesktopModels::new(invoke), root, false)
+    start_core(app, DesktopModels::new(invoke), root, false, None)
 }
 #[cfg(feature = "native-keyboard-validation")]
 pub(crate) fn validation_snapshot(app: &tauri::AppHandle) -> serde_json::Value {
@@ -557,10 +568,18 @@ pub(crate) async fn validation_late_capture_callback(app: &tauri::AppHandle) -> 
     result.await.map_err(|_| "actor stopped")?
 }
 #[cfg(feature = "native-keyboard-validation")]
-pub(crate) async fn validation_asr_prepared(app: &tauri::AppHandle) -> Result<bool, String> {
+pub(crate) async fn validation_shortcut(app: &tauri::AppHandle, action: &str, pressed: bool) -> Result<serde_json::Value, String> {
+    let action = match action { "toggle" => shortcuts::Action::Toggle, "beautify" => shortcuts::Action::Beautify,
+        "cancel" => shortcuts::Action::Cancel, "dictate" => shortcuts::Action::Dictate, _ => return Err("unknown voice shortcut".into()) };
     let (reply, result) = oneshot::channel();
-    app.state::<KeyboardRuntime>().tx.send(Message::ValidationAsrPrepared(reply)).await.map_err(|_| "actor stopped")?;
-    result.await.map_err(|_| "actor stopped".into())
+    app.state::<KeyboardRuntime>().urgent.send(Message::ValidationShortcut(action, pressed, reply)).map_err(|_| "actor stopped")?;
+    serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|error| error.to_string())
+}
+#[cfg(feature = "native-keyboard-validation")]
+pub(crate) async fn validation_resource_block(app: &tauri::AppHandle, error: Option<&str>) -> Result<(), String> {
+    let (reply, result) = oneshot::channel();
+    app.state::<KeyboardRuntime>().urgent.send(Message::ValidationResourceBlock(error.map(str::to_owned), reply)).map_err(|_| "actor stopped")?;
+    result.await.map_err(|_| "actor stopped")?
 }
 /// Inject only downstream key edges in a marked, synthetic, disposable test.
 /// This never opens a serial port or substitutes for firmware/IPC validation.
@@ -586,12 +605,6 @@ pub(crate) async fn validation_hardware_click(
         .await
         .map_err(|_| "actor stopped")?;
     serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|e| e.to_string())
-}
-#[cfg(feature = "native-keyboard-validation")]
-pub(crate) async fn validation_arm_prewarm(
-    app: &tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    validation_hardware_mode(app, None, false).await
 }
 /// Delay only the explicit synthetic capture owner's release proof. This is
 /// unavailable to ordinary application builds and never affects native audio.
@@ -761,6 +774,75 @@ mod priority_tests {
     }
 }
 impl Actor {
+    fn capture_admitted(&self) -> Result<(), String> {
+        if let Some(error) = &self.startup_error { return Err(format!("语音资源尚未就绪：{error}")); }
+        Ok(())
+    }
+    fn consume_holds(&mut self) {
+        self.key_hold.consume();
+        self.shortcut_hold.consume();
+    }
+    fn consume_source(&mut self, source: InputSource) {
+        match source { InputSource::Hardware => self.key_hold.consume(), InputSource::Shortcut => self.shortcut_hold.consume(), InputSource::Ui => {} }
+    }
+    fn source_generation(&self, source: InputSource) -> u64 {
+        if source == InputSource::Shortcut { self.shortcut_generation } else { self.activation_generation }
+    }
+    fn source_authorized(&self, source: InputSource, generation: u64) -> bool {
+        match source {
+            InputSource::Ui => true,
+            InputSource::Hardware => self.key_hold.waiting() && self.hardware_armed && generation == self.activation_generation,
+            InputSource::Shortcut => self.shortcut_hold.waiting() && self.saved.settings.enabled && generation == self.shortcut_generation,
+        }
+    }
+    fn revoke_shortcut_hold(&mut self) {
+        self.shortcut_generation = self.shortcut_generation.wrapping_add(1).max(1);
+        self.shortcut_hold.consume();
+        if self.pending_start.as_ref().is_some_and(|pending| pending.source == InputSource::Shortcut) { self.cancel_asr(); }
+        if let Some(editor) = &mut self.editor {
+            if matches!(editor.pending, Some(EditorOperation::Capture { source: InputSource::Shortcut, .. })) {
+                editor.pending = None; editor.requested_at = None;
+            }
+        }
+    }
+    fn shortcut(&mut self, action: shortcuts::Action, pressed: bool) {
+        if action == shortcuts::Action::Dictate && !pressed {
+            let consumed = self.shortcut_hold.consumed();
+            self.shortcut_hold.release();
+            self.shortcut_generation = self.shortcut_generation.wrapping_add(1).max(1);
+            if let Some(editor) = &mut self.editor {
+                if matches!(editor.pending, Some(EditorOperation::Capture { source: InputSource::Shortcut, .. })) {
+                    editor.pending = None; editor.requested_at = None;
+                }
+            }
+            if self.pending_start.as_ref().is_some_and(|pending| pending.source == InputSource::Shortcut) { self.cancel_asr(); }
+            if consumed && self.operation_source == InputSource::Shortcut && self.state.document.phase == Phase::Recording {
+                if self.capture_starting { self.abort(false); }
+                else { let effects = self.state.document.stop(); self.effects(effects); }
+            }
+            return;
+        }
+        if !pressed || !self.saved.settings.enabled || self.suspended || self.stop_flag.load(Ordering::Acquire) { return; }
+        match action {
+            shortcuts::Action::Toggle => {
+                self.consume_holds();
+                if self.state.document.visible {
+                    if self.capture_id.is_some() || self.pending_start.is_some() || self.state.document.phase != Phase::Idle {
+                        self.state.document.notice = Some("请先结束或取消语音操作再隐藏字幕".into());
+                    } else if let Some(window) = self.app.get_webview_window("keyboard-subtitle") {
+                        match platform::hide_subtitle(&window) {
+                            Ok(()) => self.state.document.visible = false,
+                            Err(error) => self.state.document.error = Some(error.to_string()),
+                        }
+                    }
+                }
+                else { self.close_pending = false; self.state.document.open(); if let Err(error) = self.show() { self.state.document.error = Some(error); } }
+            }
+            shortcuts::Action::Beautify => self.request_intent(Intent::Beautify, InputSource::Shortcut),
+            shortcuts::Action::Cancel => self.cancel_current(),
+            shortcuts::Action::Dictate => { if self.shortcut_hold.press() { self.begin_capture(InputSource::Shortcut); } }
+        }
+    }
     async fn run(
         mut self,
         mut rx: mpsc::Receiver<Message>,
@@ -768,6 +850,19 @@ impl Actor {
     ) {
         while let Some(message) = next_message(&mut rx, &mut urgent).await {
             match message {
+                Message::Shortcut(action, pressed) => self.shortcut(action, pressed),
+                #[cfg(feature = "native-keyboard-validation")]
+                Message::ValidationShortcut(action, pressed, reply) => {
+                    let result = if self.production || !self.synthetic_input { Err("synthetic isolated actor required".into()) }
+                    else { self.shortcut(action, pressed); self.publish(); Ok(self.state.clone()) };
+                    let _ = reply.send(result);
+                }
+                #[cfg(feature = "native-keyboard-validation")]
+                Message::ValidationResourceBlock(error, reply) => {
+                    let result = if self.production || !self.synthetic_input { Err("synthetic isolated actor required".into()) }
+                    else { self.startup_error = error; self.abort(false); Ok(()) };
+                    let _ = reply.send(result);
+                }
                 #[cfg(feature = "native-keyboard-validation")]
                 Message::ValidationButtonClick(button, reply) => {
                     let result = if self.production || !self.synthetic_input {
@@ -825,10 +920,6 @@ impl Actor {
                     let _ = reply.send(result);
                 }
                 #[cfg(feature = "native-keyboard-validation")]
-                Message::ValidationAsrPrepared(reply) => {
-                    let _ = reply.send(self.asr.as_ref().is_some_and(|input| input.is_accepting()));
-                }
-                #[cfg(feature = "native-keyboard-validation")]
                 Message::ValidationLateCaptureCallback(reply) => {
                     let result = if self.production || !self.synthetic_input || self.microphone_check.is_none()
                         || self.stop_requested != Some(true) {
@@ -848,15 +939,21 @@ impl Actor {
                 }
                 Message::Shutdown(reply) => {
                     self.suspended = true;
+                    self.revoke_shortcut_hold();
+                    if let Some(controller) = &mut self.shortcuts {
+                        if let Err(error) = controller.shutdown() { self.state.shortcut_state.detail = Some(error); }
+                        self.state.shortcut_state.registered = controller.registered();
+                    }
                     self.rearm_hardware();
                     self.apply_policy();
                     self.state.service.ready = false;
                     self.state.service.detail =
-                        Some("正在结束系统录音并关闭键盘连接".into());
+                        Some("正在结束系统录音并释放语音资源".into());
                     self.abort(false);
                     self.shutdown_replies.push(reply);
                 }
                 Message::PrepareUpdate(reply) => {
+                    self.revoke_shortcut_hold();
                     self.suspended = self.suspension.update(true);
                     self.rearm_hardware();
                     self.apply_policy();
@@ -905,6 +1002,7 @@ impl Actor {
                     }
                 }
                 Message::Suspend(paused) => {
+                    self.revoke_shortcut_hold();
                     self.rearm_hardware();
                     self.suspended = self.suspension.system(paused);
                     self.key_hold.release();
@@ -916,6 +1014,11 @@ impl Actor {
                     }
                 }
                 Message::Tick => {
+                    if self.capture_id.is_none() && self.pending_start.is_none() && !self.opening
+                        && self.state.document.phase == Phase::Idle && !self.close_pending
+                        && !self.key_hold.waiting() && !self.shortcut_hold.waiting()
+                        && self.editor.as_ref().is_none_or(|editor| editor.requested_at.is_none())
+                        && self.shutdown_replies.is_empty() { continue; }
                     if self
                         .opening_since
                         .is_some_and(|at| at.elapsed() >= Duration::from_secs(20))
@@ -939,7 +1042,7 @@ impl Actor {
                         {
                             editor.pending = None;
                             editor.requested_at = None;
-                            self.key_hold.consume();
+                            self.consume_holds();
                             self.state.document.error =
                                 Some("等待编辑保存超时，按键操作已撤销；请完成编辑后重试".into());
                         }
@@ -1045,26 +1148,18 @@ impl Actor {
                                     let current = pending.document_id
                                         == self.state.document.document_id
                                         && pending.revision == self.state.document.revision;
-                                    let authorized = !pending.hardware
-                                        || (self.key_hold.waiting()
-                                            && self.hardware_armed
-                                            && pending.activation_generation
-                                                == self.activation_generation);
+                                    let authorized = self.source_authorized(pending.source, pending.activation_generation);
                                     if !timely {
                                         if current && authorized {
-                                            if pending.hardware {
-                                                self.key_hold.consume();
-                                            }
+                                            self.consume_source(pending.source);
                                             self.asr_failed("实时识别准备超时".into(), true);
                                         } else {
                                             self.cancel_asr();
                                         }
                                     } else if current && authorized {
-                                        self.begin_capture(pending.hardware);
+                                        self.begin_capture(pending.source);
                                     } else {
-                                        if pending.hardware {
-                                            self.key_hold.consume();
-                                        }
+                                        self.consume_source(pending.source);
                                         self.state.audio_state = AudioState {
                                             state: "stopped".into(),
                                             detail: None,
@@ -1214,9 +1309,7 @@ impl Actor {
         }
     }
     fn resume_waiting_hold(&mut self) {
-        if !self.key_hold.waiting()
-            || !self.hardware_armed
-            || self.suspended
+        if self.suspended
             || self.stop_flag.load(Ordering::Acquire)
             || self.close_pending
             || self.capture_id.is_some()
@@ -1229,8 +1322,12 @@ impl Actor {
         {
             return;
         }
+        let source = if self.shortcut_hold.waiting() && self.saved.settings.enabled {
+            InputSource::Shortcut
+        } else if self.key_hold.waiting() && self.hardware_armed { InputSource::Hardware }
+        else { return; };
         self.sync_text_cursor();
-        self.begin_capture(true);
+        self.begin_capture(source);
     }
     fn sync_text_cursor(&mut self) {
         if let Some(document) = self.state.document.document_id.clone() {
@@ -1263,11 +1360,13 @@ impl Actor {
         self.sync_text_cursor();
         self.state.sequence = self.state.sequence.saturating_add(1);
         self.state.edit_session_id = self.editor.as_ref().map(|editor| editor.id.clone());
+        self.state.service.running = !self.stop_flag.load(Ordering::Acquire);
+        self.state.service.ready = !self.suspended && self.state.service.running && self.startup_error.is_none();
         // Waiting for the current editor/IME is preparation, not microphone
         // capture. Keep audioState stopped so the edit can still be committed.
         self.state.capture_preparing = !self.suspended
             && !self.stop_flag.load(Ordering::Acquire)
-            && (self.key_hold.waiting()
+            && (self.key_hold.waiting() || self.shortcut_hold.waiting()
                 || self.state.audio_state.state == "starting"
                 || self.editor.as_ref().is_some_and(|editor| {
                     matches!(editor.pending, Some(EditorOperation::Capture { .. }))
@@ -1286,12 +1385,12 @@ impl Actor {
             } else if self.state.audio_state.state == "capturing" {
                 "listening"
             } else if self.opening {
-                "prewarming"
+                "connecting_provider"
             } else if self.state.document.phase == Phase::Finalizing {
                 "finalizing"
             } else if self.state.document.phase == Phase::Beautifying {
                 "polishing"
-            } else if self.key_hold.waiting() {
+            } else if self.key_hold.waiting() || self.shortcut_hold.waiting() {
                 "waiting_previous"
             } else if self.asr.is_some() {
                 "ready"
@@ -1302,7 +1401,7 @@ impl Actor {
             stage,
             self.asr_generation,
             self.activation_generation,
-            self.key_hold.pressed(),
+            self.key_hold.pressed() || self.shortcut_hold.pressed(),
         );
         if self.startup_trace.as_ref() != Some(&trace) {
             let waiting_ms = self
@@ -1314,7 +1413,7 @@ impl Actor {
                 .unwrap_or(0);
             tracing::info!(target: "nomifun_keyboard", stage, waiting_ms,
                 asr_generation = self.asr_generation, activation_generation = self.activation_generation,
-                held = self.key_hold.pressed(), microphone_owner = self.capture_id.is_some(),
+                held = self.key_hold.pressed() || self.shortcut_hold.pressed(), microphone_owner = self.capture_id.is_some(),
                 error_present = self.state.document.error.is_some(), "capture lifecycle");
             self.startup_trace = Some(trace);
         }
@@ -1373,7 +1472,7 @@ impl Actor {
         if self
             .pending_start
             .as_ref()
-            .is_some_and(|pending| pending.hardware)
+            .is_some_and(|pending| pending.source.hardware())
         {
             self.cancel_asr();
         }
@@ -1384,21 +1483,11 @@ impl Actor {
         self.policy_sent = false;
     }
     fn prepare_asr(&mut self) {
-        // Prepare the hidden WebView while idle, before granting capture.
-        // Cold WebView construction must not consume the start of a K4 hold.
-        if !self.suspended
-            && !self.stop_flag.load(Ordering::Acquire)
-            && self.state.document.phase == Phase::Idle
-            && self.capture_id.is_none()
-            && self.saved.settings.asr_model.is_some()
-        {
-            if let Err(error) = self.subtitle_window() {
-                self.state.document.error = Some(format!("字幕窗口准备失败：{error}"));
-                return;
-            }
-        }
+        // Voice is demand-driven. Merely starting the application, changing a
+        // setting or opening the settings page must not open a provider socket
+        // or construct a subtitle WebView.
         if self.saved.settings.asr_mode != AsrMode::Streaming
-            || (self.key_hold.waiting() && self.pending_start.is_none())
+            || self.pending_start.is_none()
             || self.suspended
             || self.stop_flag.load(Ordering::Acquire)
             || self.close_pending
@@ -1407,11 +1496,6 @@ impl Actor {
             || self.opening
             || self.state.document.phase != Phase::Idle
             || self.capture_id.is_some()
-            || ((!self.saved.settings.enabled || !self.saved.settings.k4_enabled)
-                && !self
-                    .pending_start
-                    .as_ref()
-                    .is_some_and(|pending| !pending.hardware))
         {
             return;
         }
@@ -1469,10 +1553,10 @@ impl Actor {
     }
     fn asr_failed(&mut self, error: String, requested: bool) {
         let active = self.asr_document.is_some();
-        let hardware_request = self
+        let requested_source = self
             .pending_start
             .as_ref()
-            .is_some_and(|pending| pending.hardware);
+            .map(|pending| pending.source);
         let requested = requested || self.pending_start.is_some() || active;
         let timed_out = error.to_ascii_lowercase().contains("timed out")
             || error.contains("超时")
@@ -1495,15 +1579,12 @@ impl Actor {
         tracing::warn!(target: "nomifun_keyboard", stage = "asr_failure",
             asr_generation = self.asr_generation, user_requested = requested,
             active_capture = active, timed_out, kind, "recognition lifecycle");
-        // An idle connection belongs to background preparation, not to the
-        // current document. In particular, do not cancel editing/polishing or
-        // replace a previous real operation error when that socket expires.
+        // A retired connection must not cancel editing/polishing or replace a
+        // real operation error after its capture request has been revoked.
         if !requested {
             return;
         }
-        if hardware_request {
-            self.key_hold.consume();
-        }
+        if let Some(source) = requested_source { self.consume_source(source); }
         let message = if active && kind == "backpressure" {
             "语音识别处理暂时跟不上，本段未写入，已有文字已保留。请稍候重试。"
         } else { match (active, timed_out) {
@@ -1717,6 +1798,7 @@ impl Actor {
         });
     }
     fn start_microphone_check(&mut self, test_id: Option<String>, device: Option<String>) -> Result<(), String> {
+        self.capture_admitted()?;
         let test_id = test_id.filter(|id| !id.trim().is_empty() && id.len() <= 128)
             .ok_or("缺少有效麦克风检测标识")?;
         if device.as_ref().is_some_and(|id| id.is_empty() || id.len() > 1024) {
@@ -1735,7 +1817,7 @@ impl Actor {
         // Keep idle provider preparation intact. A local test neither uses it
         // nor cancels it, since cancellation would make the next idle tick
         // reconnect and turn this local action into a new provider request.
-        self.key_hold.consume();
+        self.consume_holds();
         let owner = Identity { document_id: format!("microphone-test:{test_id}"), revision: 0,
             operation_id: uuid::Uuid::now_v7().to_string() };
         let meter = audio::MeterCapture::new();
@@ -1872,17 +1954,19 @@ impl Actor {
         { self.synthetic_stop = None; }
         self.state.audio_state = AudioState { state: "stopped".into(), detail: None };
     }
-    fn begin_capture(&mut self, hardware: bool) {
+    fn begin_capture(&mut self, source: InputSource) {
+        if let Err(error) = self.capture_admitted() { self.consume_source(source); self.state.document.error = Some(error); return; }
+        if source == InputSource::Shortcut && !self.saved.settings.enabled { self.consume_source(source); return; }
         if self.microphone_check.is_some() {
-            self.key_hold.consume();
+            self.consume_source(source);
             return;
         }
-        if hardware && !self.key_hold.waiting() {
+        if source != InputSource::Ui && !self.source_authorized(source, self.source_generation(source)) {
             return;
         }
         if self.saved.settings.asr_model.is_none() {
-            self.key_hold.consume();
-            self.state.document.error = Some("请先在拓展键盘设置中选择当前模式的 ASR 模型".into());
+            self.consume_source(source);
+            self.state.document.error = Some("请先在语音键盘设置中选择当前模式的 ASR 模型".into());
             if let Err(error) = self.show() {
                 self.state.document.error = Some(format!("请先选择 ASR 模型；字幕窗口打开失败：{error}"));
             }
@@ -1894,25 +1978,25 @@ impl Actor {
             || self.capture_id.is_some()
             || self.state.document.phase != Phase::Idle
         {
-            if !hardware {
+            if source == InputSource::Ui {
                 self.state.document.notice = Some("请等待当前处理完成或取消".into());
             }
             return;
         }
-        if hardware
+        if source.hardware()
             && (!self.hardware_armed
                 || !self.saved.settings.enabled
                 || !self.saved.settings.k4_enabled
                 || self.state.device.policy_state != "applied")
         {
-            self.key_hold.consume();
+            self.consume_source(source);
             self.state.document.notice = Some("键盘尚未准备就绪，请稍候重试".into());
             return;
         }
         if self.editor.is_some() {
             self.defer_editor(EditorOperation::Capture {
-                hardware,
-                generation: self.activation_generation,
+                source,
+                generation: self.source_generation(source),
             });
             return;
         }
@@ -1926,7 +2010,7 @@ impl Actor {
                 if self.asr.is_some() {
                     self.cancel_asr();
                 }
-                self.queue_capture_start(hardware);
+                self.queue_capture_start(source);
                 return;
             };
             Some(input)
@@ -1945,15 +2029,13 @@ impl Actor {
         let id = match self.state.document.begin_recording_at(selection) {
             Ok(id) => id,
             Err(error) => {
-                self.key_hold.consume();
+                self.consume_source(source);
                 self.state.document.error = Some(error);
                 return;
             }
         };
-        if hardware {
-            self.key_hold.consume();
-        }
-        self.hardware_operation = hardware;
+        self.consume_source(source);
+        self.operation_source = source;
         self.last_capture_stats = None;
         self.capture_id = Some(id.clone());
         self.asr_document = streaming.as_ref().map(|_| id.clone());
@@ -2065,12 +2147,10 @@ impl Actor {
             );
         }
     }
-    fn queue_capture_start(&mut self, hardware: bool) {
-        // A provider can close an idle prewarmed socket. Keep the current hold
-        // while reconnecting instead of silently consuming the physical key.
-        // No microphone opens until the same request is still authorized.
-        // An outstanding background prewarm does not own the user's first
-        // hold. Cancel its actual future and prepare within this request.
+    fn queue_capture_start(&mut self, source: InputSource) {
+        if let Err(error) = self.capture_admitted() { self.consume_source(source); self.state.document.error = Some(error); return; }
+        // Connect only for this explicit request. No microphone opens until
+        // the same source, hold generation and document remain authorized.
         if self.opening {
             self.cancel_asr();
         }
@@ -2087,8 +2167,8 @@ impl Actor {
         self.state.document.error = None;
         self.state.document.notice = None;
         self.pending_start = Some(PendingStart {
-            hardware,
-            activation_generation: self.activation_generation,
+            source,
+            activation_generation: self.source_generation(source),
             document_id: self.state.document.document_id.clone(),
             revision: self.state.document.revision,
             started_at: Instant::now(),
@@ -2098,7 +2178,7 @@ impl Actor {
             detail: Some("正在连接流式识别，尚未打开系统麦克风".into()),
         };
         if let Err(error) = self.show() {
-            self.key_hold.consume();
+            self.consume_source(source);
             self.cancel_asr();
             self.state.document.error = Some(error);
             return;
@@ -2151,7 +2231,7 @@ impl Actor {
     /// K3 and the subtitle cancel button share this immediate operation path.
     /// Cancellation never waits for editor flush or discards the editor's draft.
     fn cancel_current(&mut self) {
-        self.key_hold.consume();
+        self.consume_holds();
         if let Some(editor) = &mut self.editor {
             editor.pending = None;
             editor.requested_at = None;
@@ -2228,7 +2308,7 @@ impl Actor {
                     if self
                         .pending_start
                         .as_ref()
-                        .is_some_and(|pending| pending.hardware)
+                        .is_some_and(|pending| pending.source.hardware())
                     {
                         self.cancel_asr();
                     }
@@ -2261,7 +2341,7 @@ impl Actor {
                     match event {
                         "button_down" => {
                             if self.key_hold.press() {
-                                self.begin_capture(true);
+                                self.begin_capture(InputSource::Hardware);
                             }
                         }
                         "button_up" => {
@@ -2270,7 +2350,7 @@ impl Actor {
                             if let Some(editor) = &mut self.editor {
                                 if matches!(
                                     editor.pending,
-                                    Some(EditorOperation::Capture { hardware: true, .. })
+                                    Some(EditorOperation::Capture { source: InputSource::Hardware, .. })
                                 ) {
                                     editor.pending = None;
                                     editor.requested_at = None;
@@ -2279,12 +2359,12 @@ impl Actor {
                             if self
                                 .pending_start
                                 .as_ref()
-                                .is_some_and(|pending| pending.hardware)
+                                .is_some_and(|pending| pending.source.hardware())
                             {
                                 self.cancel_asr();
                             }
                             if consumed
-                                && self.hardware_operation
+                                && self.operation_source == InputSource::Hardware
                                 && self.state.document.phase == Phase::Recording
                             {
                                 if self.capture_starting {
@@ -2305,7 +2385,7 @@ impl Actor {
                             }
                         }
                         1 if self.saved.settings.enabled && self.saved.settings.k2_enabled => {
-                            self.request_intent(Intent::Beautify, true);
+                            self.request_intent(Intent::Beautify, InputSource::Hardware);
                         }
                         2 if self.saved.settings.enabled && self.saved.settings.k3_enabled => {
                             self.cancel_current();
@@ -2316,15 +2396,15 @@ impl Actor {
             }
         }
     }
-    fn request_intent(&mut self, intent: Intent, hardware: bool) {
-        self.key_hold.consume();
+    fn request_intent(&mut self, intent: Intent, source: InputSource) {
+        self.consume_holds();
         if self.suspended || self.stop_flag.load(Ordering::Acquire) {
             self.state.document.notice =
                 Some("当前系统会话不可执行字幕操作，请解锁或重新启动服务".into());
             return;
         }
         if self.editor.is_some() {
-            self.defer_editor(EditorOperation::Intent(intent, hardware));
+            self.defer_editor(EditorOperation::Intent(intent, source));
             return;
         }
         if self.pending_start.is_some() {
@@ -2340,10 +2420,10 @@ impl Actor {
         }
         match self.state.document.phase {
             Phase::Idle => {
-                self.hardware_operation = hardware;
+                self.operation_source = source;
                 self.pending_origin = None;
             }
-            Phase::Recording | Phase::Finalizing => self.pending_origin = Some(hardware),
+            Phase::Recording | Phase::Finalizing => self.pending_origin = Some(source),
             _ => {}
         }
         let effects = self
@@ -2371,7 +2451,7 @@ impl Actor {
                 Effect::Hide => self.hide(),
                 Effect::Beautify(id, text) => {
                     if let Some(origin) = self.pending_origin.take() {
-                        self.hardware_operation = origin;
+                        self.operation_source = origin;
                     }
                     if !self.state.document.visible {
                         if let Err(error) = self.show() {
@@ -2440,7 +2520,7 @@ impl Actor {
         ) {
             editor.pending = None;
             editor.requested_at = None;
-            self.key_hold.consume();
+            self.consume_holds();
             self.state.document.error = Some(format!("请求保存编辑失败，操作已撤销：{error}"));
         }
     }
@@ -2455,7 +2535,7 @@ impl Actor {
         }
         if let Some(selection) = selection {
             if let Err(error) = selection.validate(&self.state.document.text) {
-                self.key_hold.consume();
+                self.consume_holds();
                 if let Some(editor) = &mut self.editor {
                     editor.pending = None;
                     editor.requested_at = None;
@@ -2479,28 +2559,27 @@ impl Actor {
             .requested_at
             .is_some_and(|at| at.elapsed() >= Duration::from_secs(15))
         {
-            self.key_hold.consume();
+            self.consume_holds();
             self.state.document.error = Some("等待编辑保存超时，按键操作已撤销".into());
             return Ok(());
         }
         match editor.pending {
-            Some(EditorOperation::Intent(intent, hardware)) => {
-                let enabled = !hardware
-                    || (self.hardware_armed
-                        && self.saved.settings.enabled
-                        && self.saved.settings.k2_enabled);
+            Some(EditorOperation::Intent(intent, source)) => {
+                let enabled = match source {
+                    InputSource::Ui => true,
+                    InputSource::Shortcut => self.saved.settings.enabled,
+                    InputSource::Hardware => self.hardware_armed && self.saved.settings.enabled && self.saved.settings.k2_enabled,
+                };
                 if enabled {
-                    self.request_intent(intent, hardware);
+                    self.request_intent(intent, source);
                 }
             }
             Some(EditorOperation::Capture {
-                hardware,
+                source,
                 generation,
             }) => {
-                if !hardware
-                    || (self.key_hold.waiting() && generation == self.activation_generation)
-                {
-                    self.begin_capture(hardware);
+                if self.source_authorized(source, generation) {
+                    self.begin_capture(source);
                 }
             }
             None => {}
@@ -2619,7 +2698,7 @@ impl Actor {
                 self.editor = None;
             }
             "stop" | "test_stop" => {
-                self.key_hold.consume();
+                self.consume_holds();
                 if let Some(editor) = &mut self.editor {
                     editor.pending = None;
                     editor.requested_at = None;
@@ -2636,14 +2715,14 @@ impl Actor {
             }
             "cancel" => self.cancel_current(),
             "close" => {
-                self.key_hold.consume();
+                self.consume_holds();
                 self.abort(true);
             }
             "beautify" => {
-                self.request_intent(Intent::Beautify, false);
+                self.request_intent(Intent::Beautify, InputSource::Ui);
             }
             "restore_original" => {
-                self.key_hold.consume();
+                self.consume_holds();
                 if self.editor.is_some() {
                     return Err("请先保存编辑再恢复原文".into());
                 }
@@ -2677,6 +2756,7 @@ impl Actor {
                 }
             }
             "test_start" => {
+                self.capture_admitted()?;
                 if self.suspended || self.stop_flag.load(Ordering::Acquire) {
                     return Err("当前系统会话不可录音，请解锁或重新启动服务".into());
                 }
@@ -2690,14 +2770,14 @@ impl Actor {
                     return Err("请先停止或取消当前操作".into());
                 }
                 self.close_pending = false;
-                self.key_hold.consume();
+                self.consume_holds();
                 self.retry_at = Instant::now();
                 if self.saved.settings.asr_mode == AsrMode::Platform {
-                    self.begin_capture(false);
+                    self.begin_capture(InputSource::Ui);
                 } else if self.asr.is_none() {
-                    self.queue_capture_start(false);
+                    self.queue_capture_start(InputSource::Ui);
                 } else {
-                    self.begin_capture(false);
+                    self.begin_capture(InputSource::Ui);
                 }
             }
             _ => return Err("未知字幕板操作".into()),
@@ -2712,21 +2792,61 @@ impl Actor {
             .filter(|term| !term.is_empty())
             .collect();
         settings.validate()?;
+        shortcuts::validate(&settings)?;
         let old = self.saved.settings.clone();
+        let shortcut_changed = old.enabled != settings.enabled || old.shortcuts != settings.shortcuts;
+        let register_shortcuts = shortcut_changed || old == settings;
+        let shortcut_checkpoint = self.shortcuts.as_ref().map(shortcuts::Controller::checkpoint);
+        if settings.enabled && let Some(error) = &self.startup_error {
+            // Pre-GUI retirement cannot run inside this live Actor: it would
+            // ask this same Actor to stop via the application's endpoint.
+            return Err(format!("旧语音资源清理尚未完成：{error}。请关闭旧版程序后重新启动 NomiFun。"));
+        }
+        if register_shortcuts {
+            if let Some(controller) = &mut self.shortcuts {
+                match controller.reconfigure(&settings) {
+                    Ok(count) => { self.state.shortcut_state.registered = count; self.state.shortcut_state.detail = None; }
+                    Err(error) => { self.state.shortcut_state.registered = controller.registered(); self.state.shortcut_state.detail = Some(error.clone()); return Err(error); }
+                }
+            } else if self.production && settings.enabled {
+                return Err(self.state.shortcut_state.detail.clone().unwrap_or("此系统会话无法注册全局快捷键，可使用字幕按钮".into()));
+            }
+        }
+        // Persist before replacing the Actor configuration or cancelling an
+        // operation. Failed disk writes restore both saved intent and actual OS
+        // registrations; an in-memory echo is not a successful settings save.
+        self.saved.settings = settings.clone();
+        if let Err(error) = self.persist() {
+            self.saved.settings = old.clone();
+            if register_shortcuts {
+                if let Some(controller) = &mut self.shortcuts {
+                    match controller.restore(shortcut_checkpoint.expect("controller checkpoint")) {
+                        Ok(count) => self.state.shortcut_state.registered = count,
+                        Err(restore) => { self.state.shortcut_state.registered = controller.registered(); self.state.shortcut_state.detail = Some(restore.clone()); return Err(format!("{error}；快捷键恢复失败：{restore}")); }
+                    }
+                }
+            }
+            return Err(error);
+        }
+        if shortcut_changed {
+            self.revoke_shortcut_hold();
+            if self.operation_source == InputSource::Shortcut && self.capture_id.is_some() { self.abort(false); }
+        }
         let audio_changed = old.asr_mode != settings.asr_mode
             || old.asr_model != settings.asr_model
             || old.audio_device_id != settings.audio_device_id
             || old.language != settings.language
             || old.dictionary != settings.dictionary;
+        if audio_changed { self.revoke_shortcut_hold(); }
         let hardware_changed = old.enabled != settings.enabled
             || old.k4_enabled != settings.k4_enabled
             || audio_changed;
         if audio_changed && self.microphone_check.is_some() {
             self.stop_microphone_check("cancelled", None);
         }
-        let disabling =
-            (!settings.enabled || !settings.k4_enabled) && (old.enabled && old.k4_enabled);
-        if !settings.enabled && self.pending_origin == Some(true)
+        let disabling = (!settings.enabled && old.enabled)
+            || (!settings.k4_enabled && old.k4_enabled && self.operation_source == InputSource::Hardware);
+        if !settings.enabled && self.pending_origin.is_some_and(|source| source != InputSource::Ui)
         {
             self.state.document.pending_action = None;
             self.pending_origin = None;
@@ -2736,7 +2856,7 @@ impl Actor {
                 self.state.document.phase,
                 Phase::Recording | Phase::Finalizing
             )
-            || (!settings.enabled && self.hardware_operation)
+            || (!settings.enabled && self.operation_source != InputSource::Ui)
         {
             self.abort(false);
         } else if audio_changed || disabling {
@@ -2744,7 +2864,6 @@ impl Actor {
         }
         self.saved.settings = settings.clone();
         self.state.settings = settings;
-        self.persist()?;
         if audio_changed && self.state.document.phase == Phase::Idle {
             self.state.document.error = None;
             self.state.document.notice = None;
@@ -2851,7 +2970,7 @@ impl Actor {
         Ok(())
     }
     fn finish_close(&mut self) {
-        self.key_hold.consume();
+        self.consume_holds();
         if self.capture_id.is_some() || self.state.audio_state.state == "error" {
             return;
         }
@@ -2867,7 +2986,7 @@ impl Actor {
         self.hide();
     }
     fn hide(&mut self) {
-        self.key_hold.consume();
+        self.consume_holds();
         if self.capture_id.is_some() || self.close_pending {
             return;
         }
@@ -2890,8 +3009,10 @@ impl Actor {
     }
 }
 #[tauri::command]
-pub(crate) fn keyboard_get_state(state: tauri::State<'_, KeyboardRuntime>) -> KeyboardState {
-    state.snapshot.lock().unwrap().clone()
+pub(crate) fn keyboard_get_state(app: tauri::AppHandle) -> Result<KeyboardState, String> {
+    let runtime = app.try_state::<KeyboardRuntime>().ok_or("语音键盘正在初始化，请稍候")?;
+    let snapshot = runtime.snapshot.lock().map_err(|_| "语音状态暂不可用")?.clone();
+    Ok(snapshot)
 }
 #[tauri::command]
 pub(crate) async fn keyboard_update_settings(
@@ -3163,22 +3284,6 @@ pub(crate) async fn validation_document_operation(
         reply,
     }).await.map_err(|_| "actor stopped")?;
     serde_json::to_value(result.await.map_err(|_| "actor stopped")??).map_err(|e| e.to_string())
-}
-pub(crate) fn early_entry() -> Option<std::process::ExitCode> {
-    let arg = std::env::args_os().nth(1)?;
-    let result = match arg.to_str()? {
-        "--app-maintenance-stop" | "--keyboard-stop" => platform::stop_application(false),
-        "--app-maintenance-unregister" | "--keyboard-unregister" => platform::stop_application(true),
-        "--keyboard-service" => Err(anyhow::anyhow!("standalone keyboard service is retired")),
-        _ => return None,
-    };
-    Some(match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("NomiFun keyboard: {error:#}");
-            std::process::ExitCode::FAILURE
-        }
-    })
 }
 
 /// Call during single-threaded GUI startup, after all headless entry points.

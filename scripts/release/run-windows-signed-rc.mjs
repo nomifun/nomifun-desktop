@@ -241,6 +241,8 @@ function run() {
   }
 
   runCommand('bun', ['run', 'build:win', 'x64', '--signed']);
+  runCommand('bun', ['scripts/validation/run-windows-app-maintenance-gate.mjs',
+    '--helper', join(REPO_ROOT, 'target', TARGET_TRIPLE, 'release', 'nomifun-app-maintenance.exe')]);
   const hostInput = requireRegularFile(
     hostPath,
     'restored RC Host',

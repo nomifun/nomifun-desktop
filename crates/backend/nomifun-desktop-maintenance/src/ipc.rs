@@ -23,6 +23,9 @@ pub fn runtime_dir() -> Result<PathBuf> {
             .context("HOME unavailable")?
             .join(".local/state")
     };
+    // This directory is the published application-maintenance rendezvous used
+    // by installed releases. Keeping its identity allows a new installer to
+    // stop an old GUI safely; it does not start or restore a keyboard service.
     let dir = base.join("NomiFun/keyboard-service");
     fs::create_dir_all(&dir)?;
     ensure!(

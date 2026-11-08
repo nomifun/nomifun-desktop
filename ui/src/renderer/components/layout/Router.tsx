@@ -182,7 +182,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
             <Route path='/settings/webui' element={<Navigate to='/connections?task=browser' replace />} />
             <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
-            <Route path='/settings/keyboard' element={withRouteFallback(KeyboardSettings)} />
+            <Route path='/settings/voice-keyboard' element={withRouteFallback(KeyboardSettings)} />
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
             <Route path='/settings/permissions' element={withRouteFallback(SystemSettings)} />

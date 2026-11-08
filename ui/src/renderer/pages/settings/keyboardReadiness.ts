@@ -14,7 +14,7 @@ export interface KeyboardReadinessInput {
 export type KeyboardCloudBlocker = 'permission' | 'device' | 'model' | 'saving' | 'saveFailed';
 
 export interface KeyboardReadiness {
-  hardwareReady: boolean;
+  shortcutsReady: boolean;
   permissionBlocked: boolean;
   deviceAvailable: boolean;
   savedModelAvailable: boolean;
@@ -46,8 +46,7 @@ export function deriveKeyboardReadiness({
   else if (saving) cloudBlockers.push('saving');
 
   return {
-    hardwareReady: saved.enabled && saved.k4Enabled && state.device.connected
-      && state.device.policyState === 'applied' && state.service.ready,
+    shortcutsReady: saved.enabled && Boolean(saved.shortcuts.dictate.trim()) && (state.shortcutState?.registered ?? 0) > 0,
     permissionBlocked,
     deviceAvailable,
     savedModelAvailable,

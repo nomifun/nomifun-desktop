@@ -64,6 +64,13 @@ function environment(profile) {
 
 function verifyRecovery(report, mode) {
   if (report.passed !== true || report.real_os_microphone !== false || report.asr_mode !== mode || !report.audio_source?.includes('synthetic') || report.provider_requests_loopback_only !== true) throw new Error('Actor fixture failed or violated its synthetic isolation');
+  const software = report.software_shortcuts;
+  if (software?.no_hardware_prerequisite !== true || software.hardware_key_toggles_do_not_gate_software !== true
+    || software.idle_without_provider_audio_or_webview !== true || software.blocked_old_resources_gate_all_capture !== true
+    || software.hold_press_repeat_and_release !== true || software.toggle_preserves_document !== true
+    || software.beautify_without_device !== true || software.release_does_not_stop_ui_recording !== true
+    || software.released_editor_and_asr_preparation_do_not_resume !== true
+    || software.cancel_suspend_update_remap_disable_require_fresh_release !== true) throw new Error('Missing software shortcut Actor ownership and demand-driven resource evidence');
   const recovery = report.update_recovery;
   if (recovery?.successful_handoff_keeps_old_runtime_paused !== true || recovery.cloud_completion_not_required !== true || recovery.automatic_recording_not_resumed !== true || recovery.disabled_and_unconfigured_keyboard_admit_maintenance !== true
     || !Array.isArray(recovery.cases) || recovery.cases.length !== 4
@@ -103,7 +110,8 @@ async function run(options) {
     if (exit.code !== 0) throw new Error(`Owned fixture launcher failed: ${diagnostics.slice(-6000)}`);
     report.process = json(processReport);
     report.fixture = json(fixtureReport);
-    if (report.process.exitCode !== 0 || report.process.timedOut !== false || report.process.activeOwnedProcesses !== 0 || report.process.privateJobOwnedChildren !== true || report.process.suspendedBeforeJobAssignment !== true) throw new Error('Fixture process did not complete within its owned native job');
+    if (report.process.exitCode !== 0 || report.process.timedOut !== false || report.process.activeOwnedProcesses !== 0 || report.process.privateJobOwnedChildren !== true || report.process.suspendedBeforeJobAssignment !== true) throw new Error(
+      report.fixture.error ?? `Fixture process failed its owned native job: exit=${report.process.exitCode}, timedOut=${report.process.timedOut}, active=${report.process.activeOwnedProcesses}`);
     verifyRecovery(report.fixture, options.mode);
     if (report.fixture.frontend_build_id !== options.buildId) throw new Error('Running fixture frontend identity differs from the requested build');
     report.passed = true;

@@ -7,7 +7,7 @@ pub struct ModelSelection {
     pub model: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 // Ignore retired settings keys while preserving the remaining user configuration.
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -27,6 +27,29 @@ pub struct Settings {
     pub always_on_top: bool,
     #[serde(default = "default_subtitle_font_size")]
     pub subtitle_font_size: u16,
+    #[serde(default)]
+    pub shortcuts: VoiceShortcuts,
+}
+
+/// Application-wide voice actions. Empty bindings deliberately disable only
+/// that action; external hardware is never a prerequisite for these controls.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct VoiceShortcuts {
+    pub toggle: String,
+    pub beautify: String,
+    pub cancel: String,
+    pub dictate: String,
+}
+impl Default for VoiceShortcuts {
+    fn default() -> Self {
+        Self {
+            toggle: "CommandOrControl+Shift+K".into(),
+            beautify: "CommandOrControl+Shift+B".into(),
+            cancel: "CommandOrControl+Shift+Escape".into(),
+            dictate: "CommandOrControl+Shift+Space".into(),
+        }
+    }
 }
 fn default_subtitle_font_size() -> u16 {
     14
@@ -43,11 +66,16 @@ impl Default for Settings {
         Self { enabled:true,k2_enabled:true,k3_enabled:true,k4_enabled:true,
         asr_model:None,asr_mode:AsrMode::Streaming,text_model:None,language:"zh".into(),audio_device_id:None,dictionary:vec![],
         beautify_instruction:"整理标点、语法、口头重复和段落，保留原意、事实、人名、数字、日期、代码和专有词。只输出整理后的完整正文。".into(),
-        always_on_top:true,subtitle_font_size:default_subtitle_font_size() }
+        always_on_top:true,subtitle_font_size:default_subtitle_font_size(),shortcuts:VoiceShortcuts::default() }
     }
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
+        for value in [&self.shortcuts.toggle, &self.shortcuts.beautify, &self.shortcuts.cancel, &self.shortcuts.dictate] {
+            if value.len() > 128 || value.contains(['\r', '\n', '\0']) {
+                return Err("系统快捷键格式无效".into());
+            }
+        }
         if !(12..=32).contains(&self.subtitle_font_size) {
             return Err("字幕字号必须是 12–32 的整数".into());
         }
@@ -1062,6 +1090,19 @@ mod tests {
         assert!(saved.get("launchAtLogin").is_none());
         assert_eq!(saved["asrModel"], serde_json::json!({"providerId":"user-provider", "model":"user-asr"}));
         assert_eq!(saved["textModel"], serde_json::json!({"providerId":"text-provider", "model":"user-text"}));
+    }
+    #[test]
+    fn voice_shortcuts_default_for_existing_settings_without_changing_models() {
+        let mut settings = Settings::default();
+        settings.asr_model = Some(ModelSelection { provider_id: "existing".into(), model: "asr".into() });
+        let mut saved = serde_json::to_value(&settings).unwrap();
+        saved.as_object_mut().unwrap().remove("shortcuts");
+        let loaded: Settings = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded.shortcuts, VoiceShortcuts::default());
+        assert_eq!(loaded.asr_model, settings.asr_model);
+        let partial: VoiceShortcuts = serde_json::from_value(serde_json::json!({"dictate":""})).unwrap();
+        assert!(partial.dictate.is_empty());
+        assert_eq!(partial.toggle, VoiceShortcuts::default().toggle);
     }
 
     #[test]

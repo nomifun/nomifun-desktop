@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { maintenanceBuildArgs } from './build-keyboard-maintenance.mjs';
+import { maintenanceBuildArgs } from './build-app-maintenance.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sourceDirectory = join(root, 'apps/desktop/keyboard-packaging');
@@ -55,7 +55,7 @@ describe('native keyboard packaging lifecycle', () => {
       'Unicode true', 'SetCompress off', 'RequestExecutionLevel user', '!include "LogicLib.nsh"', '!include "FileFunc.nsh"',
       '!define MAINBINARYNAME "nomifun-desktop"', 'Var UpdateMode',
       `!define NOMIFUN_MAINTENANCE_BINARY "${helper}"`,
-      `!include "${join(root, 'apps/desktop/nsis/keyboard-hooks.nsh')}"`,
+      `!include "${join(root, 'apps/desktop/nsis/app-maintenance-hooks.nsh')}"`,
       '!insertmacro NomiFunMaintenanceFunctions "" "no"', '!insertmacro NomiFunMaintenanceFunctions "un." "yes"',
       `OutFile "${join(directory, 'fixture.exe')}"`, 'Section', '!insertmacro NSIS_HOOK_PREINSTALL',
       'WriteUninstaller "$TEMP\\nomifun-keyboard-fixture-uninstall.exe"', 'SectionEnd', 'Section Uninstall',
@@ -68,7 +68,7 @@ describe('native keyboard packaging lifecycle', () => {
 
   test('all configured package hooks and bundled uninstall resources exist', () => {
     const config = JSON.parse(readFileSync(join(root, 'apps/desktop/tauri.conf.json'), 'utf8'));
-    expect(config.bundle.windows.nsis.installerHooks).toBe('nsis/keyboard-hooks.nsh');
+    expect(config.bundle.windows.nsis.installerHooks).toBe('nsis/app-maintenance-hooks.nsh');
     expect(config.bundle.resources['keyboard-packaging/']).toBe('keyboard-packaging/');
     for (const format of ['deb', 'rpm']) {
       for (const field of ['preInstallScript', 'preRemoveScript', 'postInstallScript', 'postRemoveScript']) {
@@ -76,7 +76,7 @@ describe('native keyboard packaging lifecycle', () => {
       }
       for (const path of Object.values(config.bundle.linux[format].files)) expect(existsSync(join(root, 'apps/desktop', path))).toBe(true);
     }
-    const hooks = readFileSync(join(root, 'apps/desktop/nsis/keyboard-hooks.nsh'), 'utf8');
+    const hooks = readFileSync(join(root, 'apps/desktop/nsis/app-maintenance-hooks.nsh'), 'utf8');
     expect(hooks).toContain('--parent-pid');
     expect(hooks).toContain('NOMIFUN_MAINTENANCE_BINARY');
     expect(hooks).toContain('NomiFunMaintenanceAbort');
@@ -105,15 +105,14 @@ describe('native keyboard packaging lifecycle', () => {
   });
 
   test('cross-version stop aliases stay in headless application maintenance and cannot start a daemon', () => {
-    const source = readFileSync(join(root, 'apps/desktop/src/keyboard/mod.rs'), 'utf8');
-    const start = source.indexOf('pub(crate) fn early_entry()');
-    const entry = source.slice(start, source.indexOf('/// Call during single-threaded GUI startup', start));
+    const entry = readFileSync(join(root, 'apps/desktop/src/app_maintenance.rs'), 'utf8');
     for (const [current, alias, unregister] of [['--app-maintenance-stop', '--keyboard-stop', false],
       ['--app-maintenance-unregister', '--keyboard-unregister', true]]) {
-      const pattern = new RegExp(`(?:"${current}"\\s*\\|\\s*"${alias}"|"${alias}"\\s*\\|\\s*"${current}")\\s*=>\\s*(?:\\{\\s*)?platform::stop_application\\(\\s*${unregister}\\s*,?\\s*\\)`);
+      const pattern = new RegExp(`(?:"${current}"\\s*\\|\\s*"${alias}"|"${alias}"\\s*\\|\\s*"${current}")\\s*=>\\s*${unregister}\\b`);
       expect(entry).toMatch(pattern);
     }
-    expect(entry).toMatch(/"--keyboard-service"\s*=>\s*Err\(/);
+    expect(entry).toMatch(/"--keyboard-service"\s*=>\s*return Some\(Err\(/);
+    expect(entry).toContain("command(&args)?.and_then(platform::stop_application)");
   });
 
   test.skipIf(process.platform === 'win32')('package scripts parse in a real POSIX shell', () => {

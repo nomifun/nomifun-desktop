@@ -5,10 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-native-keyboard-validation = ["nomifun-keyboard/maintenance-validation"]
+native-keyboard-validation = ["nomifun-keyboard/transport-validation", "nomifun-desktop-maintenance/maintenance-validation"]
 
 [[example]]
 name = "keyboard_native_validation"
+required-features = ["native-keyboard-validation"]
+
+[[example]]
+name = "voice_shortcut_validation"
 required-features = ["native-keyboard-validation"]
 
 # The Tauri desktop shell: links the unified backend (nomifun-app) in-process.
@@ -55,6 +59,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "=2.3.2"
 
 # 跨平台保持唤醒:阻止系统空闲休眠(macOS=IOPMAssertion via objc2-io-kit,
 # Windows=SetThreadExecutionState via windows crate)。仅阻止系统休眠,不阻止显示器息屏。
@@ -78,6 +83,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 nomifun-keyboard = { path = "../../crates/backend/nomifun-keyboard" }
+nomifun-desktop-maintenance = { path = "../../crates/backend/nomifun-desktop-maintenance" }
 nomifun-model-invoke.workspace = true
 nomifun-api-types.workspace = true
 cpal = "=0.16.0"

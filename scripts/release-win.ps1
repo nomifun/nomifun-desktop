@@ -194,6 +194,13 @@ if ($LASTEXITCODE -ne 0) { Fail "构建失败。" }
 if (-not (Test-Path $Exe)) { Fail "构建后未找到产物: $Exe" }
 if (-not (Test-Path $Sig)) { Fail "构建后未找到 updater 签名: $Sig" }
 
+# Test the helper built beside this exact host before publishing its updater.
+# This uses dedicated installations/registry identities and never the real app.
+$MaintenanceHelper = Join-Path $Root 'target/x86_64-pc-windows-msvc/release/nomifun-app-maintenance.exe'
+Write-Host "▶ 验证 Windows 原生维护与完整 NSIS 安装/恢复/卸载 ..."
+& bun scripts/validation/run-windows-app-maintenance-gate.mjs --helper $MaintenanceHelper
+if ($LASTEXITCODE -ne 0) { Fail "Windows 原生维护或安装器回归失败，停止发布。" }
+
 # ── 合并 latest.json ─────────────────────────────────────────────────────────
 Write-Host "▶ 合并 latest.json ..."
 if ($NotesTmp) { & bun scripts/make-latest-json.mjs --notes-file $NotesTmp } else { & bun scripts/make-latest-json.mjs }

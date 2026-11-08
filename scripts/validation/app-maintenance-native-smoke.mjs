@@ -60,7 +60,7 @@ function compileHookFixture(item, options, action) {
     '!define MAINBINARYNAME "nomifun-keyboard-fixture"',
     `!define MAINBINARYSRCPATH "${nsisText(join(item.payload, 'nomifun-keyboard-fixture.exe'))}"`,
     `!define NOMIFUN_MAINTENANCE_BINARY "${nsisText(options.helper)}"`,
-    `!include "${nsisText(join(repository, 'apps/desktop/nsis/keyboard-hooks.nsh'))}"`,
+    `!include "${nsisText(join(repository, 'apps/desktop/nsis/app-maintenance-hooks.nsh'))}"`,
     '!insertmacro NomiFunMaintenanceFunctions "" "no"',
     `OutFile "${nsisText(executable)}"`, `InstallDir "${nsisText(item.install)}"`,
     'Function .onInstSuccess', ...callback, 'FunctionEnd',
@@ -179,8 +179,8 @@ function fixture(root, name, fixtureBinary) {
 
 function descriptorPid(path) { return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')).pid : null; }
 
-async function startRuntime(item, children, { fail = false } = {}) {
-  const gui = process_(item.installed, fail ? ['gui-fail'] : [], item.environment, children);
+async function startRuntime(item, children, { fail = false, delayedExit = false } = {}) {
+  const gui = process_(item.installed, fail ? ['gui-fail'] : delayedExit ? ['gui-delayed-exit'] : [], item.environment, children);
   await until(() => existsSync(item.desktop), 'fixture GUI endpoint');
   assert.equal(descriptorPid(item.desktop), gui.child.pid);
   assert(!existsSync(item.owner), 'Current GUI fixture must not create an independent serial owner');
@@ -216,7 +216,7 @@ async function command(maintenance, value, expected) {
 function filesAre(item, prefix) {
   assert.equal(readFileSync(join(item.install, 'a.txt'), 'utf8'), `${prefix}-a`);
   assert.equal(readFileSync(join(item.install, 'z.txt'), 'utf8'), `${prefix}-z`);
-  assert.equal(digest(item.settings), item.originalSettings, 'Keyboard preferences must remain byte-identical');
+  assert.equal(digest(item.settings), item.originalSettings, 'User preferences must remain byte-identical');
   assert.equal(digest(item.installed), prefix === 'old' ? item.originalExecutable : digest(join(item.payload, 'nomifun-keyboard-fixture.exe')),
     'Executable must match the complete old or new release');
 }
@@ -245,15 +245,15 @@ async function cleanup(item, helper, children) {
   }
 }
 
-export async function runKeyboardUpgradeSmoke(options) {
+export async function runAppMaintenanceNativeSmoke(options) {
   assert.equal(process.platform, 'win32', 'Native upgrade witness requires Windows');
   for (const name of ['helper', 'fixture']) assert(options[name] && existsSync(options[name]), `Pass --${name} with the built native executable`);
-  const root = mkdtempSync(join(tmpdir(), 'nomifun-keyboard-upgrade-'));
+  const root = mkdtempSync(join(tmpdir(), 'nomifun-app-maintenance-'));
   const reportPath = options.report ?? join(root, 'report.json');
   const report = { schema: 1, platform: 'windows', root, helper: options.helper, helperSha256: digest(options.helper), fixture: options.fixture,
     fixtureSha256: digest(options.fixture), isolation: { privateInstall: true, privateRuntime: true, userDataUntouched: true, hkcuUntouched: true,
       serialEnumeration: false, microphoneCapture: false }, evidence: 'native helper, Windows file locks and authenticated GUI IPC; controlled legacy owner retirement only',
-    hookSha256: digest(join(repository, 'apps/desktop/nsis/keyboard-hooks.nsh')),
+    hookSha256: digest(join(repository, 'apps/desktop/nsis/app-maintenance-hooks.nsh')),
     templateSha256: digest(join(repository, 'apps/desktop/nsis/installer.nsi')),
     cases: [], unexecuted: ['physical keyboard K1/K4 and microphone', 'full production Tauri GUI', 'released old application binary'], ok: false };
   const children = []; const items = [];
@@ -266,6 +266,17 @@ export async function runKeyboardUpgradeSmoke(options) {
     finally { result.elapsedMs = Date.now() - started; report.cases.push(result); await cleanup(item, options.helper, children); }
   };
   try {
+    await run('released-lifetime-lock-still-waits-for-native-process-exit', async item => {
+      const previous = await startRuntime(item, children, { delayedExit: true });
+      const maintenance = await startMaintenance(item, options.helper, children);
+      assert.equal(maintenance.state().state, 'ready', JSON.stringify(maintenance.state()));
+      assert(readFileSync(join(item.runtime, 'events.log'), 'utf8').includes('lifetime-released '));
+      await command(maintenance, 'apply', ['applied']);
+      assert.equal((await finished(previous.gui)).code, 0);
+      filesAre(item, 'new');
+      await command(maintenance, 'commit', ['committed']);
+      await finished(maintenance.process); await restored(item, previous);
+    });
     await run('closed-legacy-upgrade', async item => {
       copyFileSync(legacy, item.installed);
       const maintenance = await startMaintenance(item, options.helper, children);
@@ -441,7 +452,7 @@ export async function runKeyboardUpgradeSmoke(options) {
     for (const child of children) if (child.child.exitCode === null && child.child.signalCode === null) child.child.kill();
     await Promise.allSettled(children.map(child => finished(child, 4000)));
     report.fixtureProcesses = children.map(child => child.diagnostics());
-    if (report.hookSha256 !== digest(join(repository, 'apps/desktop/nsis/keyboard-hooks.nsh'))
+    if (report.hookSha256 !== digest(join(repository, 'apps/desktop/nsis/app-maintenance-hooks.nsh'))
       || report.templateSha256 !== digest(join(repository, 'apps/desktop/nsis/installer.nsi'))) {
       report.ok = false; report.sourceChangedDuringRun = true;
     }
@@ -454,6 +465,6 @@ export async function runKeyboardUpgradeSmoke(options) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = await runKeyboardUpgradeSmoke(arguments_(process.argv.slice(2)));
+  const result = await runAppMaintenanceNativeSmoke(arguments_(process.argv.slice(2)));
   console.log(JSON.stringify(result)); process.exitCode = result.ok ? 0 : 1;
 }

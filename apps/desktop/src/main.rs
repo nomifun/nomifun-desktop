@@ -52,6 +52,7 @@ mod native_api_plugins;
 mod headless_browser_runtime;
 mod companion_pointer;
 mod keyboard;
+mod app_maintenance;
 mod relay_pairing;
 mod updater_install_context;
 #[cfg(all(windows,debug_assertions))]
@@ -1040,7 +1041,7 @@ async fn install_update(
         match keyboard::prepare_update(&app).await {
             Ok(pause) => pause,
             Err(error) => {
-                return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 键盘服务停止预检失败，安装包仍保留：{error}"));
+                return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: 语音输入停止预检失败，安装包仍保留：{error}"));
             }
         }
     } else { None };
@@ -1073,7 +1074,7 @@ async fn install_update(
             downloaded.restore_before_handoff(&requested_version, package);
             if let Some(pause) = keyboard_pause {
                 pause.cancel().await.map_err(|recovery| format!(
-                    "{UPDATE_NOT_RETAINED_ERROR}: {error}；键盘恢复未确认：{recovery}"
+                    "{UPDATE_NOT_RETAINED_ERROR}: {error}；语音输入恢复未确认：{recovery}"
                 ))?;
             }
             return Err(format!("{UPDATE_NOT_RETAINED_ERROR}: {error}"));
@@ -2878,7 +2879,16 @@ fn complete_main_thread_setup(
     // The verified lifecycle fixture owns no shared Keyboard registration,
     // login item, hardware service or microphone lifecycle.
     if !lifecycle_quit_fixture_active() {
-        keyboard::start(app.clone(), server.clone(), pairing_data_dir)?;
+        let voice_server = server.clone();
+        app_maintenance::start(&app, move |app, voice_error| {
+            if app.state::<QuitFlag>().0.load(Ordering::Acquire)
+                || app.state::<Arc<ExitCoordinator>>().has_pending_shutdown() {
+                return;
+            }
+            if let Err(error) = keyboard::start(app, voice_server, pairing_data_dir, voice_error) {
+                tracing::error!(%error, "voice input unavailable; workbench remains available");
+            }
+        })?;
     }
     #[cfg(target_os = "linux")]
     linux_media::install(&main_window)?;
@@ -3407,7 +3417,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     if !lifecycle_quit_fixture_active() {
-        if let Some(code) = keyboard::early_entry() { return code; }
+        if let Some(code) = app_maintenance::early_entry() { return code; }
     }
     #[cfg(windows)]
     if let Some(code) = nomifun_app::windows_system_execution_entry() { return code; }
@@ -3435,11 +3445,11 @@ fn main() -> std::process::ExitCode {
     }
     // Ordinary launches during package replacement must return before touching
     // storage, backend state or native windows. The admitted launcher keeps its
-    // shared gate until Keyboard publishes its GUI lifetime endpoint.
-    let keyboard_startup_admission = if lifecycle_quit_fixture_active() {
+    // shared gate until application maintenance publishes its lifetime endpoint.
+    let startup_admission = if lifecycle_quit_fixture_active() {
         None
     } else {
-        match nomifun_keyboard::maintenance::try_admit_startup() {
+        match nomifun_desktop_maintenance::maintenance::try_admit_startup() {
             Ok(Some(admission)) => Some(admission),
             Ok(None) => return std::process::ExitCode::SUCCESS,
             Err(error) => {
@@ -3907,7 +3917,7 @@ fn main() -> std::process::ExitCode {
         .manage(AwakeState(Mutex::new(None)))
         .manage(browser_surface::commands::BrowserSurfaceState::default())
         .manage(QuitFlag(AtomicBool::new(false)))
-        .manage(keyboard::StartupAdmissionState::new(keyboard_startup_admission))
+        .manage(app_maintenance::StartupAdmissionState::new(startup_admission))
         .manage(Arc::new(ExitCoordinator::default()))
         .manage(DownloadedUpdateState::default())
         .invoke_handler(browser_surface::security::app_commands_only(tauri::generate_handler![

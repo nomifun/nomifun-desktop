@@ -2,7 +2,7 @@
 //! Runs from the package's private temporary directory, never the installed
 //! application. No GUI, storage startup, model credentials or audio are loaded.
 use anyhow::{Context, Result, bail, ensure};
-use nomifun_keyboard::{maintenance::{FileReplacement, MaintenanceGuard, ResumeIntent}, ipc};
+use nomifun_desktop_maintenance::{maintenance::{FileReplacement, MaintenanceGuard, ResumeIntent}, ipc};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
@@ -179,10 +179,12 @@ fn run(options: &Options) -> Result<()> {
     let mut intent = ResumeIntent::capture(&runtime)?;
     intent.desktop |= options.resume.desktop;
     #[cfg(windows)]
+    let mut installed_processes = windows::InstalledProcesses::capture(&options.installed)?;
+    #[cfg(windows)]
     {
         // Legacy versions have no desktop lifetime lock. Inspect exact image
         // paths without launching their unsupported management command.
-        intent.desktop |= windows::installed_desktop_running(&options.installed, &runtime)?;
+        intent.desktop |= installed_processes.desktop_running(&runtime)?;
     }
     let checked_runtime = runtime.clone();
     let mut participants_checked = false;
@@ -190,13 +192,13 @@ fn run(options: &Options) -> Result<()> {
         #[cfg(windows)]
         windows::validate_runtime_ownership(&options.installed, &checked_runtime, observed)?;
         #[cfg(not(windows))]
-        nomifun_keyboard::legacy_service::validate_runtime_ownership(&options.installed, &checked_runtime, observed.desktop)?;
+        nomifun_desktop_maintenance::legacy_service::validate_runtime_ownership(&options.installed, &checked_runtime, observed.desktop)?;
         participants_checked = true;
         Ok(())
     });
     let guard = match prepared {
         Ok(guard) => guard,
-        Err(error) => return finish(options, "error", &format!("keyboard maintenance preparation failed: {error:#}"), if participants_checked { intent } else { ResumeIntent::default() }),
+        Err(error) => return finish(options, "error", &format!("application maintenance preparation failed: {error:#}"), if participants_checked { intent } else { ResumeIntent::default() }),
     };
     let mut guard = Some(guard);
     let mut replacement: Option<FileReplacement> = None;
@@ -227,12 +229,16 @@ fn run(options: &Options) -> Result<()> {
         match command.as_str() {
             "apply" => {
                 ensure!(!options.uninstall && replacement.is_none(), "invalid repeated application replacement");
+                #[cfg(windows)]
+                installed_processes.wait_for_exit(&options.installed, Duration::from_secs(30))?;
                 let payload = options.payload.as_deref().context("missing application payload")?;
                 replacement = Some(FileReplacement::prepare(payload, options.installed.parent().context("invalid installed path")?, &options.session.join("backup"))?);
                 replacement.as_mut().unwrap().apply()?;
                 status(options, "applied", "")?;
             }
             "remove" if options.uninstall => {
+                #[cfg(windows)]
+                installed_processes.wait_for_exit(&options.installed, Duration::from_secs(30))?;
                 // Uninstall file deletion is owned by NSIS. Once it begins,
                 // an interrupted uninstaller must never relaunch a mixed tree.
                 removed = true;
@@ -278,7 +284,7 @@ fn run(options: &Options) -> Result<()> {
 fn main() -> ExitCode {
     let options = match Options::parse() {
         Ok(options) => options,
-        Err(error) => { eprintln!("NomiFun maintenance: {error:#}"); return ExitCode::FAILURE; }
+        Err(error) => { eprintln!("NomiFun application maintenance: {error:#}"); return ExitCode::FAILURE; }
     };
     match run(&options) {
         Ok(()) => ExitCode::SUCCESS,

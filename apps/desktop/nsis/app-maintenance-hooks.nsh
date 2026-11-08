@@ -13,7 +13,7 @@ Var NomiFunMaintenanceCommand
 
 !macro NomiFunMaintenanceFunctions PREFIX UNINSTALL
   !ifndef NOMIFUN_MAINTENANCE_BINARY
-    !searchreplace NOMIFUN_MAINTENANCE_BINARY "${MAINBINARYSRCPATH}" "${MAINBINARYNAME}.exe" "nomifun-keyboard-maintenance.exe"
+    !searchreplace NOMIFUN_MAINTENANCE_BINARY "${MAINBINARYSRCPATH}" "${MAINBINARYNAME}.exe" "nomifun-app-maintenance.exe"
   !endif
 
   Function ${PREFIX}NomiFunMaintenancePublish
@@ -69,11 +69,11 @@ Var NomiFunMaintenanceCommand
 
   Function ${PREFIX}NomiFunMaintenanceStart
     InitPluginsDir
-    StrCpy $NomiFunMaintenanceSession "$PLUGINSDIR\keyboard-maintenance"
+    StrCpy $NomiFunMaintenanceSession "$PLUGINSDIR\app-maintenance"
     CreateDirectory "$NomiFunMaintenanceSession"
     SetOutPath $PLUGINSDIR
     ClearErrors
-    File /oname=nomifun-keyboard-maintenance.exe "${NOMIFUN_MAINTENANCE_BINARY}"
+    File /oname=nomifun-app-maintenance.exe "${NOMIFUN_MAINTENANCE_BINARY}"
     ${If} ${Errors}
       MessageBox MB_OK|MB_ICONSTOP "NomiFun could not extract its installation maintenance helper." /SD IDOK
       Abort
@@ -85,9 +85,9 @@ Var NomiFunMaintenanceCommand
     Push $0
     System::Call 'kernel32::GetCurrentProcessId()i.r0'
     !if "${UNINSTALL}" == "yes"
-      Exec '"$PLUGINSDIR\nomifun-keyboard-maintenance.exe" --session "$NomiFunMaintenanceSession" --installed "$INSTDIR\${MAINBINARYNAME}.exe" --parent-pid $0 --uninstall'
+      Exec '"$PLUGINSDIR\nomifun-app-maintenance.exe" --session "$NomiFunMaintenanceSession" --installed "$INSTDIR\${MAINBINARYNAME}.exe" --parent-pid $0 --uninstall'
     !else
-      Exec '"$PLUGINSDIR\nomifun-keyboard-maintenance.exe" --session "$NomiFunMaintenanceSession" --installed "$INSTDIR\${MAINBINARYNAME}.exe" --parent-pid $0 --payload "$PLUGINSDIR\payload" $NomiFunMaintenanceDetail'
+      Exec '"$PLUGINSDIR\nomifun-app-maintenance.exe" --session "$NomiFunMaintenanceSession" --installed "$INSTDIR\${MAINBINARYNAME}.exe" --parent-pid $0 --payload "$PLUGINSDIR\payload" $NomiFunMaintenanceDetail'
     !endif
     Pop $0
     ${If} ${Errors}
@@ -99,7 +99,7 @@ Var NomiFunMaintenanceCommand
     StrCpy $NomiFunMaintenanceExpected "ready"
     Call ${PREFIX}NomiFunMaintenanceWait
     ${If} $NomiFunMaintenanceResult != 1
-      DetailPrint "Keyboard maintenance: $NomiFunMaintenanceDetail"
+      DetailPrint "Application maintenance: $NomiFunMaintenanceDetail"
       MessageBox MB_OK|MB_ICONSTOP "NomiFun could not prepare the application for installation.$\r$\n$\r$\n$NomiFunMaintenanceDetail" /SD IDOK
       Abort
     ${EndIf}
@@ -115,7 +115,7 @@ Var NomiFunMaintenanceCommand
     StrCpy $NomiFunMaintenanceExpected "applied"
     Call ${PREFIX}NomiFunMaintenanceWait
     ${If} $NomiFunMaintenanceResult != 1
-      DetailPrint "Keyboard maintenance: $NomiFunMaintenanceDetail"
+      DetailPrint "Application maintenance: $NomiFunMaintenanceDetail"
       MessageBox MB_OK|MB_ICONSTOP "NomiFun could not replace the application files.$\r$\n$\r$\n$NomiFunMaintenanceDetail" /SD IDOK
       Abort
     ${EndIf}

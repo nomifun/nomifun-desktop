@@ -5,11 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-maintenance-validation = []
-
-[[example]]
-name = "maintenance_fixture"
-required-features = ["maintenance-validation"]
+transport-validation = []
 
 [dependencies]
 serde.workspace = true
@@ -17,7 +13,6 @@ serde_json.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 fs2.workspace = true
-getrandom.workspace = true
 serialport = { version = "4.8", default-features = false }
 
 [dev-dependencies]

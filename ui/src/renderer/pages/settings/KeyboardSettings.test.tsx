@@ -1,3 +1,4 @@
+import { defaultVoiceKeyboardShortcuts } from '@/common/keyboard';
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { act } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -32,7 +33,7 @@ beforeEach(() => {
     spyOn(ipcBridge.systemPermissions.openSettings, 'invoke').mockImplementation(async ({ kind }) => { openedPermissions.push(kind); }),
   ];
   current = {
-    settings: { enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
+    settings: { enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
       asrModel: { providerId: 'provider-1', model: 'streaming-model' }, textModel: null,
       language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false, subtitleFontSize: 14 },
     sequence: 0, cancelGeneration: 0, documentId: 'doc-1', revision: 2, operationId: null, editSessionId: null, dictationSelection: null, phase: 'idle', text: 'Ready text', originalText: 'Ready text',
@@ -63,30 +64,32 @@ await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { tr
 const show = () => render(<SWRConfig value={{ provider: () => new Map() }}><I18nextProvider i18n={i18n}><MemoryRouter><KeyboardSettings /></MemoryRouter></I18nextProvider></SWRConfig>);
 
 describe('system microphone keyboard settings', () => {
-  test('the app-owned keyboard has no separate service startup or quit controls', async () => {
+  test('voice input is available without external device controls or startup dependencies', async () => {
     show();
-    await screen.findByRole('region', { name: 'Keyboard device' });
-    expect(Boolean(screen.queryByRole('region', { name: 'Background device service' }))).toBe(false);
-    expect(Boolean(screen.queryByRole('switch', { name: 'Start at user login' }))).toBe(false);
-    expect(Boolean(screen.queryByRole('button', { name: 'Quit all services' }))).toBe(false);
+    await screen.findByRole('heading', { name: 'Voice keyboard' });
+    expect(screen.queryByRole('region', { name: 'Keyboard device' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Background device service' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Start at user login' })).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Dictation shortcut' }).getAttribute('value')).toBe(defaultVoiceKeyboardShortcuts.dictate);
+    expect(screen.getByRole('switch', { name: 'Enable voice shortcuts' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Open subtitle board' }));
     await waitFor(() => expect(actions).toEqual([{ action: 'open' }]));
   });
 
   test.each([
-    { running: true, ready: true, label: 'Ready' },
-    { running: true, ready: false, label: 'Preparing keyboard' },
-    { running: false, ready: false, label: 'Not running' },
-  ])('the device panel shows app-owned keyboard readiness: $label', async ({ running, ready, label }) => {
-    current.service = { running, ready, detail: 'Keyboard runtime detail' };
+    { registered: 4, label: 'Ready' },
+    { registered: 0, label: 'Shortcuts inactive' },
+  ])('native shortcut registration is shown independently from hardware: $label', async ({ registered, label }) => {
+    current.shortcutState = { registered, detail: 'Shortcut registration detail' };
     show();
-    const device = within(await screen.findByRole('region', { name: 'Keyboard device' }));
-    expect(device.getByText('Keyboard readiness')).toBeTruthy();
-    expect(device.getByText(label)).toBeTruthy();
-    expect(device.getByText('Keyboard runtime detail')).toBeTruthy();
+    const panel = within(await screen.findByRole('region', { name: 'System shortcuts' }));
+    expect(panel.getByText('Shortcut registration')).toBeTruthy();
+    expect(panel.getByText(label)).toBeTruthy();
+    expect(panel.getByText('Shortcut registration detail')).toBeTruthy();
   });
 
-  test('the explicit microphone test works without a connected keyboard', async () => {
+  test('cloud transcription works without a connected keyboard or registered shortcuts', async () => {
+    current.shortcutState = { registered: 0, detail: 'Shortcut already used by another application' };
     show();
     const start = await screen.findByRole('button', { name: 'Test cloud transcription' });
     await waitFor(() => expect(start.hasAttribute('disabled')).toBe(false));
@@ -94,29 +97,28 @@ describe('system microphone keyboard settings', () => {
     await waitFor(() => expect(actions).toEqual([{ action: 'test_start' }]));
   });
 
-  test('connected keyboard shows its identity and firmware without calibration or onboard controls', async () => {
-    current.device = { ...current.device, connected: true, id: 'NK-TEST-DEVICE', port: 'COM9', firmware: '0.3-screen.test',
-      detail: '键盘采音已关闭；等待旧按键释放' };
+  test('shortcut bindings are applied together and incomplete typing is not registered', async () => {
     show();
-    const device = within(await screen.findByRole('region', { name: 'Keyboard device' }));
-    expect(device.getByText('Connected')).toBeTruthy();
-    expect(device.getByText('NK-TEST-DEVICE · COM9')).toBeTruthy();
-    expect(device.getByText('0.3-screen.test')).toBeTruthy();
-    expect(device.getByText('Use four keys to control NomiFun. Recording uses your computer’s system microphone.')).toBeTruthy();
-    expect(device.queryAllByRole('combobox')).toHaveLength(0);
-    expect(device.queryAllByRole('button')).toHaveLength(0);
-    expect(device.queryByText(/onboard|calibrat|NONE|waiting for.*key|等待旧按键|映射/i)).toBeNull();
-    expect(screen.getByRole('switch', { name: 'K2 · Beautify full text' })).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'K3 · Cancel current recognition' })).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'K4 · Hold to speak' })).toBeTruthy();
+    const dictate = await screen.findByRole('textbox', { name: 'Dictation shortcut' });
+    fireEvent.change(dictate, { target: { value: 'Control+Alt+D' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Cancellation shortcut' }), { target: { value: '' } });
+    expect(updates).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply shortcuts' }));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].shortcuts).toEqual({ ...defaultVoiceKeyboardShortcuts, dictate: 'Control+Alt+D', cancel: '' });
+    await screen.findByText('Settings saved automatically');
   });
 
-  test('disconnected keyboard retains its connection status and independent microphone selection', async () => {
+  test('a shortcut conflict keeps the requested combination editable and the saved binding unchanged', async () => {
+    keyboard.updateSettings = async settings => { updates.push(settings); throw new Error('Shortcut already registered by another application'); };
     show();
-    const device = within(await screen.findByRole('region', { name: 'Keyboard device' }));
-    expect(device.getByText('Disconnected')).toBeTruthy();
-    expect(device.getByText('Not read yet')).toBeTruthy();
-    expect(screen.getByRole('combobox', { name: 'Recording device' })).toBeTruthy();
+    const dictate = await screen.findByRole('textbox', { name: 'Dictation shortcut' });
+    fireEvent.change(dictate, { target: { value: 'Control+Alt+D' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply shortcuts' }));
+    await screen.findByText('Shortcut already registered by another application');
+    expect((dictate as HTMLInputElement).value).toBe('Control+Alt+D');
+    expect(current.settings.shortcuts.dictate).toBe(defaultVoiceKeyboardShortcuts.dictate);
+    expect(screen.getByRole('button', { name: 'Retry saving' })).toBeTruthy();
   });
 
   test('active system recording remains visible with its finish action', async () => {
@@ -132,7 +134,7 @@ describe('system microphone keyboard settings', () => {
     current.error = 'Recognition failed. Check the provider connection and try again.';
     show();
     const start = await screen.findByRole('button', { name: 'Test cloud transcription' });
-    expect(within(screen.getByRole('region', { name: 'Recent keyboard error' })).getByText(current.error)).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Recent voice input error' })).getByText(current.error)).toBeTruthy();
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).queryByText(current.error)).toBeNull();
     expect(start.hasAttribute('disabled')).toBe(false);
     fireEvent.click(start);
@@ -160,7 +162,7 @@ describe('system microphone keyboard settings', () => {
       listener?.(current);
     });
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).queryByText('Unrelated later hardware failure')).toBeNull();
-    expect(within(screen.getByRole('region', { name: 'Recent keyboard error' })).getByText('Unrelated later hardware failure')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Recent voice input error' })).getByText('Unrelated later hardware failure')).toBeTruthy();
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).getByText(failure)).toBeTruthy();
   });
 
@@ -183,25 +185,25 @@ describe('system microphone keyboard settings', () => {
       listener?.(current);
     });
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).queryByText('Later hardware failure')).toBeNull();
-    expect(within(screen.getByRole('region', { name: 'Recent keyboard error' })).getByText('Later hardware failure')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Recent voice input error' })).getByText('Later hardware failure')).toBeTruthy();
   });
 
   test('a failed automatic setting keeps the edited switch and exposes one retry without dropping input', async () => {
     let attempts = 0;
     keyboard.updateSettings = async settings => { updates.push(settings); if (++attempts === 1) throw new Error('The keyboard settings could not be saved.'); current = { ...current, sequence: current.sequence + 1, settings }; return current; };
     show();
-    const toggle = await screen.findByRole('switch', { name: 'K4 · Hold to speak' });
+    const toggle = await screen.findByRole('switch', { name: 'Enable voice shortcuts' });
     fireEvent.click(toggle);
     await screen.findByText('The keyboard settings could not be saved.');
     expect(toggle.getAttribute('aria-checked')).toBe('false');
-    expect(current.settings.k4Enabled).toBe(true);
+    expect(current.settings.enabled).toBe(true);
     expect(updates).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Test local microphone' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     expect(within(screen.getByRole('region', { name: 'Local microphone check' })).getByText('Settings have not been saved. Retry saving before testing.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Retry saving' }));
     await screen.findByText('Settings saved automatically');
-    expect(updates).toHaveLength(2); expect(current.settings.k4Enabled).toBe(false);
+    expect(updates).toHaveLength(2); expect(current.settings.enabled).toBe(false);
   });
 
   test('system microphone stopping status is shown without an onboard capture row', async () => {
@@ -311,11 +313,11 @@ describe('system microphone keyboard settings', () => {
     expect(updates[0].audioDeviceId).toBe(current.settings.audioDeviceId);
     await screen.findByText('Settings saved automatically');
   });
-  test('initial setup distinguishes hardware communication and unverified speech checks', async () => {
-    current.device.connected = true; current.service = { running: true, ready: true, detail: null };
+  test('initial setup distinguishes shortcut registration and unverified speech checks', async () => {
+    current.shortcutState = { registered: 4, detail: null };
     show();
     const setup = within(await screen.findByRole('region', { name: 'First-use checks' }));
-    expect(setup.getByText('Keyboard and K4 ready')).toBeTruthy();
+    expect(setup.getByText('System shortcuts ready')).toBeTruthy();
     expect(setup.getByText('Local input not tested')).toBeTruthy();
     expect(setup.getByText('Cloud transcription not tested')).toBeTruthy();
     expect(setup.getByRole('button', { name: 'Check microphone' })).toBeTruthy();
@@ -638,15 +640,15 @@ describe('system microphone keyboard settings', () => {
     await screen.findByText('Settings saved automatically');
   });
 
-  test('recognition controls pause during native capture while K4 disable remains immediately available', async () => {
+  test('recognition controls pause during native capture while shortcut disable remains immediately available', async () => {
     current.phase = 'recording'; current.audioState.state = 'capturing';
     show();
     const language = await screen.findByRole('textbox', { name: 'Recognition language' });
     expect(language.hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('combobox', { name: 'ASR model' }).getAttribute('aria-disabled')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Recognition and beautification' })).getByText('Recognition settings can be changed after the current recording or processing finishes.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('switch', { name: 'K4 · Hold to speak' }));
-    await waitFor(() => expect(updates).toHaveLength(1)); expect(updates[0].k4Enabled).toBe(false);
+    fireEvent.click(screen.getByRole('switch', { name: 'Enable voice shortcuts' }));
+    await waitFor(() => expect(updates).toHaveLength(1)); expect(updates[0].enabled).toBe(false);
   });
 
   test('IME input does not save partial composition, then saves its final value after blur', async () => {

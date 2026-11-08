@@ -222,7 +222,7 @@ check(source.indexOf('Call NomiFunMaintenanceCommit') < source.indexOf('; Save $
 for (const token of ['Function .onInstFailed', 'Function .onGUIEnd', 'Call NomiFunMaintenanceAbort', 'Call NomiFunMaintenanceCommit']) {
   checkIncludes(source, token, 'installer must retain recoverable maintenance lifecycle: ' + token);
 }
-const maintenanceHooks = readFileSync(resolve(root, 'apps/desktop/nsis/keyboard-hooks.nsh'), 'utf8');
+const maintenanceHooks = readFileSync(resolve(root, 'apps/desktop/nsis/app-maintenance-hooks.nsh'), 'utf8');
 for (const retired of ['--keyboard-stop', '--keyboard-unregister', '--keyboard-service', '--resume-service']) {
   check(!maintenanceHooks.includes(retired), 'installer must not launch or recover the retired keyboard service: ' + retired);
 }

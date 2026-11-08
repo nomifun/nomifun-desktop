@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildComputerWorker, rustHostTarget } from './computer/build-worker.mjs';
-import { buildKeyboardMaintenance } from './build-keyboard-maintenance.mjs';
+import { buildAppMaintenance } from './build-app-maintenance.mjs';
 
 export function desktopBuildCommand(platform, args) {
   if (platform === 'darwin' || platform === 'linux') {
@@ -24,7 +24,7 @@ if (import.meta.main) {
     // the helper is the actual sibling of MAINBINARYSRCPATH, including custom
     // CARGO_TARGET_DIR and debug builds.
     const explicitTarget = forwarded.some(argument => argument.startsWith('--target=')) || targetIndex >= 0;
-    await buildKeyboardMaintenance({ target: explicitTarget ? target : undefined,
+    await buildAppMaintenance({ target: explicitTarget ? target : undefined,
       profile: forwarded.includes('--debug') || forwarded.includes('-d') ? 'debug' : 'release' });
   }
   const invocation = desktopBuildCommand(process.platform, forwarded);

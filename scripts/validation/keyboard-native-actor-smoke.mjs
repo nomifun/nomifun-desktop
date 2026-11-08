@@ -130,15 +130,24 @@ async function session(profile) {
       || local.five_second_auto_stop !== true || local.document_settings_and_edit_lease_unchanged !== true
       || local.draft_device_not_saved !== true || local.stale_test_id_ignored !== true || local.mutual_exclusion !== true
       || local.stop_proof_required_before_new_owner !== true || local.suspension_cancels_and_blocks !== true
-      || local.late_cancelled_callback_does_not_fail !== true || local.prewarm_preserved_without_provider_reconnect !== true
+      || local.late_cancelled_callback_does_not_fail !== true || local.configured_idle_without_provider_connection !== true
       || local.update_waits_for_local_stop !== true || local.k4_missing_model_visible_without_recording !== true
       || local.callback_and_pcm_evidence?.callbackObserved !== true || local.callback_and_pcm_evidence.stopped !== true
       || local.callback_and_pcm_evidence.samples <= 0 || local.callback_and_pcm_evidence.elapsedMs < 5000
       || JSON.stringify(local.provider_counts_before) !== JSON.stringify(local.provider_counts_after)
-      || JSON.stringify(local.prewarm_counts_before) !== JSON.stringify(local.prewarm_counts_after)) {
+      || JSON.stringify(local.configured_idle_counts_before) !== JSON.stringify(local.configured_idle_counts_after)) {
       throw new Error('Actor fixture lacks local-only microphone evidence and native owner isolation');
     }
     const recovery = report.update_recovery;
+    const software = report.software_shortcuts;
+    if (software?.no_hardware_prerequisite !== true || software.hardware_key_toggles_do_not_gate_software !== true
+      || software.idle_without_provider_audio_or_webview !== true || software.blocked_old_resources_gate_all_capture !== true
+      || software.hold_press_repeat_and_release !== true || software.toggle_preserves_document !== true
+      || software.beautify_without_device !== true || software.release_does_not_stop_ui_recording !== true
+      || software.released_editor_and_asr_preparation_do_not_resume !== true
+      || software.cancel_suspend_update_remap_disable_require_fresh_release !== true) {
+      throw new Error('Actor fixture lacks software shortcut source ownership and on-demand resource evidence');
+    }
     if (recovery?.successful_handoff_keeps_old_runtime_paused !== true || recovery.cloud_completion_not_required !== true || recovery.automatic_recording_not_resumed !== true || recovery.disabled_and_unconfigured_keyboard_admit_maintenance !== true
       || recovery.serial_owner_joined_after_native_stop !== true || recovery.serial_lock_released_after_shutdown !== true || recovery.no_daemon_endpoint_published !== true
       || !recovery.in_process_transport_owner?.worker || recovery.in_process_transport_owner.lockHeld !== true || recovery.in_process_transport_owner.endpointPublished !== false

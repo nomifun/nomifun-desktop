@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type CompositionEvent } from 'rea
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import useSWR from 'swr';
-import { keyboard, modelSelectionKey, parseModelSelection, type KeyboardAsrMode, type KeyboardCatalogModel, type KeyboardModel, type KeyboardSelection, type KeyboardSettings as Settings, type KeyboardState } from '@/common/keyboard';
+import { keyboard, modelSelectionKey, parseModelSelection, type KeyboardAsrMode, type KeyboardCatalogModel, type KeyboardModel, type KeyboardSelection, type KeyboardSettings as Settings, type KeyboardState, type VoiceKeyboardShortcuts } from '@/common/keyboard';
 import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import { deriveKeyboardReadiness } from './keyboardReadiness';
 import { useKeyboardSettingsAutosave } from './useKeyboardSettingsAutosave';
@@ -43,6 +43,27 @@ function ModelSelect({ models, value, label, disabled, onChange }: {
   </Select>;
 }
 
+function ShortcutBindings({ shortcuts, disabled, onApply }: {
+  shortcuts: VoiceKeyboardShortcuts; disabled: boolean; onApply: (next: VoiceKeyboardShortcuts) => void;
+}) {
+  const { t } = useTranslation();
+  const [edited, setEdited] = useState(shortcuts);
+  const saved = JSON.stringify(shortcuts);
+  useEffect(() => { setEdited(shortcuts); }, [saved]);
+  return <>
+    {(['toggle', 'dictate', 'beautify', 'cancel'] as const).map(action =>
+      <VisualRow key={action} label={t(`settings.keyboard.shortcut_${action}`)} description={t(`settings.keyboard.shortcutHint_${action}`)}>
+        <Input className='keyboard-shortcut-input' aria-label={t(`settings.keyboard.shortcut_${action}`)} value={edited[action]}
+          disabled={disabled} onChange={value => setEdited(current => ({ ...current, [action]: value }))}
+          placeholder={t('settings.keyboard.shortcutEmpty')} spellCheck={false} />
+      </VisualRow>)}
+    <div className='keyboard-form-actions'>
+      <Button disabled={disabled || JSON.stringify(edited) === saved} onClick={() => onApply(edited)}>{t('settings.keyboard.applyShortcuts')}</Button>
+    </div>
+    <p className='cv-note'>{t('settings.keyboard.shortcutFormat')}</p>
+  </>;
+}
+
 export default function KeyboardSettings() {
   const { t } = useTranslation();
   const native = useKeyboard();
@@ -61,7 +82,7 @@ export default function KeyboardSettings() {
   const permission = permissions.status?.permissions.find(entry => entry.kind === 'microphone');
   const microphoneRef = useRef<HTMLDivElement>(null);
   const modelsRef = useRef<HTMLDivElement>(null);
-  const deviceRef = useRef<HTMLDivElement>(null);
+  const shortcutsRef = useRef<HTMLDivElement>(null);
   const cloudRef = useRef<HTMLDivElement>(null);
   const visit = (target: { current: HTMLDivElement | null }) => { target.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }); target.current?.focus({ preventScroll: true }); };
   const { data: audioDevices, error: audioDevicesError, isValidating: audioDevicesLoading, mutate: refreshAudioDevices } = useSWR(
@@ -190,8 +211,8 @@ export default function KeyboardSettings() {
         {native.busy && <p className='cv-note' role='status'>{t('settings.keyboard.block_busy')}</p>}
         <VisualPanel title={t('settings.keyboard.setupTitle')} description={t('settings.keyboard.setupHint')}>
           <ol className='keyboard-setup-list'>
-            <li><VisualRow label={t('settings.keyboard.setupHardware')} description={t(readiness.hardwareReady ? 'settings.keyboard.hardwareReady' : 'settings.keyboard.hardwarePending')}>
-              <Button size='small' onClick={() => visit(deviceRef)}>{t('settings.keyboard.checkKeyboard')}</Button>
+            <li><VisualRow label={t('settings.keyboard.setupShortcuts')} description={t(readiness.shortcutsReady ? 'settings.keyboard.shortcutsReady' : 'settings.keyboard.shortcutsPending')}>
+              <Button size='small' onClick={() => visit(shortcutsRef)}>{t('settings.keyboard.checkShortcuts')}</Button>
             </VisualRow></li>
             <li><VisualRow label={t('settings.keyboard.setupMicrophone')} description={t(readiness.permissionBlocked ? 'settings.keyboard.block_permission' : !readiness.deviceAvailable ? 'settings.keyboard.block_device' : localVerified ? 'settings.keyboard.localPassed' : 'settings.keyboard.localUnverified')}>
               <Button size='small' onClick={() => visit(microphoneRef)}>{t('settings.keyboard.checkMicrophone')}</Button>
@@ -207,23 +228,16 @@ export default function KeyboardSettings() {
         {state.error && <VisualPanel title={t('settings.keyboard.hardwareErrorTitle')}>
           <Alert type='warning' content={state.error} />
         </VisualPanel>}
-        <div ref={deviceRef} tabIndex={-1} className='keyboard-section-target'>
-        <VisualPanel title={t('settings.keyboard.deviceTitle')} description={t('settings.keyboard.deviceHint')}>
-          <VisualRow label={t('settings.keyboard.connection')} description={[state.device.id, state.device.port].filter(Boolean).join(' · ')}>
-            <VisualStatus tone={state.device.connected ? 'success' : 'warning'}>{t(state.device.connected ? 'settings.keyboard.connected' : 'settings.keyboard.disconnected')}</VisualStatus>
-          </VisualRow>
-          <VisualRow label={t('settings.keyboard.firmware')} description={state.device.firmware || t('settings.keyboard.unknown')} />
-          <VisualRow label={t('settings.keyboard.runtimeStatus')} description={state.service.detail}>
-            <VisualStatus tone={state.service.ready ? 'success' : 'warning'}>{t(state.service.ready ? 'settings.keyboard.ready' : state.service.running ? 'settings.keyboard.waiting' : 'settings.keyboard.stopped')}</VisualStatus>
-          </VisualRow>
-        </VisualPanel>
+        <div ref={shortcutsRef} tabIndex={-1} className='keyboard-section-target'>
         <VisualPanel title={t('settings.keyboard.keysTitle')} description={t('settings.keyboard.keysHint')}>
           <VisualRow label={t('settings.keyboard.enabled')} description={t('settings.keyboard.enabledHint')}>
             <VisualSwitch label={t('settings.keyboard.enabled')} checked={draft.enabled} onChange={(value) => change('enabled', value)} />
           </VisualRow>
-          {(['k2Enabled', 'k3Enabled', 'k4Enabled'] as const).map((key) => <VisualRow key={key} label={t(`settings.keyboard.${key}`)} disabled={!draft.enabled}>
-            <VisualSwitch label={t(`settings.keyboard.${key}`)} checked={draft[key]} onChange={(value) => change(key, value)} />
-          </VisualRow>)}
+          <ShortcutBindings shortcuts={draft.shortcuts} disabled={native.busy || recognitionBusy}
+            onApply={shortcuts => change('shortcuts', shortcuts)} />
+          <VisualRow label={t('settings.keyboard.runtimeStatus')} description={state.shortcutState?.detail}>
+            <VisualStatus tone={state.shortcutState?.registered ? 'success' : 'warning'}>{t(state.shortcutState?.registered ? 'settings.keyboard.ready' : 'settings.keyboard.stopped')}</VisualStatus>
+          </VisualRow>
           <p className='cv-note'>{t('settings.keyboard.disableHint')}</p>
         </VisualPanel>
         </div>

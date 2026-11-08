@@ -1,10 +1,11 @@
+import { defaultVoiceKeyboardShortcuts } from '@/common/keyboard';
 import { describe, expect, test } from 'bun:test';
 import type { SystemPermissionState } from '@/common/adapter/ipcBridge';
 import type { KeyboardSettings, KeyboardState } from '@/common/keyboard';
 import { deriveKeyboardReadiness, type KeyboardReadinessInput } from './keyboardReadiness';
 
 const settings = (): KeyboardSettings => ({
-  enabled: true, k2Enabled: true, k3Enabled: true, k4Enabled: true,
+  enabled: true, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true,
   audioDeviceId: null, asrMode: 'streaming',
   asrModel: { providerId: 'provider-1', model: 'streaming-model' }, textModel: null,
   language: '', dictionary: [], beautifyInstruction: '', alwaysOnTop: false, subtitleFontSize: 14,
@@ -13,7 +14,7 @@ const settings = (): KeyboardSettings => ({
 function input(): KeyboardReadinessInput {
   const saved = settings();
   const snapshot = {
-    sequence: 1, cancelGeneration: 0, settings: saved,
+    sequence: 1, cancelGeneration: 0, settings: saved, shortcutState: { registered: 4, detail: null },
     documentId: null, revision: 0, operationId: null, editSessionId: null,
     dictationSelection: null, phase: 'idle' as const, text: '', originalText: '',
     partial: '', candidate: '', visible: false, pendingAction: null, error: null, notice: null,
@@ -41,31 +42,33 @@ function input(): KeyboardReadinessInput {
 }
 
 describe('derived keyboard readiness', () => {
-  test('reports independent hardware and speech prerequisites without requiring text polish', () => {
-    expect(deriveKeyboardReadiness(input())).toEqual({
-      hardwareReady: true, permissionBlocked: false, deviceAvailable: true,
+  test('reports software speech prerequisites without requiring hardware or text polish', () => {
+    const value = input();
+    value.state.device.connected = false; value.state.service.ready = false;
+    expect(deriveKeyboardReadiness(value)).toEqual({
+      shortcutsReady: true, permissionBlocked: false, deviceAvailable: true,
       savedModelAvailable: true, cloudBlockers: [], modelCatalogueEmpty: false,
       platformAlternative: false,
     });
   });
 
-  test.each(['enabled', 'k4Enabled', 'connected', 'policy', 'service'] as const)(
-    'hardware readiness requires %s without blocking an independent cloud test', (gate) => {
+  test.each(['enabled', 'binding', 'registration'] as const)(
+    'shortcut readiness requires %s without blocking an independent cloud test', (gate) => {
       const value = input();
-      if (gate === 'enabled' || gate === 'k4Enabled') value.state.settings[gate] = false;
-      else if (gate === 'connected') value.state.device.connected = false;
-      else if (gate === 'policy') value.state.device.policyState = 'pending';
-      else value.state.service.ready = false;
+      if (gate === 'enabled') value.state.settings.enabled = false;
+      else if (gate === 'binding') value.state.settings.shortcuts.dictate = '';
+      else value.state.shortcutState = { registered: 0, detail: 'conflict' };
       const result = deriveKeyboardReadiness(value);
-      expect(result.hardwareReady).toBe(false);
+      expect(result.shortcutsReady).toBe(false);
       expect(result.cloudBlockers).toEqual([]);
     }
   );
 
-  test('an errored device policy is not applied hardware readiness', () => {
+  test('retired hardware preferences do not prevent software shortcuts', () => {
     const value = input();
+    value.state.settings.k4Enabled = false;
     value.state.device.policyState = 'error';
-    expect(deriveKeyboardReadiness(value).hardwareReady).toBe(false);
+    expect(deriveKeyboardReadiness(value).shortcutsReady).toBe(true);
   });
 
   test.each([

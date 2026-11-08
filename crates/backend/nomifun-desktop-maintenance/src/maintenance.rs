@@ -40,7 +40,7 @@ pub struct StartupAdmission(File);
 pub(crate) struct MaintenanceBusy;
 impl std::fmt::Display for MaintenanceBusy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("NomiFun is being installed or updated; keyboard startup is paused")
+        formatter.write_str("NomiFun is being installed or updated; application startup is paused")
     }
 }
 impl std::error::Error for MaintenanceBusy {}
@@ -124,7 +124,7 @@ impl MaintenanceGuard {
         intent: &mut ResumeIntent,
         mut check: impl FnMut(ResumeIntent) -> Result<()>,
     ) -> Result<Self> {
-        ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid keyboard runtime directory");
+        ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid application maintenance runtime directory");
         let admission = open_lock(&runtime, "maintenance.lock")?;
         let admission_deadline = Instant::now() + wait;
         loop {
@@ -178,7 +178,7 @@ pub fn retire_legacy_service_in(
     wait: Duration,
     mut check: impl FnMut(ResumeIntent) -> Result<()>,
 ) -> Result<LegacyRetirementGuard> {
-    ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid keyboard runtime directory");
+    ensure!(runtime.is_dir() && !runtime.is_symlink(), "invalid application maintenance runtime directory");
     let admission = admit_startup(&runtime)?;
     check(ResumeIntent::capture(&runtime)?)?;
     let desktop = desktop_control::request_at(runtime.clone(), wait)?;

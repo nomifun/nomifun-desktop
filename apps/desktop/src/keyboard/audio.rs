@@ -105,26 +105,6 @@ impl CaptureTiming {
     }
 }
 
-/// Seed CPAL's existing process-wide COM enumerator before the first hold.
-/// This never creates or plays an audio stream. A failed preparation remains
-/// an ordinary startup error when the user later requests the microphone.
-#[cfg(windows)]
-pub fn prepare_runtime() {
-    let spawned = std::thread::Builder::new()
-        .name("nomifun-audio-runtime-prepare".into())
-        .spawn(|| {
-            let started = Instant::now();
-            let success = windows_com::prepare_lifetime().is_ok();
-            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            tracing::info!(target: "nomifun_keyboard", stage = "native_audio_prepare",
-                success, elapsed_ms, "native audio runtime preparation");
-        });
-    if spawned.is_err() {
-        tracing::warn!(target: "nomifun_keyboard", stage = "native_audio_prepare",
-            success = false, "native audio runtime preparation was not scheduled");
-    }
-}
-
 #[derive(Clone, Default)]
 struct FirstInput {
     observed: Arc<AtomicBool>,

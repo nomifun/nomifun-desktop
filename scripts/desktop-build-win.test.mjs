@@ -40,7 +40,7 @@ function nomifun-test-signtool {
   Record-TestCommand 'signtool' $args
   $global:LASTEXITCODE=0
   if ($env:NOMIFUN_TEST_FAIL_SIGN -eq '1' -and $args[0] -eq 'sign') { $global:LASTEXITCODE=7 }
-  if ($env:NOMIFUN_TEST_FAIL_MAINTENANCE_SIGN -eq '1' -and $args[0] -eq 'sign' -and $args[-1].EndsWith('nomifun-keyboard-maintenance.exe')) { $global:LASTEXITCODE=9 }
+  if ($env:NOMIFUN_TEST_FAIL_MAINTENANCE_SIGN -eq '1' -and $args[0] -eq 'sign' -and $args[-1].EndsWith('nomifun-app-maintenance.exe')) { $global:LASTEXITCODE=9 }
 }
 function bun {
   if ($args[0].EndsWith('computer/build-worker.mjs') -or $args[0].EndsWith('computer\\build-worker.mjs')) {
@@ -51,12 +51,12 @@ function bun {
     [IO.File]::WriteAllText($worker,'owned fixture bytes, never an executable')
     $global:LASTEXITCODE=0
     $worker
-  } elseif ($args[0].EndsWith('build-keyboard-maintenance.mjs')) {
+  } elseif ($args[0].EndsWith('build-app-maintenance.mjs')) {
     Record-TestCommand 'maintenance-build' $args
     $profile=$args[-1]
     $directory=Join-Path $global:signTestRoot "target/x86_64-pc-windows-msvc/$profile"
     New-Item -ItemType Directory -Force -Path $directory|Out-Null
-    $maintenance=Join-Path $directory 'nomifun-keyboard-maintenance.exe'
+    $maintenance=Join-Path $directory 'nomifun-app-maintenance.exe'
     [IO.File]::WriteAllText($maintenance,'owned maintenance fixture bytes, never an executable')
     $global:LASTEXITCODE=0
     $maintenance
@@ -110,7 +110,7 @@ describe.skipIf(process.platform !== 'win32')('Windows signing build maintenance
     expect(sign.arguments.slice(0, -1)).toEqual(['sign', '/sha1', 'a'.repeat(40), '/fd', 'SHA256', '/tr', 'https://timestamp.example.invalid/tsa', '/td', 'SHA256']);
     expect(verify.arguments).toEqual(['verify', '/pa', sign.arguments.at(-1)]);
     expect(maintenanceSign.arguments.slice(0, -1)).toEqual(sign.arguments.slice(0, -1));
-    expect(maintenanceSign.arguments.at(-1).endsWith('nomifun-keyboard-maintenance.exe')).toBe(true);
+    expect(maintenanceSign.arguments.at(-1).endsWith('nomifun-app-maintenance.exe')).toBe(true);
     expect(maintenanceVerify.arguments).toEqual(['verify', '/pa', maintenanceSign.arguments.at(-1)]);
     expect(commands.at(-1).extra).toEqual({ certificateThumbprint: 'a'.repeat(40), timestampUrl: 'https://timestamp.example.invalid/tsa', tsp: true });
     expect(collected).toBe(true);
