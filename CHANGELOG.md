@@ -5,6 +5,15 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+## v0.8.22 - 2026-11-10
+
+- Align model selection with consumer capabilities: task, chat speech input
+  and model hub pickers only offer models whose protocols match the
+  consuming feature, and the speech-to-text route resolves defaults the same
+  way.
+- Publish the Windows x64 installer with a signed updater archive. macOS and
+  Linux artifacts are not built for this initial publication.
+
 ## v0.8.21 - 2026-11-09
 
 - Make voice input shortcut-first, with customizable system shortcuts and a
