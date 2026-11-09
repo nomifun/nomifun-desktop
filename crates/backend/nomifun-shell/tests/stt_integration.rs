@@ -38,7 +38,9 @@ async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
         Arc::new(SqliteProviderModelCapabilityRepository::new(pool.clone())),
         Arc::new(SqliteProviderConnectionRepository::new(pool.clone())),
         TEST_KEY,
-        reqwest::Client::new(),
+        // This fixture only contacts its loopback Wiremock server. Host proxy
+        // settings must not reroute it or leave a failed local test unbounded.
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(5)).build().unwrap(),
         AdapterRegistry::new(default_adapters()),
     ));
 
@@ -145,6 +147,26 @@ fn stt_request() -> Request<Body> {
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn stt_rejects_session_and_async_capabilities_without_contacting_provider() {
+    let server = MockServer::start().await;
+    for (platform, auth, model, protocol) in [
+        ("stepfun", "bearer", "stepaudio-2.5-asr-stream", "stepfun.asr_stream"),
+        ("deepgram", "token", "nova-2", "deepgram.listen_stream"),
+        ("ark", "volc_voice", "file-asr", "volc.asr_file"),
+        ("custom", "bearer", "unknown-asr", "unknown.asr"),
+    ] {
+        let (app, pool) = setup().await;
+        let pid = seed_provider(&pool, platform, &server.uri(), auth, model, protocol, true).await;
+        set_speech_pref(&pool, json!({"enabled":true,"provider_id":pid,"model":model})).await;
+        let response = app.oneshot(stt_request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{protocol}");
+        let body = body_json(response).await;
+        assert!(body["error"].as_str().unwrap().contains("synchronous file transcription"), "{protocol}: {body}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------

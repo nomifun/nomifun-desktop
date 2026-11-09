@@ -4,6 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState, type CompositionEvent, typ
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import useSWR from 'swr';
+import { ipcBridge } from '@/common';
 import { keyboard, modelSelectionKey, parseModelSelection, type KeyboardAsrMode, type KeyboardCatalogModel, type KeyboardModel, type KeyboardSelection, type KeyboardSettings as Settings, type KeyboardState, type VoiceKeyboardShortcuts } from '@/common/keyboard';
 import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import { deriveKeyboardReadiness } from './keyboardReadiness';
@@ -34,8 +35,9 @@ type CloudTestRequest = {
   readonly cancelGeneration: number;
 };
 
-function ModelSelect({ models, value, label, disabled, onChange }: {
+function ModelSelect({ models, groups, value, label, disabled, onChange }: {
   models: KeyboardCatalogModel[]; value: KeyboardModel | null; label: string; disabled: boolean;
+  groups?: Array<{ label: string; models: KeyboardCatalogModel[] }>;
   onChange: (model: KeyboardModel | null) => void;
 }) {
   const { t } = useTranslation();
@@ -45,7 +47,11 @@ function ModelSelect({ models, value, label, disabled, onChange }: {
     onChange={(key: string) => onChange(parseModelSelection(key))}>
     <Select.Option value=''>{t('settings.keyboard.noModel')}</Select.Option>
     {missing && <Select.Option value={selected} disabled>{t('settings.keyboard.unavailableModel', { model: value?.model })}</Select.Option>}
-    {models.map((model) => <Select.Option key={modelSelectionKey(model)} value={modelSelectionKey(model)}>
+    {groups ? groups.filter(group => group.models.length).map(group => <Select.OptGroup key={group.label} label={group.label}>
+      {group.models.map(model => <Select.Option key={modelSelectionKey(model)} value={modelSelectionKey(model)}>
+        {model.label}
+      </Select.Option>)}
+    </Select.OptGroup>) : models.map((model) => <Select.Option key={modelSelectionKey(model)} value={modelSelectionKey(model)}>
       {model.label}
     </Select.Option>)}
   </Select>;
@@ -186,6 +192,13 @@ export default function KeyboardSettings() {
     native.available ? 'keyboard-model-catalog' : null, keyboard.getCatalog,
     { revalidateOnFocus: false, shouldRetryOnError: false }
   );
+  useEffect(() => {
+    if (!native.available) return;
+    const refresh = () => { void refreshCatalog().catch(() => undefined); };
+    const stopChanges = ipcBridge.mode.onProvidersChanged.on(refresh);
+    const stopReconnect = ipcBridge.conversation.reconnected.on(refresh);
+    return () => { stopChanges(); stopReconnect(); };
+  }, [native.available, refreshCatalog]);
   const nativeState = native.state;
   const captureOccupied = !!nativeState && (nativeState.capturePreparing || nativeState.phase !== 'idle'
     || !['stopped', 'error'].includes(nativeState.audioState.state) || !nativeState.microphoneTest.stopped);
@@ -266,7 +279,11 @@ export default function KeyboardSettings() {
     else { test.current = null; setCloudResult({ state: 'failed', detail: t('settings.keyboard.cloudStartFailed') }); }
   };
   const asrMode = draft?.asrMode ?? 'streaming';
-  const asrModels = asrMode === 'platform' ? catalog?.platformAsr ?? [] : catalog?.asr ?? [];
+  const asrModelGroups = [
+    { label: t('settings.keyboard.asrModeStreaming'), models: catalog?.asr ?? [] },
+    { label: t('settings.keyboard.asrModePlatform'), models: catalog?.platformAsr ?? [] },
+  ];
+  const asrModels = asrModelGroups.flatMap(group => group.models);
   const change = <K extends keyof Settings>(key: K, value: Settings[K], mode: 'immediate' | 'debounced' = 'immediate') => {
     autosave.change({ [key]: value } as Partial<Settings>, mode);
   };
@@ -275,6 +292,15 @@ export default function KeyboardSettings() {
     const models = mode === 'platform' ? catalog?.platformAsr ?? [] : catalog?.asr ?? [];
     autosave.change({ asrMode: mode,
       asrModel: models.some(model => modelSelectionKey(model) === modelSelectionKey(draft.asrModel)) ? draft.asrModel : null });
+  };
+  const changeAsrModel = (model: KeyboardModel | null) => {
+    if (!draft) return;
+    if (!model) { change('asrModel', null); return; }
+    const key = modelSelectionKey(model);
+    const mode = catalog?.asr.some(candidate => modelSelectionKey(candidate) === key) ? 'streaming'
+      : catalog?.platformAsr.some(candidate => modelSelectionKey(candidate) === key) ? 'platform' : null;
+    // Both mode and exact reference belong to one user choice and one native save.
+    if (mode) autosave.change({ asrMode: mode, asrModel: model });
   };
   const textEvents = (field: 'language' | 'dictionary' | 'beautifyInstruction') => ({
     onBlur: () => { if (field === 'dictionary') setDictionaryEditing(null); void autosave.flush(); },
@@ -369,18 +395,17 @@ export default function KeyboardSettings() {
               {catalogError && <Alert type='error' content={String(catalogError)} />}
               {recognitionBusy && <p className='voice-context-note'>{t('settings.keyboard.recognitionEditingBusy')}</p>}
               {(catalogLoading || !catalog) && <p className='voice-context-note'>{t('settings.keyboard.catalogLoading')}</p>}
-              {readiness.modelCatalogueEmpty && <Alert type='info' content={t(asrMode === 'platform' ? 'settings.keyboard.emptyPlatform' : 'settings.keyboard.emptyStreaming')} />}
-              {readiness.platformAlternative && <p className='voice-context-note'>{t('settings.keyboard.platformAlternative', { mode: t('settings.keyboard.asrModePlatform') })}</p>}
-              <SettingField label={t('settings.keyboard.asrMode')} hint={t(asrMode === 'platform' ? 'settings.keyboard.asrHintPlatform' : 'settings.keyboard.asrHint')}>
+              {readiness.modelCatalogueEmpty && <Alert type='info' content={t('settings.keyboard.emptyAsr')} />}
+              <SettingField label={t('settings.keyboard.asrMode')} hint={t('settings.keyboard.asrModeHint')}>
                 <VisualChoice label={t('settings.keyboard.asrMode')} value={asrMode} disabled={recognitionBusy || catalogLoading || !catalog}
                   options={[
                     { value: 'streaming', label: t('settings.keyboard.asrModeStreaming') },
                     { value: 'platform', label: t('settings.keyboard.asrModePlatform') },
                   ]} onChange={changeAsrMode} />
               </SettingField>
-              <SettingField label={t('settings.keyboard.asrModel')}>
-                <ModelSelect models={asrModels} value={draft.asrModel} label={t('settings.keyboard.asrModel')}
-                  disabled={recognitionBusy || catalogLoading || !catalog} onChange={value => change('asrModel', value)} />
+              <SettingField label={t('settings.keyboard.asrModel')} hint={t('settings.keyboard.asrModelHint')}>
+                <ModelSelect models={asrModels} groups={asrModelGroups} value={draft.asrModel} label={t('settings.keyboard.asrModel')}
+                  disabled={recognitionBusy || catalogLoading || !catalog} onChange={changeAsrModel} />
               </SettingField>
               <details className='voice-disclosure'>
                 <summary><span>{t('settings.keyboard.preferencesTitle')}</span><span className='voice-disclosure__meta'>{t('settings.keyboard.preferencesHint')}</span></summary>

@@ -10,6 +10,7 @@ import type { ICompanionStatus } from '@/common/adapter/ipcBridge';
 import NomiInputNumber from '@/renderer/components/base/NomiInputNumber';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
+import { COMPANION_SPEECH_MODEL_PROTOCOLS } from '@/renderer/hooks/agent/useTaskModelProtocols';
 import CompanionModelControl from '@renderer/pages/nomi/CompanionModelControl';
 import type { CompanionHandle } from '../../types';
 import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
@@ -132,6 +133,7 @@ const ModelsSection: React.FC<ModelsSectionProps> = ({ companion, status, compan
           controls={
             <TaskModelSelect
               task='speech_recognition'
+              requiredProtocols={COMPANION_SPEECH_MODEL_PROTOCOLS}
               value={profile.voice.asr}
               onChange={({ provider_id, model }) =>
                 void patchCompanion({ voice: { asr: { provider_id, model } } })

@@ -19,6 +19,8 @@
 
 `nomifun-model-invoke` 的协议 registry 是 serializer、支持任务、鉴权、endpoint 默认值和可编辑性的来源。模型编辑器通过 `/api/model-protocols` 读取 manifest，不维护第二套协议列表。配置期推荐只有显式保存 capability 后才参与执行；运行时不重新推荐或解析模型名。
 
+消费端的选择范围还须符合实际执行器和传输方式，不能只检查任务标签。共享选择器按同一 manifest 约束已保存协议：文件转写接受同步 HTTP ASR；桌面伙伴接受同步文件 ASR 与其支持的增量语音执行器；语音键盘分别持有流式及录音后识别目录。视觉默认模型的下拉与调用端同时要求图片输入和工具调用能力。手选模型不因一次健康失败消失，自动选择仍使用健康过滤；配置禁用、任务缺失和协议不兼容继续拒绝。协议目录读取失败属于未确定状态，不能据此清空已保存引用。
+
 同一供应商的不同任务可以使用不同域名、命名连接和凭据。`base_url_override` 只覆盖当前任务，`endpoint`、`poll_endpoint`、`content_endpoint` 和 `realtime_endpoint` 分别表达提交、轮询、内容和实时连接。绝对覆盖地址与凭据连接异源时，必须显式允许 `allow_cross_origin_credentials`。协议切换清除旧 transport 覆盖和跨域确认，再应用新 manifest；保留用户参数草稿和限额，不兼容的协议控制在界面及保存时明确报错，交由用户修正。
 
 `provider_params` 使用协议自己的严格编码契约，不能包含凭据或本地 transport 字段；无法无损编码的值在保存时拒绝。响应只暴露 `has_credentials`，不回显秘密。调用图变化原子递增 `config_revision`；解析、异步任务和健康结果使用一致修订，旧探测结果不能覆盖新配置。

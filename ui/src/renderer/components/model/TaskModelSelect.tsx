@@ -7,10 +7,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
-import type { ModelTask, ModelTrait } from '@/common/config/storage';
+import { Button } from '@arco-design/web-react';
+import type { ModelTask, ModelTechnicalCapability, ModelTrait } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
-import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
+import { useModelsForTask, type TaskModelProtocolRequirements } from '@/renderer/hooks/agent/useModelsForTask';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { capabilityOf } from '@/common/utils/providerModels';
@@ -28,6 +29,10 @@ interface TaskModelSelectProps {
   task: ModelTask;
   /** Inputs/search the configured adapter must represent (e.g. `['vision_input']`). */
   traits?: ModelTrait[];
+  /** Technical features the selected runtime requires, such as tool calls. */
+  requiredTechnicalCapabilities?: ModelTechnicalCapability[];
+  /** Execution and transport shapes accepted by this consumer. */
+  requiredProtocols?: TaskModelProtocolRequirements;
   value: TaskModelSelection | null;
   /** Fired only with a complete, live selection. */
   onChange: (next: TaskModelSelection) => void;
@@ -64,6 +69,8 @@ interface TaskModelSelectProps {
 const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   task,
   traits,
+  requiredTechnicalCapabilities,
+  requiredProtocols,
   value,
   onChange,
   scope = 'task',
@@ -78,7 +85,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   layout = 'inline',
 }) => {
   const { t } = useTranslation();
-  const { groups, isLoading } = useModelsForTask(task, traits);
+  const { groups, isLoading, error, refresh } = useModelsForTask(task, traits, requiredTechnicalCapabilities, requiredProtocols);
   const { data: rawProviders } = useProvidersQuery();
   const providerLabel = useModelSelectorProviderLabel();
   const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
@@ -103,7 +110,8 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
 
   const providerId = draftProviderId;
   const selectedModel = value?.provider_id === providerId ? value.model : null;
-  const selectedProvider = state.providers.find((provider) => provider.id === providerId);
+  const selectedProvider = state.providers.find((provider) => provider.id === providerId)
+    ?? (isLoading ? enabledProviders.find(provider => provider.id === providerId) : undefined);
   const speechSynthesisProtocol = selectedModel
     ? capabilityOf(selectedProvider, selectedModel, 'speech_synthesis')?.protocol
     : undefined;
@@ -117,7 +125,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   };
 
   const hint =
-    !state.anyModel && !isLoading
+    error ? '' : !state.anyModel && !isLoading
       ? (emptyHint ?? t('settings.taskModel.emptyHint'))
       : state.providerStale
         ? t('settings.taskModel.staleHint', { model: providerId ?? '' })
@@ -149,11 +157,16 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
           contentFit={!stacked}
           contentMaxWidth={220}
           className={stacked ? 'w-full' : undefined}
-          disabled={disabled}
+          disabled={disabled || isLoading}
           placeholder={t('settings.taskModel.providerPlaceholder')}
           value={providerId ?? undefined}
           onChange={(next: ProviderId) => setDraftProviderId(next)}
         >
+          {isLoading && providerId && !state.providers.some(provider => provider.id === providerId) && (
+            <NomiSelect.Option key={providerId} value={providerId} disabled>
+              {selectedProvider ? providerLabel(selectedProvider) : providerId}
+            </NomiSelect.Option>
+          )}
           {state.providerStale && providerId && (
             <NomiSelect.Option key={providerId} value={providerId} disabled>
               {t('settings.taskModel.unavailableOption', { model: providerId })}
@@ -170,7 +183,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
           contentFit={!stacked}
           contentMaxWidth={280}
           className={stacked ? 'w-full' : undefined}
-          disabled={disabled || providerId == null || state.providerStale}
+          disabled={disabled || isLoading || providerId == null || state.providerStale}
           placeholder={placeholder ?? t('settings.taskModel.modelPlaceholder')}
           value={selectedModel ?? undefined}
           onChange={(model: string) => {
@@ -193,6 +206,11 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
             });
           }}
         >
+          {isLoading && selectedModel && !state.models.includes(selectedModel) && (
+            <NomiSelect.Option key={selectedModel} value={selectedModel} disabled>
+              {displayModelLabel(selectedModel)}
+            </NomiSelect.Option>
+          )}
           {state.modelStale && selectedModel && (
             <NomiSelect.Option key={selectedModel} value={selectedModel} disabled>
               {displayModelLabel(selectedModel)} · {t('settings.taskModel.unavailableOption', { model: selectedModel })}
@@ -212,7 +230,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
             className={stacked ? 'w-full' : undefined}
             showSearch
             allowCreate
-            disabled={disabled || selectedModel == null}
+            disabled={disabled || isLoading || selectedModel == null}
             placeholder={t('settings.taskModel.voicePlaceholder')}
             value={selectedVoice ?? undefined}
             onChange={(voice: string) => {
@@ -228,6 +246,10 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
           </NomiSelect>
         )}
       </div>
+      {error && <div role='alert' className='flex flex-wrap items-center justify-end gap-6px text-11px text-t-secondary'>
+        <span>{t('settings.taskModel.loadFailed')}</span>
+        <Button size='mini' onClick={refresh}>{t('common.retry')}</Button>
+      </div>}
       {!hideHint && hint && <span className='text-11px leading-tight text-t-secondary'>{hint}</span>}
     </div>
   );

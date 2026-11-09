@@ -61,7 +61,6 @@ describe('derived keyboard readiness', () => {
     expect(deriveKeyboardReadiness(value)).toEqual({
       shortcutsReady: true, permissionBlocked: false, deviceAvailable: true,
       savedModelAvailable: true, cloudBlockers: [], modelCatalogueEmpty: false,
-      platformAlternative: false,
     });
   });
 
@@ -164,31 +163,40 @@ describe('derived keyboard readiness', () => {
     expect(deriveKeyboardReadiness(value).cloudBlockers).toEqual(['permission', 'device', 'model', 'saving']);
   });
 
-  test('offers the ordinary ASR alternative for an empty streaming catalogue', () => {
+  test('an empty streaming catalogue still has candidates from standard ASR without making the saved streaming model available', () => {
     const value = input();
     value.catalog!.asr = [];
     const result = deriveKeyboardReadiness(value);
-    expect(result.modelCatalogueEmpty).toBe(true);
-    expect(result.platformAlternative).toBe(true);
+    expect(result.modelCatalogueEmpty).toBe(false);
+    expect(result.savedModelAvailable).toBe(false);
+    expect(result.cloudBlockers).toEqual(['model']);
   });
 
-  test('uses the draft mode for empty catalogue guidance without changing saved readiness', () => {
+  test('an empty standard ASR catalogue still has candidates from streaming without changing saved readiness', () => {
     const value = input();
     value.catalog!.platformAsr = [];
     value.draft.asrMode = 'platform';
     const result = deriveKeyboardReadiness(value);
-    expect(result.modelCatalogueEmpty).toBe(true);
-    expect(result.platformAlternative).toBe(false);
+    expect(result.modelCatalogueEmpty).toBe(false);
     expect(result.savedModelAvailable).toBe(true);
   });
 
-  test('missing catalogue data provides no available model or platform alternative', () => {
+  test('missing catalogue data provides no available model', () => {
     const value = input();
     value.catalog = undefined;
     const result = deriveKeyboardReadiness(value);
     expect(result.modelCatalogueEmpty).toBe(true);
-    expect(result.platformAlternative).toBe(false);
     expect(result.savedModelAvailable).toBe(false);
+  });
+
+  test('the model catalogue is empty only when neither recognition mode has candidates', () => {
+    const value = input();
+    value.catalog!.asr = [];
+    value.catalog!.platformAsr = [];
+    const result = deriveKeyboardReadiness(value);
+    expect(result.modelCatalogueEmpty).toBe(true);
+    expect(result.savedModelAvailable).toBe(false);
+    expect(result.cloudBlockers).toEqual(['model']);
   });
 
   test('does not mutate a user selection or native snapshot while deriving readiness', () => {

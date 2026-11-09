@@ -179,6 +179,7 @@ const GenerationDefaultControl: React.FC<
               <TaskModelSelect
                 task={spec.task}
                 traits={[...spec.traits]}
+                requiredTechnicalCapabilities={[...spec.technical]}
                 size='small'
                 disabled={noCandidates || isSavingDefault}
                 value={defaultModel}

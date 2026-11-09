@@ -1449,6 +1449,7 @@
     "configureLink": "打开 Agent 工作台 →"
   },
   "taskModel": {
+    "loadFailed": "暂时无法读取可用模型，已保留当前选择。请重试。",
     "providerPlaceholder": "选择服务商",
     "modelPlaceholder": "选择模型",
     "voicePlaceholder": "默认音色",
@@ -2173,8 +2174,7 @@
     "asrModePlatform": "录音后识别（普通 ASR）",
     "asrModeHint": "实时模式边录边显示；普通 ASR 在松开后上传完整录音进行识别。",
     "asrModel": "ASR 模型",
-    "asrHint": "仅显示支持实时流式识别的已配置模型。",
-    "asrHintPlatform": "仅显示支持上传完整录音识别的已配置云端模型；此模式不会在录音时显示转写。",
+    "asrModelHint": "按识别方式分组显示模型；选择模型时会同时切换到对应的识别方式。",
     "language": "识别语言",
     "languageHint": "使用供应商支持的语言代码；留空使用模型默认语言。",
     "dictionary": "识别词典",
@@ -2261,9 +2261,7 @@
     "openMicrophoneSettings": "打开麦克风系统设置",
     "inputsLoading": "正在读取输入设备…",
     "catalogLoading": "正在等待模型目录；若无法加载，请刷新重试。",
-    "emptyStreaming": "当前没有已配置的流式 ASR 模型。请在「管理模型」中添加服务商并启用支持实时流式识别的模型。",
-    "emptyPlatform": "当前没有已配置的普通 ASR 模型。请在「管理模型」中添加服务商并启用支持上传音频的 ASR 模型。",
-    "platformAlternative": "已有可用的普通 ASR 模型。可手动选择「{{mode}}」，再选择模型。",
+    "emptyAsr": "当前没有可用的 ASR 模型。请在「管理模型」中添加服务商并启用支持实时流式识别或上传音频识别的模型。",
     "block_permission": "麦克风访问受阻，请检查系统隐私设置。",
     "block_device": "请选择可用的输入设备，或刷新设备列表。",
     "block_model": "请为当前识别模式选择可用的 ASR 模型。",

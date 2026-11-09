@@ -13,6 +13,7 @@ import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import NomiInput from '@/renderer/components/base/NomiInput';
 import { NomiSettingList, NomiSettingRow } from '@/renderer/components/base/NomiSettingLayout';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
+import { FILE_SPEECH_MODEL_PROTOCOLS } from '@/renderer/hooks/agent/useTaskModelProtocols';
 import {
   DEFAULT_SPEECH_TO_TEXT_CONFIG,
   getSpeechToTextConfig,
@@ -102,6 +103,7 @@ const SpeechToTextContent: React.FC = () => {
             controls={
               <TaskModelSelect
                 task='speech_recognition'
+                requiredProtocols={FILE_SPEECH_MODEL_PROTOCOLS}
                 size='mini'
                 hideHint
                 onHintChange={setSourceHint}

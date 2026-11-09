@@ -1412,6 +1412,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_task_catalog_keeps_failed_health_observations_without_weakening_task_gates() {
+        let server = MockServer::start().await;
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        let tasks = r#"["chat","speech_recognition","embedding"]"#;
+        for (name, enabled) in [("healthy", true), ("untested", true), ("failed", true), ("disabled", false)] {
+            seed_model(&pool, &pid, name, tasks, "{}", enabled).await;
+        }
+        seed_model(&pool, &pid, "chat-only", r#"["chat"]"#, "{}", true).await;
+        let revision = provider_revision(&pool, &pid).await;
+        for task in [ModelTask::Chat, ModelTask::SpeechRecognition, ModelTask::Embedding] {
+            let task_key = serde_json::to_value(task).unwrap();
+            for (name, status) in [("healthy", "healthy"), ("failed", "unhealthy"), ("disabled", "healthy")] {
+                assert!(svc.provider_model_capability_repo.set_health(
+                    &pid, revision, name, task_key.as_str().unwrap(),
+                    Some(&json!({"status":status}).to_string()),
+                ).await.unwrap());
+            }
+            let manual = svc.selectable_task_models(task).await.unwrap();
+            let automatic = svc.available_task_models(task).await.unwrap();
+            assert_eq!(manual[0].model, "healthy");
+            assert!(manual.iter().any(|model| model.model == "failed"));
+            assert!(!automatic.iter().any(|model| model.model == "failed"));
+            assert!(manual.iter().any(|model| model.model == "untested"));
+            assert!(!manual.iter().any(|model| model.model == "disabled"));
+            assert_eq!(manual.iter().any(|model| model.model == "chat-only"), task == ModelTask::Chat);
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn shared_model_id_routes_asr_and_tts_through_their_exact_task_protocols() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

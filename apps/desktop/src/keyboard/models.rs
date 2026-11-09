@@ -127,12 +127,12 @@ impl DesktopModels {
             .map_err(|e| e.to_string())?;
         let text = self
             .invoke
-            .available_task_models(ModelTask::Chat)
+            .selectable_task_models(ModelTask::Chat)
             .await
             .map_err(|e| e.to_string())?;
         let platform_asr = self
             .invoke
-            .available_task_models(ModelTask::SpeechRecognition)
+            .selectable_task_models(ModelTask::SpeechRecognition)
             .await
             .map_err(|e| e.to_string())?;
         let mut output = KeyboardModelCatalog {

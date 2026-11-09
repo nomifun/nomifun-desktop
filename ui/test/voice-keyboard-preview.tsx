@@ -21,9 +21,9 @@ import { DEFAULT_THEME_ID, PRESET_THEMES } from '../src/renderer/pages/settings/
 import { processCustomCss } from '../src/renderer/utils/theme/customCssProcessor';
 import { ensureThemeControlContract } from '../src/renderer/utils/theme/themeControlContract';
 
-type Scenario = 'normal' | 'quota' | 'device-busy' | 'save-failed' | 'missing-input';
+type Scenario = 'normal' | 'quota' | 'device-busy' | 'save-failed' | 'missing-input' | 'model-scope';
 type LogEntry = { sequence: number; operation: string; detail: string };
-const scenarios: Scenario[] = ['normal', 'quota', 'device-busy', 'save-failed', 'missing-input'];
+const scenarios: Scenario[] = ['normal', 'quota', 'device-busy', 'save-failed', 'missing-input', 'model-scope'];
 const params = new URLSearchParams(location.search);
 const scenario: Scenario = scenarios.includes(params.get('state') as Scenario) ? params.get('state') as Scenario : 'normal';
 const initialLanguage = params.get('lang') === 'en-US' || params.get('lang') === 'en' ? 'en-US' : 'zh-CN';
@@ -86,8 +86,8 @@ function initialState(): KeyboardState {
     sequence: 1, cancelGeneration: 0, documentId: 'preview-document', revision: 0,
     operationId: null, editSessionId: null, dictationSelection: null,
     settings: { enabled: true, externalKeyboardEnabled: scenario === 'device-busy', shortcuts: { ...defaultVoiceKeyboardShortcuts },
-      k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
-      asrModel: { providerId: 'preview-provider', model: 'preview-live-asr' },
+      k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: scenario === 'model-scope' ? 'platform' : 'streaming',
+      asrModel: scenario === 'model-scope' ? null : { providerId: 'preview-provider', model: 'preview-live-asr' },
       textModel: { providerId: 'preview-provider', model: 'preview-polish' }, language: 'zh', dictionary: [],
       beautifyInstruction: '整理标点和段落，保留原意。', alwaysOnTop: false, subtitleFontSize: 14 },
     phase: 'idle', text: '', originalText: '', partial: '', candidate: '', visible: false,
@@ -120,7 +120,9 @@ keyboard.getState = async () => copy(state);
 keyboard.listen = async callback => { callbacks.add(callback); return () => { callbacks.delete(callback); }; };
 keyboard.listenEditFlush = async () => () => {};
 keyboard.getCatalog = async () => ({
-  asr: [{ providerId: 'preview-provider', model: 'preview-live-asr', label: '模拟实时识别 · Preview live ASR', protocol: 'stepfun.asr_stream' }],
+  asr: scenario === 'model-scope'
+    ? [{ providerId: 'preview-stepfun', model: 'stepaudio-2.5-asr-stream', label: 'StepFun · stepaudio-2.5-asr-stream（模拟目录）', protocol: 'stepfun.asr_stream' }]
+    : [{ providerId: 'preview-provider', model: 'preview-live-asr', label: '模拟实时识别 · Preview live ASR', protocol: 'stepfun.asr_stream' }],
   platformAsr: [{ providerId: 'preview-provider', model: 'preview-file-asr', label: '模拟普通识别 · Preview file ASR', protocol: 'openai.audio_transcriptions' }],
   text: [{ providerId: 'preview-provider', model: 'preview-polish', label: '模拟文字润色 · Preview text model', protocol: 'openai.chat_text' }],
 });
@@ -192,6 +194,8 @@ ipcBridge.systemPermissions.request.invoke = async ({ kind }) => { log('mock per
 ipcBridge.systemPermissions.openSettings.invoke = async ({ kind }) => { log('mock open system settings', kind); };
 ipcBridge.application.applyKeepAwake.invoke = async () => { log('mock keep-awake ignored'); };
 ipcBridge.application.setZoomFactor.invoke = async ({ factor }) => factor;
+ipcBridge.mode.onProvidersChanged.on = () => () => {};
+ipcBridge.conversation.reconnected.on = () => () => {};
 await configService.initialize();
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: initialLanguage, fallbackLng: 'zh-CN',
@@ -229,7 +233,7 @@ function Preview() {
       <label>主题 <select aria-label='Preview theme' value={theme} onChange={event => { void setTheme(event.target.value as 'light' | 'dark'); }}><option value='light'>浅色 / Light</option><option value='dark'>深色 / Dark</option></select></label>
       <label>语言 <select aria-label='Preview language' value={language} onChange={event => { const next = event.target.value; setLanguage(next); void i18n.changeLanguage(next); document.documentElement.lang = next; }}><option value='zh-CN'>中文</option><option value='en-US'>English</option></select></label>
       <label>场景 <select aria-label='Preview scenario' value={scenario} onChange={event => chooseScenario(event.target.value as Scenario)}>
-        <option value='normal'>正常 / Ready</option><option value='quota'>额度不足 / Quota</option><option value='device-busy'>设备占用 / Busy device</option><option value='save-failed'>保存失败 / Save fails on change</option><option value='missing-input'>无输入 / Missing input</option>
+        <option value='normal'>正常 / Ready</option><option value='quota'>额度不足 / Quota</option><option value='device-busy'>设备占用 / Busy device</option><option value='save-failed'>保存失败 / Save fails on change</option><option value='missing-input'>无输入 / Missing input</option><option value='model-scope'>模型范围 / Model scope</option>
       </select></label>
       <button onClick={() => setShowLog(value => !value)} aria-expanded={showLog} aria-controls='voice-preview-log'>操作日志 ({logs.length})</button>
     </div>

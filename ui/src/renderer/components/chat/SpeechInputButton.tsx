@@ -16,8 +16,8 @@ import {
   getSpeechToTextConfig,
   SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT,
 } from '@/renderer/services/speechToTextConfig';
-import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
-import { modelSupportsTask } from '@/common/utils/providerModels';
+import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
+import { FILE_SPEECH_MODEL_PROTOCOLS } from '@/renderer/hooks/agent/useTaskModelProtocols';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 
 type SpeechInputButtonProps = {
@@ -98,7 +98,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
   const { t } = useTranslation();
   const [isSpeechInputEnabled, setIsSpeechInputEnabled] = useState(false);
   const [isConfigLoaded, setIsConfigLoaded] = useState(false);
-  const { data: providers } = useProvidersQuery();
+  const { groups, isLoading: modelsLoading } = useModelsForTask('speech_recognition', undefined, undefined, FILE_SPEECH_MODEL_PROTOCOLS);
   const {
     availability,
     cancel,
@@ -130,17 +130,8 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
 
     const syncSpeechToTextEnabled = async () => {
       const config = getSpeechToTextConfig();
-      const selectedCloudProvider = config.provider_id
-        ? providers?.find((provider) => provider.id === config.provider_id)
-        : undefined;
-      const selectedCloudModel = selectedCloudProvider?.models.find(
-        (model) => model.model === config.model
-      );
-      const referencedCloudModelIsReady = Boolean(
-        selectedCloudProvider &&
-          selectedCloudProvider.enabled !== false &&
-          selectedCloudModel?.enabled &&
-          modelSupportsTask(selectedCloudModel, 'speech_recognition')
+      const referencedCloudModelIsReady = !modelsLoading && groups.some(group =>
+        group.provider.id === config.provider_id && group.models.includes(config.model ?? '')
       );
       const speechEnabled = Boolean(
         config.enabled &&
@@ -165,7 +156,7 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
       cancelled = true;
       window.removeEventListener(SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT, handleConfigChanged);
     };
-  }, [providers]);
+  }, [groups, modelsLoading]);
 
   useEffect(() => {
     if (!errorCode) {

@@ -53,8 +53,9 @@ describe('speech input recording handling', () => {
       new URL('../../components/chat/SpeechInputButton.tsx', import.meta.url)
     );
 
-    expect(button.includes('selectedCloudProvider?.models.find(')).toBe(true);
-    expect(button.includes("modelSupportsTask(selectedCloudModel, 'speech_recognition')")).toBe(true);
+    expect(button.includes("useModelsForTask('speech_recognition', undefined, undefined, FILE_SPEECH_MODEL_PROTOCOLS)")).toBe(true);
+    expect(button.includes('!modelsLoading && groups.some(')).toBe(true);
+    expect(button.includes("group.models.includes(config.model ?? '')")).toBe(true);
     expect(button.includes('legacyCloudConfigIsReady')).toBe(false);
   });
 

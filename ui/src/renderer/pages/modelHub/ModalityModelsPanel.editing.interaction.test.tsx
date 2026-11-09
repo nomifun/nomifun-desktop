@@ -62,12 +62,22 @@ function LocationProbe() {
   return <output data-testid='model-scene-route'>{location.pathname}{location.search}</output>;
 }
 
-function mount(modality: ModalityKey = 'chat', failFirstSave = false, limitedTaskFixture = false) {
+function mount(modality: ModalityKey = 'chat', failFirstSave = false, limitedTaskFixture = false, visionDefault = false) {
   let provider: IProvider = structuredClone(scenarioProvider);
   if (limitedTaskFixture) {
     const task = MODALITY_SPECS[modality].task;
     provider.models[0].capabilities = provider.models[0].capabilities.filter((capability) =>
       capability.task === task || capability.task === (task === 'chat' ? 'speech_recognition' : 'chat'));
+  }
+  if (visionDefault) {
+    const original = provider.models[0];
+    const chat = original.capabilities.find((capability) => capability.task === 'chat')!;
+    provider.models = [
+      { ...structuredClone(original), model: 'vision-tools', enabled: true, display_name: '可调用工具的视觉模型', capabilities: [chat] },
+      { ...structuredClone(original), model: 'vision-no-tools', enabled: true, display_name: '不支持工具的视觉模型', capabilities: [{
+        ...structuredClone(chat), health: { status: 'unknown', unsupported_technical_capabilities: ['function_calling'] },
+      }] },
+    ];
   }
   let notifyProviderChange: (() => void) | undefined;
   const saved: SaveProviderModelRequest[] = [];
@@ -127,7 +137,8 @@ function mount(modality: ModalityKey = 'chat', failFirstSave = false, limitedTas
   const page = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={[route]}>
     <SWRConfig value={{ provider: () => new Map(), fallback, revalidateOnMount: false, dedupingInterval: 0 }}>
       <ThemeProvider><LocationProbe /><ModalityModelsPanel modality={modality}
-        titleKey='settings.modelHub.title' subtitleKey='settings.modelHub.subtitle' /></ThemeProvider>
+        titleKey='settings.modelHub.title' subtitleKey='settings.modelHub.subtitle'
+        defaultModelPreferenceKey={visionDefault ? 'models.default.vision' : undefined} /></ThemeProvider>
     </SWRConfig>
   </MemoryRouter></I18nextProvider>);
 
@@ -162,6 +173,17 @@ const effectiveRequest = (request: SaveProviderModelRequest) => normalizeWire({
 });
 
 describe('editing models from task-specific model management pages', () => {
+  test('the vision default picker excludes models known to lack required tool calls while management keeps them visible', async () => {
+    const { page } = mount('vision', false, false, true);
+    expect(page.getByText('不支持工具的视觉模型')).toBeTruthy();
+    const selects = page.getAllByRole('combobox');
+    fireEvent.click(selects[0]);
+    fireEvent.click(await page.findByRole('option', { name: scenarioProvider.name }));
+    fireEvent.click(selects[1]);
+    expect(await page.findByRole('option', { name: '可调用工具的视觉模型' })).toBeTruthy();
+    expect(page.queryByRole('option', { name: '不支持工具的视觉模型' })).toBeNull();
+  });
+
   test.each(Object.entries(MODALITY_SPECS) as Array<[ModalityKey, (typeof MODALITY_SPECS)[ModalityKey]]>)(
     '%s opens the shared editor for the current task without navigating to providers', async (modality, spec) => {
       const { page, open, saved, currentRoute, route } = mount(modality, false, true);

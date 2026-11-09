@@ -8,13 +8,23 @@
 
 use std::sync::Arc;
 
-use nomifun_api_types::SpeechToTextResult;
+use nomifun_api_types::{ModelTask, SpeechToTextResult};
 use nomifun_model_invoke::{
     AsrRequest, InputAsset, InvokeError, InvokeErrorKind, ModelInvokeService, ModelRef,
     TaskOutcome, TaskRequest, TaskResult,
 };
 
 use crate::error::SttError;
+
+/// The file endpoint returns one immediate transcript. Session protocols and
+/// asynchronous jobs have separate owners, even when they share the ASR task.
+pub(crate) fn is_file_stt_protocol(protocol: &str) -> bool {
+    nomifun_model_invoke::protocol_task_descriptor(protocol, ModelTask::SpeechRecognition)
+        .is_some_and(|descriptor| {
+            descriptor.executor == nomifun_model_invoke::ProtocolExecutorKind::ModelInvoke
+                && descriptor.transport == nomifun_model_invoke::ProtocolTransportKind::Http
+        })
+}
 
 /// A validated cloud speech-recognition selection: the catalog coordinates
 /// the invoke layer resolves (provider row + model name) plus the display
@@ -67,6 +77,13 @@ impl SttService {
 
         let model_ref =
             ModelRef { provider_id: route.provider_id.clone(), model: route.model.clone() };
+        let resolved = invoke.resolve_task_config(&model_ref, ModelTask::SpeechRecognition)
+            .await.map_err(stt_error_from_invoke)?;
+        if !is_file_stt_protocol(&resolved.protocol) {
+            return Err(SttError::Unknown(
+                "selected speech model must support synchronous file transcription; streaming sessions and asynchronous jobs cannot be used by this input".into(),
+            ));
+        }
         let request = TaskRequest::SpeechRecognition(AsrRequest {
             audio: InputAsset {
                 id: None,
@@ -79,7 +96,8 @@ impl SttService {
             extra: serde_json::json!({}),
         });
 
-        let outcome = invoke.invoke(&model_ref, request).await.map_err(stt_error_from_invoke)?;
+        let (outcome, _) = invoke.invoke_with_context_at_task_configuration(&model_ref, &resolved, request)
+            .await.map_err(stt_error_from_invoke)?;
         let TaskOutcome::Done(TaskResult::Transcript {
             text,
             language: transcript_language,

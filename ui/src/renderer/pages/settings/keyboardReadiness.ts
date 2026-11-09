@@ -20,7 +20,6 @@ export interface KeyboardReadiness {
   savedModelAvailable: boolean;
   cloudBlockers: KeyboardCloudBlocker[];
   modelCatalogueEmpty: boolean;
-  platformAlternative: boolean;
 }
 
 export function deriveKeyboardReadiness({
@@ -36,8 +35,7 @@ export function deriveKeyboardReadiness({
   const savedModels = saved.asrMode === 'platform' ? catalog?.platformAsr : catalog?.asr;
   const savedModelAvailable = Boolean(savedModel && savedModels?.some((model) =>
     model.providerId === savedModel.providerId && model.model === savedModel.model));
-  const draftModels = draft.asrMode === 'platform' ? catalog?.platformAsr : catalog?.asr;
-  const modelCatalogueEmpty = !draftModels?.length;
+  const modelCatalogueEmpty = !catalog?.asr.length && !catalog?.platformAsr.length;
   const cloudBlockers: KeyboardCloudBlocker[] = [];
   if (permissionBlocked) cloudBlockers.push('permission');
   if (!deviceAvailable || !deviceIsAvailable(saved.audioDeviceId)) cloudBlockers.push('device');
@@ -52,6 +50,5 @@ export function deriveKeyboardReadiness({
     savedModelAvailable,
     cloudBlockers,
     modelCatalogueEmpty,
-    platformAlternative: draft.asrMode === 'streaming' && modelCatalogueEmpty && Boolean(catalog?.platformAsr.length),
   };
 }

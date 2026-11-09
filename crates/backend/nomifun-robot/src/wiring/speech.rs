@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use nomifun_api_types::{
     SpeechToTextConfig, TEXT_TO_SPEECH_PREFERENCE_KEY, TextToSpeechConfig,
 };
-use nomifun_model_invoke::ModelInvokeService;
+use nomifun_model_invoke::{ModelInvokeService, ProtocolExecutorKind, ProtocolTransportKind, protocol_task_descriptor};
 use nomifun_model_invoke::types::{
     AsrRequest, InputAsset, ModelRef, ProducedData, TaskOutcome, TaskRequest, TaskResult,
     TtsRequest,
@@ -31,6 +31,20 @@ use crate::services::{SpeechAudioStream, SpeechCapabilities, SpeechContext, Spee
 pub const VISION_TIMEOUT_SECS: u64 = 25;
 /// The install-wide speech-recognition preference key.
 const SPEECH_TO_TEXT_PREFERENCE_KEY: &str = "tools.speechToText";
+
+/// Only this speech executor's registered incremental protocol or a synchronous
+/// file adapter can serve a companion. Another session owner is not batch ASR.
+fn asr_is_incremental(protocol: &str) -> anyhow::Result<bool> {
+    if nomifun_model_invoke::voice::speech::protocol_capabilities(protocol).incremental_asr {
+        return Ok(true);
+    }
+    if protocol_task_descriptor(protocol, nomifun_api_types::ModelTask::SpeechRecognition)
+        .is_some_and(|descriptor| descriptor.executor == ProtocolExecutorKind::ModelInvoke
+            && descriptor.transport == ProtocolTransportKind::Http) {
+        return Ok(false);
+    }
+    anyhow::bail!("selected speech-recognition protocol is unavailable for companion speech; select a synchronous file model or a supported incremental speech model")
+}
 
 /// Read a global client preference.
 #[async_trait::async_trait]
@@ -160,7 +174,10 @@ impl RobotSpeech {
 impl SpeechServices for RobotSpeech {
     async fn capabilities(&self, ctx: &SpeechContext) -> anyhow::Result<SpeechCapabilities> {
         let incremental_asr = match self.asr_model(&ctx.companion_id).await {
-            Some(model) => self.invoke.speech_protocol_capabilities(&model, nomifun_api_types::ModelTask::SpeechRecognition).await?.incremental_asr,
+            Some(model) => {
+                let config = self.invoke.resolve_task_config(&model, nomifun_api_types::ModelTask::SpeechRecognition).await?;
+                asr_is_incremental(&config.protocol)?
+            },
             None => false,
         };
         let streaming_tts = match self.tts_model(&ctx.companion_id).await {
@@ -172,6 +189,8 @@ impl SpeechServices for RobotSpeech {
 
     async fn open_transcription(&self, ctx: &SpeechContext, sample_rate: u32) -> anyhow::Result<Option<TranscriptionSession>> {
         let Some(model) = self.asr_model(&ctx.companion_id).await else { return Ok(None) };
+        let config = self.invoke.resolve_task_config(&model, nomifun_api_types::ModelTask::SpeechRecognition).await?;
+        if !asr_is_incremental(&config.protocol)? { return Ok(None); }
         Ok(self.invoke.open_streaming_transcription(&model, sample_rate, None).await?)
     }
 
@@ -200,15 +219,12 @@ impl SpeechServices for RobotSpeech {
     }
 
     async fn transcribe(&self, ctx: &SpeechContext, wav: Vec<u8>) -> anyhow::Result<String> {
-        let global = self
-            .prefs
-            .get(SPEECH_TO_TEXT_PREFERENCE_KEY)
-            .await
-            .as_ref()
-            .and_then(parse_global_asr);
-        let (provider_id, model) =
-            pick_model(self.slots.asr_slot(&ctx.companion_id).await, global)
-                .ok_or_else(|| anyhow::anyhow!("no speech-recognition model configured"))?;
+        let model = self.asr_model(&ctx.companion_id).await
+            .ok_or_else(|| anyhow::anyhow!("no speech-recognition model configured"))?;
+        let config = self.invoke.resolve_task_config(&model, nomifun_api_types::ModelTask::SpeechRecognition).await?;
+        if asr_is_incremental(&config.protocol)? {
+            anyhow::bail!("selected speech model requires incremental transcription and cannot accept a complete file")
+        }
 
         let request = TaskRequest::SpeechRecognition(AsrRequest {
             audio: InputAsset {
@@ -221,9 +237,9 @@ impl SpeechServices for RobotSpeech {
             prompt: None,
             extra: Value::Object(Default::default()),
         });
-        let outcome = self
+        let (outcome, _) = self
             .invoke
-            .invoke(&ModelRef { provider_id, model }, request)
+            .invoke_with_context_at_task_configuration(&model, &config, request)
             .await?;
         match outcome {
             TaskOutcome::Done(TaskResult::Transcript { text, .. }) => Ok(text),
@@ -319,6 +335,17 @@ impl SpeechServices for RobotSpeech {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn asr_delivery_rejects_other_session_owners_and_async_jobs() {
+        assert!(asr_is_incremental("deepgram.listen_stream").unwrap());
+        for protocol in ["openai.audio_transcriptions", "stepfun.asr_sse", "deepgram.listen"] {
+            assert!(!asr_is_incremental(protocol).unwrap(), "{protocol}");
+        }
+        for protocol in ["stepfun.asr_stream", "openai.realtime_transcription", "volc.asr_file", "unknown.asr"] {
+            assert!(asr_is_incremental(protocol).is_err(), "{protocol}");
+        }
+    }
 
     #[test]
     fn asr_prefers_the_companion_slot_over_the_global_preference() {

@@ -323,17 +323,17 @@ async fn resolve_cloud_speech_to_text_config(
         .model
         .clone()
         .ok_or_else(|| SttError::Unknown("selected speech provider has no selected speech model".into()))?;
-    let model_is_available = provider.models.iter().any(|candidate| {
+    let selected_capability = provider.models.iter().find(|candidate| {
         candidate.model == model
             && candidate.enabled
-            && candidate
-                .capabilities
-                .iter()
-                .any(|capability| capability.task == nomifun_api_types::ModelTask::SpeechRecognition)
-    });
-    if !model_is_available {
-        return Err(SttError::Unknown(
+    }).and_then(|candidate| candidate.capabilities.iter()
+        .find(|capability| capability.task == nomifun_api_types::ModelTask::SpeechRecognition));
+    let selected_capability = selected_capability.ok_or_else(|| SttError::Unknown(
             "selected speech model was not found, is disabled, or has no speech-recognition capability".into(),
+        ))?;
+    if !crate::stt::is_file_stt_protocol(&selected_capability.protocol) {
+        return Err(SttError::Unknown(
+            "selected speech model must support synchronous file transcription; streaming sessions and asynchronous jobs cannot be used by this input".into(),
         ));
     }
     let language = config.language.clone().filter(|value| !value.trim().is_empty());

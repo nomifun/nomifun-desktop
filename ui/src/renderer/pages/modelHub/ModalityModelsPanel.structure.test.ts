@@ -63,6 +63,7 @@ describe('modality panel', () => {
     // remain visible. Only the task-specific default picker asks for runnable models.
     expect(panel.includes('useModelsForTask(')).toBe(true);
     expect(panel.includes('[...spec.technical]')).toBe(true);
+    expect(panel.includes('requiredTechnicalCapabilities={[...spec.technical]}')).toBe(true);
     expect(panel.includes('modelDisabled')).toBe(true);
   });
 

@@ -1449,6 +1449,7 @@
     "configureLink": "Open Agent Workbench →"
   },
   "taskModel": {
+    "loadFailed": "Available models could not be loaded. Your selection is preserved. Please retry.",
     "providerPlaceholder": "Pick a provider",
     "modelPlaceholder": "Pick a model",
     "voicePlaceholder": "Default voice",
@@ -2173,8 +2174,7 @@
     "asrModePlatform": "Recognize after recording (standard ASR)",
     "asrModeHint": "Streaming shows text while recording. Standard ASR uploads the completed recording after release.",
     "asrModel": "ASR model",
-    "asrHint": "Only configured models that support live streaming recognition are listed.",
-    "asrHintPlatform": "Only configured cloud models that accept completed audio uploads are listed. This mode does not show live transcription.",
+    "asrModelHint": "Models are grouped by recognition mode. Choosing a model also selects its recognition mode.",
     "language": "Recognition language",
     "languageHint": "Use a language code supported by the provider. Leave empty for the model default.",
     "dictionary": "Recognition dictionary",
@@ -2261,9 +2261,7 @@
     "openMicrophoneSettings": "Open microphone settings",
     "inputsLoading": "Reading input devices…",
     "catalogLoading": "Waiting for the model catalog; refresh if it cannot be loaded.",
-    "emptyStreaming": "No configured live streaming ASR models are available. Add a provider and enable a streaming-capable model in Manage models.",
-    "emptyPlatform": "No configured standard ASR models are available. Add a provider and enable an audio-upload ASR model in Manage models.",
-    "platformAlternative": "Configured standard ASR models are available. You can choose {{mode}}, then select a model.",
+    "emptyAsr": "No configured ASR models are available. Add a provider and enable a live streaming or audio-upload ASR model in Manage models.",
     "block_permission": "Microphone access is blocked. Review system privacy settings.",
     "block_device": "Choose an available input or refresh the device list.",
     "block_model": "Choose an available ASR model for the selected recognition mode.",

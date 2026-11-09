@@ -50,6 +50,18 @@ impl ModelInvokeService {
     /// healthy before untested, then provider priority and model priority.
     /// No network request or credential material is returned.
     pub async fn available_task_models(&self, task: ModelTask) -> Result<Vec<ModelRef>, InvokeError> {
+        self.task_model_candidates(task, false).await
+    }
+
+    /// Locally valid models for an explicit user selection. A failed health
+    /// observation is advisory here: transient network, quota or auth failures
+    /// must not remove a saved model from a manual selector. Automatic routing
+    /// continues to exclude unhealthy models through `available_task_models`.
+    pub async fn selectable_task_models(&self, task: ModelTask) -> Result<Vec<ModelRef>, InvokeError> {
+        self.task_model_candidates(task, true).await
+    }
+
+    async fn task_model_candidates(&self, task: ModelTask, include_unhealthy: bool) -> Result<Vec<ModelRef>, InvokeError> {
         let capabilities = self.provider_model_capability_repo.list().await.map_err(|error| InvokeError::config(error.to_string()))?;
         let task_key = serde_json::to_value(task).expect("ModelTask is serializable");
         let mut candidates = Vec::new();
@@ -59,7 +71,7 @@ impl ModelInvokeService {
                 .and_then(|value| serde_json::from_str::<CapabilityHealth>(value).ok())
                 .map(|health| health.status)
                 .unwrap_or(HealthStatus::Unknown);
-            if health == HealthStatus::Unhealthy { continue; }
+            if !include_unhealthy && health == HealthStatus::Unhealthy { continue; }
             let model = ModelRef { provider_id: capability.provider_id, model: capability.model };
             // Text creation uses the native Agent Chat executor. Chat has no
             // one-shot TaskRequest/adapter, so validate its exact transport

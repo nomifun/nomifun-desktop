@@ -28,11 +28,12 @@ const failoverContent = readFileSync(
 
 describe('TaskModelSelect', () => {
   test('reads the catalog through the one shared hook and the one shared decision', () => {
-    expect(src.includes('useModelsForTask(task, traits)')).toBe(true);
+    expect(src.includes('useModelsForTask(task, traits, requiredTechnicalCapabilities, requiredProtocols)')).toBe(true);
     expect(src.includes('taskModelSelectState({')).toBe(true);
     // No local re-derivation of staleness: that is exactly the drift this
     // component exists to remove.
-    expect(src.includes('.includes(selectedModel)')).toBe(false);
+    expect(src.includes('const modelStale')).toBe(false);
+    expect(src.includes('const providerStale')).toBe(false);
   });
 
   test('a stale provider and a stale model are both rendered as disabled options', () => {

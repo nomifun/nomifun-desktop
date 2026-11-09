@@ -199,6 +199,28 @@ fn wave() -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn keyboard_catalog_keeps_both_asr_modes_after_a_failed_health_check() {
+    let (models, file, live) = fixture(
+        "http://127.0.0.1:1/v1",
+        AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
+    ).await;
+    for selection in [&file, &live] {
+        let config = models.invoke.resolve_task_config(&selection.model_ref(), ModelTask::SpeechRecognition).await.unwrap();
+        assert!(models.invoke.provider_model_capability_repo().set_health(
+            &selection.provider_id, config.config_revision, &selection.model,
+            "speech_recognition", Some(r#"{"status":"unhealthy","http_status":402}"#),
+        ).await.unwrap());
+    }
+    let catalog = models.catalog().await.unwrap();
+    assert_eq!(catalog.asr.len(), 1);
+    assert_eq!(catalog.asr[0].model, live.model);
+    assert_eq!(catalog.asr[0].protocol, "stepfun.asr_stream");
+    assert_eq!(catalog.platform_asr.len(), 1);
+    assert_eq!(catalog.platform_asr[0].model, file.model);
+    assert_eq!(catalog.platform_asr[0].protocol, "stepfun.asr_sse");
+}
+
+#[tokio::test]
 async fn platform_upload_preserves_config_and_rejects_failure_cancel_and_late_result() {
     use axum::{
         Json, Router,

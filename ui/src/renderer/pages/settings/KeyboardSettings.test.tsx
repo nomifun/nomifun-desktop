@@ -7,6 +7,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { ipcBridge } from '@/common';
+import { parseProviderId } from '@/common/types/ids';
 import type { SystemPermissionState, SystemPermissionStatus } from '@/common/adapter/ipcBridge';
 import { keyboard, type KeyboardActionRequest, type KeyboardSettings as Settings, type KeyboardState } from '@/common/keyboard';
 import en from '@/renderer/services/i18n/locales/en-US/settings.json';
@@ -16,7 +17,9 @@ const original = { ...keyboard };
 let permissionState: SystemPermissionState;
 let permissionRequests: string[];
 let openedPermissions: string[];
-let permissionMocks: Array<{ mockRestore: () => void }>;
+let bridgeMocks: Array<{ mockRestore: () => void }>;
+let providerChanges: Set<() => void>;
+let reconnects: Set<() => void>;
 const permissionStatus = (): SystemPermissionStatus => ({ platform: 'macos', app_label: 'NomiFun', permissions: [{ kind: 'microphone', state: permissionState, can_request: permissionState === 'not_determined', can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] }] });
 const deferred = <T,>() => { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 const idleMicrophone = { id: null, deviceId: null, state: 'idle' as const, callbackObserved: false, samples: 0, nonzero: 0, peak: 0, rms: 0, elapsedMs: 0, stopped: true, detail: null };
@@ -27,10 +30,19 @@ let updates: Settings[];
 let listener: ((state: KeyboardState) => void) | undefined;
 beforeEach(() => {
   permissionState = 'granted'; permissionRequests = []; openedPermissions = [];
-  permissionMocks = [
+  providerChanges = new Set(); reconnects = new Set();
+  bridgeMocks = [
     spyOn(ipcBridge.systemPermissions.get, 'invoke').mockImplementation(async () => permissionStatus()),
     spyOn(ipcBridge.systemPermissions.request, 'invoke').mockImplementation(async ({ kind }) => { permissionRequests.push(kind); permissionState = 'granted'; return permissionStatus(); }),
     spyOn(ipcBridge.systemPermissions.openSettings, 'invoke').mockImplementation(async ({ kind }) => { openedPermissions.push(kind); }),
+    spyOn(ipcBridge.mode.onProvidersChanged, 'on').mockImplementation(callback => {
+      const notify = () => callback({ provider_id: parseProviderId('0190f5fe-7c00-7a00-8000-000000000001') });
+      providerChanges.add(notify); return () => { providerChanges.delete(notify); };
+    }),
+    spyOn(ipcBridge.conversation.reconnected, 'on').mockImplementation(callback => {
+      const notify = () => callback();
+      reconnects.add(notify); return () => { reconnects.delete(notify); };
+    }),
   ];
   current = {
     settings: { enabled: true, externalKeyboardEnabled: false, shortcuts: { ...defaultVoiceKeyboardShortcuts }, k2Enabled: true, k3Enabled: true, k4Enabled: true, audioDeviceId: null, asrMode: 'streaming',
@@ -58,7 +70,7 @@ beforeEach(() => {
   keyboard.action = async (request) => { actions.push(request); return current; };
   keyboard.updateSettings = async (settings) => { updates.push(settings); current = { ...current, sequence: current.sequence + 1, settings }; return current; };
 });
-afterEach(() => { cleanup(); permissionMocks.forEach(mock => mock.mockRestore()); Object.assign(keyboard, original); });
+afterEach(() => { cleanup(); bridgeMocks.forEach(mock => mock.mockRestore()); Object.assign(keyboard, original); });
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { settings: { keyboard: en.keyboard } } } } });
 const tabLabels = { voice: en.keyboard.tabVoice, input: en.keyboard.tabInput,
@@ -92,6 +104,40 @@ const editShortcut = async (label: string) => {
 };
 
 describe('system microphone keyboard settings', () => {
+  test.each(['provider change', 'reconnect'] as const)('%s refreshes a newly configured streaming model without changing the recognition mode', async event => {
+    current.settings.asrModel = null;
+    let catalog = { asr: [] as Array<{ providerId: string; model: string; label: string; protocol: string }>, platformAsr: [], text: [] };
+    let reads = 0;
+    keyboard.getCatalog = async () => { reads++; return catalog; };
+    const page = await show();
+    await waitFor(() => expect(reads).toBe(1));
+    catalog = { ...catalog, asr: [{ providerId: 'stepfun-provider', model: 'stepaudio-2.5-asr-stream', label: 'StepFun · stepaudio-2.5-asr-stream', protocol: 'stepfun.asr_stream' }] };
+    await act(async () => { for (const notify of event === 'provider change' ? providerChanges : reconnects) notify(); });
+    await waitFor(() => expect(reads).toBe(2));
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+    fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
+    fireEvent.click(await screen.findByText('StepFun · stepaudio-2.5-asr-stream'));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].asrMode).toBe('streaming');
+    expect(updates[0].asrModel).toEqual({ providerId: 'stepfun-provider', model: 'stepaudio-2.5-asr-stream' });
+    page.unmount();
+    expect(providerChanges.size).toBe(0); expect(reconnects.size).toBe(0);
+  });
+
+  test('a disabled or deleted model disappears after a provider change while its saved reference is preserved', async () => {
+    let catalog = await keyboard.getCatalog();
+    let reads = 0;
+    keyboard.getCatalog = async () => { reads++; return catalog; };
+    await show();
+    await screen.findByText('Streaming model');
+    catalog = { ...catalog, asr: [] };
+    await act(async () => { for (const notify of providerChanges) notify(); });
+    await waitFor(() => expect(reads).toBe(2));
+    expect(screen.getByRole('combobox', { name: 'ASR model' }).textContent).toContain('streaming-model (currently unavailable)');
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+    expect(current.settings.asrModel).toEqual({ providerId: 'provider-1', model: 'streaming-model' });
+  });
+
   test('the default recognition pane explains a missing input before entering diagnostics', async () => {
     keyboard.getAudioDevices = async () => [];
     await show();
@@ -574,10 +620,10 @@ describe('system microphone keyboard settings', () => {
     expect(updates[0]).not.toHaveProperty('launchAtLogin');
   });
 
-  test('switching to standard ASR filters models, clears an incompatible reference and saves the explicit mode', async () => {
+  test('switching to standard ASR clears an incompatible reference and keeps both model groups discoverable', async () => {
     await show('voice');
     fireEvent.click(await screen.findByRole('radio', { name: en.keyboard.asrModePlatform }));
-    await screen.findByText('Only configured cloud models that accept completed audio uploads are listed. This mode does not show live transcription.');
+    await screen.findByText(en.keyboard.asrModeHint);
     await visitTab('diagnostics');
     expect(screen.getByRole('button', { name: 'Test cloud transcription' }).hasAttribute('disabled')).toBe(true);
     await waitFor(() => expect(updates).toHaveLength(1));
@@ -585,7 +631,7 @@ describe('system microphone keyboard settings', () => {
     await visitTab('voice');
     fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
     const fileModel = await screen.findByText('File recognition model');
-    expect(screen.queryByText('Streaming model')).toBeNull();
+    expect(screen.getByText('Streaming model')).toBeTruthy();
     fireEvent.click(fileModel);
     await waitFor(() => expect(updates).toHaveLength(2));
     expect(updates[1].asrMode).toBe('platform');
@@ -596,7 +642,7 @@ describe('system microphone keyboard settings', () => {
     await waitFor(() => expect(actions).toEqual([{ action: 'test_start' }]));
   });
 
-  test('switching back to streaming requires a streaming-capable model', async () => {
+  test('switching back to streaming clears an incompatible reference and keeps both model groups discoverable', async () => {
     current.settings.asrMode = 'platform';
     current.settings.asrModel = { providerId: 'provider-1', model: 'file-model' };
     await show('voice');
@@ -605,11 +651,34 @@ describe('system microphone keyboard settings', () => {
     expect(updates[0].asrMode).toBe('streaming'); expect(updates[0].asrModel).toBeNull();
     fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
     const streamingModel = await screen.findByText('Streaming model');
-    expect(screen.queryByText('File recognition model')).toBeNull();
+    expect(screen.getByText('File recognition model')).toBeTruthy();
     fireEvent.click(streamingModel);
     await waitFor(() => expect(updates).toHaveLength(2));
     expect(updates[1].asrMode).toBe('streaming');
     expect(updates[1].asrModel).toEqual({ providerId: 'provider-1', model: 'streaming-model' });
+  });
+
+  test.each(['streaming', 'platform'] as const)('choosing a model from the other mode while %s is active saves its exact reference and mode together', async mode => {
+    current.settings.asrMode = mode;
+    current.settings.asrModel = null;
+    keyboard.getCatalog = async () => ({
+      asr: [{ providerId: 'stepfun-provider', model: 'stepaudio-2.5-asr-stream', label: 'StepFun · stepaudio-2.5-asr-stream', protocol: 'stepfun.asr_stream' }],
+      platformAsr: [{ providerId: 'file-provider', model: 'file-model', label: 'File recognition model', protocol: 'stepfun.asr_sse' }], text: [],
+    });
+    await show();
+    await screen.findByText(en.keyboard.asrModelHint);
+    fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
+    const streaming = await screen.findByText('StepFun · stepaudio-2.5-asr-stream');
+    const standard = screen.getByText('File recognition model');
+    expect(updates).toHaveLength(0); expect(actions).toHaveLength(0);
+    fireEvent.click(mode === 'platform' ? streaming : standard);
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].asrMode).toBe(mode === 'platform' ? 'streaming' : 'platform');
+    expect(updates[0].asrModel).toEqual(mode === 'platform'
+      ? { providerId: 'stepfun-provider', model: 'stepaudio-2.5-asr-stream' }
+      : { providerId: 'file-provider', model: 'file-model' });
+    expect(screen.getByRole('radio', { name: mode === 'platform' ? en.keyboard.asrModeStreaming : en.keyboard.asrModePlatform }).getAttribute('aria-checked')).toBe('true');
+    expect(actions).toHaveLength(0);
   });
 
   test('subtitle font loads without writes and a changed selection saves automatically', async () => {
@@ -793,13 +862,26 @@ describe('system microphone keyboard settings', () => {
     expect(within(screen.getByRole('region', { name: 'Cloud transcription test' })).queryByText(message)).toBeNull();
   });
 
-  test('an empty streaming catalogue offers an ordinary ASR choice without changing the saved mode', async () => {
+  test.each(['streaming', 'platform'] as const)('an empty %s catalogue offers the other mode below without asking for another model configuration', async mode => {
+    current.settings.asrMode = mode;
     current.settings.asrModel = null;
-    keyboard.getCatalog = async () => ({ asr: [], platformAsr: [{ providerId: 'provider-1', model: 'file-model', label: 'File recognition model', protocol: 'upload' }], text: [] });
+    keyboard.getCatalog = async () => ({
+      asr: mode === 'platform' ? [{ providerId: 'provider-1', model: 'streaming-model', label: 'Streaming model', protocol: 'streaming' }] : [],
+      platformAsr: mode === 'streaming' ? [{ providerId: 'provider-1', model: 'file-model', label: 'File recognition model', protocol: 'upload' }] : [], text: [],
+    });
     await show('voice');
-    await screen.findByText('Configured standard ASR models are available. You can choose Recognize after recording (standard ASR), then select a model.');
-    expect(current.settings.asrMode).toBe('streaming'); expect(current.settings.asrModel).toBeNull(); expect(updates).toHaveLength(0);
-    expect(screen.getByRole('radio', { name: en.keyboard.asrModeStreaming }).getAttribute('aria-checked')).toBe('true');
+    await screen.findByText(en.keyboard.asrModelHint);
+    expect(screen.queryByText(en.keyboard.emptyAsr)).toBeNull();
+    expect(current.settings.asrMode).toBe(mode); expect(current.settings.asrModel).toBeNull(); expect(updates).toHaveLength(0);
+    await visitTab('diagnostics');
+    expect(screen.getByRole('button', { name: en.keyboard.testStart }).hasAttribute('disabled')).toBe(true);
+    await visitTab('voice');
+    fireEvent.click(screen.getByRole('combobox', { name: 'ASR model' }));
+    fireEvent.click(await screen.findByText(mode === 'platform' ? 'Streaming model' : 'File recognition model'));
+    await waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0].asrMode).toBe(mode === 'platform' ? 'streaming' : 'platform');
+    expect(updates[0].asrModel).toEqual({ providerId: 'provider-1', model: mode === 'platform' ? 'streaming-model' : 'file-model' });
+    expect(actions).toHaveLength(0);
   });
 
   test('a rejected local start reply preserves stop ownership after a native listening event', async () => {
