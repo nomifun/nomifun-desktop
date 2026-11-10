@@ -11,8 +11,9 @@ notes at a high level rather than a complete historical log.
   and model hub pickers only offer models whose protocols match the
   consuming feature, and the speech-to-text route resolves defaults the same
   way.
-- Publish the Windows x64 installer with a signed updater archive. macOS and
-  Linux artifacts are not built for this initial publication.
+- Add Developer ID signed and notarized Apple Silicon and Intel macOS
+  installers and signed updater archives alongside the Windows x64 release.
+- Preserve the existing Linux artifacts and updater entries without rebuilding.
 
 ## v0.8.21 - 2026-11-09
 
